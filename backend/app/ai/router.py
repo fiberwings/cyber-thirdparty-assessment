@@ -15,6 +15,7 @@ Profiles:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -67,7 +68,23 @@ def _hash_prompt(messages: list[dict[str, Any]]) -> str:
 
 
 class OpenRouterError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        transient: bool = False,
+        upstream_code: int | None = None,
+        truncated: bool = False,
+    ):
+        super().__init__(message)
+        self.transient = transient
+        self.upstream_code = upstream_code
+        # True when the model hit max_tokens — callers can fall back to a
+        # two-phase strategy instead of just bubbling up.
+        self.truncated = truncated
+
+
+_TRANSIENT_HTTP_CODES = {408, 429, 500, 502, 503, 504, 524}
 
 
 class OpenRouterClient:
@@ -106,15 +123,49 @@ class OpenRouterClient:
         if response_format:
             body["response_format"] = response_format
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers=self._headers(),
-                json=body,
-            )
-            if resp.status_code >= 400:
-                raise OpenRouterError(f"OpenRouter {resp.status_code}: {resp.text[:500]}")
-            return resp.json()
+        last_err: OpenRouterError | None = None
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        f"{self.base_url}/chat/completions",
+                        headers=self._headers(),
+                        json=body,
+                    )
+            except (httpx.TimeoutException, httpx.TransportError) as e:
+                last_err = OpenRouterError(
+                    f"Network error talking to OpenRouter: {type(e).__name__}: {e}",
+                    transient=True,
+                )
+            else:
+                if resp.status_code >= 400:
+                    last_err = OpenRouterError(
+                        f"OpenRouter {resp.status_code}: {resp.text[:500]}",
+                        transient=resp.status_code in _TRANSIENT_HTTP_CODES,
+                        upstream_code=resp.status_code,
+                    )
+                else:
+                    data = resp.json()
+                    err = data.get("error") if isinstance(data, dict) else None
+                    if err:
+                        # OpenRouter sometimes returns 200 with an `error` envelope when an
+                        # upstream provider fails (e.g. 504 "operation aborted").
+                        code = err.get("code") if isinstance(err, dict) else None
+                        msg = err.get("message") if isinstance(err, dict) else str(err)
+                        last_err = OpenRouterError(
+                            f"OpenRouter upstream error {code}: {msg}",
+                            transient=isinstance(code, int) and code in _TRANSIENT_HTTP_CODES,
+                            upstream_code=code if isinstance(code, int) else None,
+                        )
+                    else:
+                        return data
+
+            if not last_err.transient or attempt == 1:
+                raise last_err
+            await asyncio.sleep(1.5)
+
+        # Unreachable, but keep mypy happy.
+        raise last_err  # type: ignore[misc]
 
 
 def _extract_content(response: dict[str, Any]) -> str:
@@ -122,6 +173,13 @@ def _extract_content(response: dict[str, Any]) -> str:
         return response["choices"][0]["message"]["content"] or ""
     except (KeyError, IndexError, TypeError) as e:
         raise OpenRouterError(f"Malformed response: {e}; got: {str(response)[:300]}")
+
+
+def _finish_reason(response: dict[str, Any]) -> str | None:
+    try:
+        return response["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError):
+        return None
 
 
 def _extract_usage(response: dict[str, Any]) -> tuple[int, int]:
@@ -164,6 +222,7 @@ async def call_structured(
     started = time.perf_counter()
     in_tok = out_tok = 0
     ok = False
+    transport_err: OpenRouterError | None = None
 
     try:
         for attempt in range(2):
@@ -177,6 +236,7 @@ async def call_structured(
                 )
             except OpenRouterError as e:
                 last_err = str(e)
+                transport_err = e
                 break
 
             content = _extract_content(resp)
@@ -184,6 +244,17 @@ async def call_structured(
             i_tok, o_tok = _extract_usage(resp)
             in_tok += i_tok
             out_tok += o_tok
+
+            if _finish_reason(resp) == "length":
+                # Output was truncated — a stricter retry won't help, since the
+                # model already used every token it had. Fail fast with a clear
+                # message so callers can bump max_tokens or fall back to a
+                # multi-call strategy.
+                raise OpenRouterError(
+                    f"Structured call '{purpose}' truncated at max_tokens={max_tokens}. "
+                    f"Bump max_tokens or shorten the schema.",
+                    truncated=True,
+                )
 
             try:
                 data = json.loads(_strip_code_fence(content))
@@ -209,6 +280,8 @@ async def call_structured(
                     continue
                 break
 
+        if transport_err is not None:
+            raise transport_err
         raise OpenRouterError(
             f"Structured call '{purpose}' failed validation after retry: {last_err}"
         )

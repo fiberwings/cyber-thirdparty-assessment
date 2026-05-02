@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
+from app.ai.router import OpenRouterError
 from app.api import (
     assessments,
     documents,
@@ -40,6 +42,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(OpenRouterError)
+async def _openrouter_error_handler(_: Request, exc: OpenRouterError) -> JSONResponse:
+    status = 502
+    return JSONResponse(
+        status_code=status,
+        content={
+            "detail": str(exc),
+            "upstream_code": exc.upstream_code,
+            "transient": exc.transient,
+        },
+    )
 
 
 @app.get("/api/health")
