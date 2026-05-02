@@ -1,13 +1,23 @@
 """Per-control gap analysis — for every expected control on every scenario,
-retrieve candidate evidence, ask the reasoner to assess, persist."""
+retrieve candidate evidence, ask the reasoner to assess, persist.
+
+`run_full` fans the per-control work out across an `asyncio.Semaphore` so that
+several reasoner calls are in flight at once. Each worker uses its own
+SQLAlchemy Session (matching the pattern in `scenarios.py` phase-2): SQLite
+WAL + `PRAGMA busy_timeout` keeps writer contention safe, and partial work is
+durable — a control that succeeds commits before another fails.
+"""
 
 from __future__ import annotations
+
+import asyncio
 
 from sqlalchemy.orm import Session
 
 from app.ai import retrieval
 from app.ai.prompts import load as load_prompt
-from app.ai.router import OpenRouterClient, call_structured
+from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
+from app.db import SessionLocal
 from app.models import (
     Assessment,
     Chunk,
@@ -20,6 +30,12 @@ from app.models import (
 from app.schemas.ai import ControlAssessmentOut
 
 SYSTEM_PROMPT = load_prompt("gap_analysis")
+
+# Bounded concurrency for per-control gap-analysis calls. Mirrors the
+# phase-2 scenario generator — 4 keeps us comfortably inside typical
+# OpenRouter / Anthropic rate limits while giving a meaningful speedup
+# on assessments with dozens of controls.
+MAX_GAP_ANALYSIS_CONCURRENCY = 4
 
 
 def _format_chunks(chunks: list[Chunk]) -> str:
@@ -84,7 +100,7 @@ async def assess_control(
         schema=ControlAssessmentOut,
         assessment_id=assessment.id,
         model_override=(assessment.model_overrides or {}).get("gap_analysis"),
-        max_tokens=1024,
+        max_tokens=4096,
         client=client,
     )
 
@@ -146,6 +162,29 @@ async def assess_control(
     return out
 
 
+async def _assess_control_worker(
+    *,
+    assessment_id: int,
+    scenario_id: int,
+    control_id: int,
+    semaphore: asyncio.Semaphore,
+    client: OpenRouterClient | None,
+    on_done,
+    label: str,
+) -> None:
+    async with semaphore:
+        # Each worker uses its own Session so concurrent commits (control
+        # assessment + evidence + ModelCall telemetry) don't race on a
+        # shared session.
+        with SessionLocal() as inner:
+            assessment = inner.get(Assessment, assessment_id)
+            scenario = inner.get(Scenario, scenario_id)
+            control = inner.get(ExpectedControl, control_id)
+            await assess_control(inner, assessment, scenario, control, client=client)
+    if on_done is not None:
+        on_done(label)
+
+
 async def run_full(
     db: Session,
     assessment: Assessment,
@@ -153,13 +192,55 @@ async def run_full(
     client: OpenRouterClient | None = None,
     on_progress=None,
 ):
-    """Iterate every scenario × control and run gap analysis."""
-    scenarios = list(assessment.scenarios)
-    total = sum(len(s.expected_controls) for s in scenarios)
-    done = 0
-    for s in scenarios:
+    """Iterate every scenario × control and run gap analysis (parallel, bounded)."""
+    # Snapshot ids from the parent session before fanning out — workers will
+    # re-load the rows in their own sessions.
+    targets: list[tuple[int, int, str]] = []
+    for s in assessment.scenarios:
         for ctrl in s.expected_controls:
-            await assess_control(db, assessment, s, ctrl, client=client)
-            done += 1
-            if on_progress:
-                on_progress(done, total, f"{s.code}/{ctrl.code}")
+            targets.append((s.id, ctrl.id, f"{s.code}/{ctrl.code}"))
+    total = len(targets)
+    if total == 0:
+        return
+
+    semaphore = asyncio.Semaphore(MAX_GAP_ANALYSIS_CONCURRENCY)
+    done = 0
+
+    def report_done(label: str) -> None:
+        nonlocal done
+        done += 1
+        if on_progress:
+            on_progress(done, total, label)
+
+    tasks = [
+        _assess_control_worker(
+            assessment_id=assessment.id,
+            scenario_id=sid,
+            control_id=cid,
+            semaphore=semaphore,
+            client=client,
+            on_done=report_done,
+            label=label,
+        )
+        for (sid, cid, label) in targets
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    failed: list[tuple[str, BaseException]] = [
+        (label, r) for (_, _, label), r in zip(targets, results, strict=True)
+        if isinstance(r, BaseException)
+    ]
+    if failed:
+        first_label, first_err = failed[0]
+        labels = ", ".join(lbl for lbl, _ in failed)
+        msg = (
+            f"{total - len(failed)}/{total} controls assessed; "
+            f"{len(failed)} failed ({labels}). First failure on '{first_label}': {first_err}"
+        )
+        if isinstance(first_err, OpenRouterError):
+            raise OpenRouterError(
+                msg,
+                transient=first_err.transient,
+                upstream_code=first_err.upstream_code,
+            )
+        raise RuntimeError(msg)
