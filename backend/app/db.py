@@ -25,6 +25,10 @@ def _enable_sqlite_pragmas(dbapi_connection, connection_record):  # noqa: ANN001
     cur = dbapi_connection.cursor()
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA foreign_keys=ON")
+    # WAL allows concurrent readers, but writers still serialize. With
+    # parallelized agent calls we may have several connections trying to commit
+    # at once — wait briefly instead of immediately raising SQLITE_BUSY.
+    cur.execute("PRAGMA busy_timeout=5000")
     cur.close()
 
 

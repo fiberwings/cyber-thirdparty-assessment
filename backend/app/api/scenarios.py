@@ -34,11 +34,17 @@ async def generate_scenarios(assessment_id: int, db: Session = Depends(db_sessio
     summary = (a.description.sufficiency_json or {}).get("summary_so_far") or a.description.text
 
     async def job(handle):
-        await handle.update(progress=0.1, detail="Calling reasoner...")
+        await handle.update(progress=0.05, detail="Generating scenario skeletons...")
+
+        async def on_progress(p: float, detail: str):
+            await handle.update(progress=p, detail=detail)
+
         # New session inside the background task to avoid sharing the request session.
         with SessionLocal() as inner:
             assessment = inner.get(type(a), a.id)
-            await scenarios_agent.generate(inner, assessment, summary)
+            await scenarios_agent.generate(
+                inner, assessment, summary, on_progress=on_progress
+            )
             assessment.current_phase = "evidence"
             inner.commit()
 

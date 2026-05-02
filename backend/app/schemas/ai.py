@@ -66,6 +66,26 @@ class ScenarioListOut(BaseModel):
     scenarios: list[ScenarioOut] = Field(min_length=1)
 
 
+class ScenarioSkeletonOut(BaseModel):
+    """Phase-1 output: scenario without expected_controls."""
+
+    code: str = Field(min_length=2, max_length=60)
+    name: str = Field(min_length=2, max_length=200)
+    description: str
+    inherent_impact: int = Field(ge=1, le=4)
+    inherent_likelihood: int = Field(ge=1, le=4)
+
+
+class ScenarioSkeletonListOut(BaseModel):
+    scenarios: list[ScenarioSkeletonOut] = Field(min_length=1)
+
+
+class ExpectedControlListOut(BaseModel):
+    """Phase-2 output: expected_controls for a single scenario."""
+
+    expected_controls: list[ExpectedControlOut] = Field(min_length=1)
+
+
 # ---------- Gap analysis (per control) ----------
 
 class CitationOut(BaseModel):
