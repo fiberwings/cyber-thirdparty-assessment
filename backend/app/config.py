@@ -5,10 +5,22 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Resolve .env candidate paths absolutely so it doesn't matter whether
+# uvicorn was launched from the repo root or from backend/.
+#   backend/app/config.py  →  parents[0]=app, [1]=backend, [2]=repo-root
+_HERE = Path(__file__).resolve()
+_BACKEND_DIR = _HERE.parents[1]
+_REPO_ROOT = _HERE.parents[2]
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # First match wins. Repo root takes precedence so the `.env` lives
+        # next to docker-compose.yml as the README documents.
+        env_file=(
+            _REPO_ROOT / ".env",
+            _BACKEND_DIR / ".env",
+        ),
         env_file_encoding="utf-8",
         extra="ignore",
         # Disable Pydantic's "model_*" protected namespace — we use it for
