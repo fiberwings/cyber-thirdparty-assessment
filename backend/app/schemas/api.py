@@ -33,7 +33,9 @@ class DescriptionSet(BaseModel):
 
 
 class TurnInput(BaseModel):
-    answer: str = Field(min_length=1)
+    # Optional: an empty/missing answer means "ask the first / next question
+    # without any user reply" — used when the user clicks 'Start scoping'.
+    answer: Optional[str] = None
 
 
 class TurnRead(BaseModel):
