@@ -11,6 +11,9 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Disable Pydantic's "model_*" protected namespace — we use it for
+        # OpenRouter model IDs (model_fast, model_reasoner, ...).
+        protected_namespaces=(),
     )
 
     # OpenRouter
