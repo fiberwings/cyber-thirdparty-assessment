@@ -3,10 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.ai.agents import weaknesses as weak_agent
+from app.ai.agents import cross_correlation as corr_agent
 from app.api.deps import db_session, get_assessment
 from app.db import SessionLocal
-from app.models import Assessment, Weakness
 from app.schemas.api import TaskStatusRead, WeaknessRead
 from app.tasks import registry
 
@@ -24,15 +23,25 @@ def list_weaknesses(assessment_id: int, db: Session = Depends(db_session)):
     response_model=TaskStatusRead,
 )
 async def synthesize(assessment_id: int, db: Session = Depends(db_session)):
+    """Backward-compatible alias for `POST /assessments/{id}/cross-correlate`.
+
+    The original synthesizer (heuristic 60-chunk pool, single global call) was
+    retired in favour of the per-document extraction + cross-correlation
+    pipeline. The frontend's `synthesizeWeaknesses` action now triggers
+    cross-correlation over already-extracted weaknesses.
+    """
     a = get_assessment(assessment_id, db)
-    summary = (a.description.text if a.description else "") if a.description else ""
 
     async def job(handle):
+        await handle.update(progress=0.05, detail="Correlating weaknesses...")
+
+        async def on_progress(p: float, detail: str):
+            await handle.update(progress=p, detail=detail)
+
         with SessionLocal() as inner:
-            assessment = inner.get(Assessment, a.id)
-            await handle.update(progress=0.2, detail="Reviewing evidence pool")
-            await weak_agent.synthesize(inner, assessment, summary)
-            inner.commit()
+            await corr_agent.run(inner, a.id, on_progress=on_progress)
 
     handle = registry.submit(job)
-    return TaskStatusRead(task_id=handle.id, status=handle.status, progress=0.0, detail="")
+    return TaskStatusRead(
+        task_id=handle.id, status=handle.status, progress=0.0, detail=""
+    )

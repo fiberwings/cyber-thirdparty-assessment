@@ -67,6 +67,10 @@ class DocumentRead(BaseModel):
     mime: str
     size_bytes: int
     parsed_at: Optional[datetime]
+    weakness_extracted_at: Optional[datetime] = None
+    # Populated only on the upload response so the frontend can poll the
+    # background extraction task. Other endpoints return None.
+    weakness_task_id: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -159,7 +163,25 @@ class WeaknessRead(BaseModel):
     quote: str
     mapped_control_codes: list
     source_chunk_id: Optional[int]
+    source_document_id: Optional[int] = None
+    unmatched: bool = True
+    kind_signal: str = ""
     user_edited: bool
+
+    class Config:
+        from_attributes = True
+
+
+class FindingRead(BaseModel):
+    """Unmatched weakness rendered as a remediation finding."""
+
+    id: int
+    severity: str
+    description: str
+    quote: str
+    kind_signal: str
+    source_document_id: Optional[int]
+    source_chunk_id: Optional[int]
 
     class Config:
         from_attributes = True
@@ -192,6 +214,8 @@ class ScenarioScoreRead(BaseModel):
     coverage_index: float
     likelihood_reduction: int
     meta_uplift: int
+    weakness_uplift: int = 0
+    effectiveness_downgrades: list[str] = Field(default_factory=list)
     rationale: str
 
 

@@ -47,11 +47,52 @@ def get_session() -> Generator[Session, None, None]:
         s.close()
 
 
+_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
+    # (table, column, type DDL — must be a constant default; SQLite forbids
+    # expressions like CURRENT_TIMESTAMP in ALTER TABLE ADD COLUMN.)
+    ("weakness", "source_document_id", "INTEGER REFERENCES document(id) ON DELETE CASCADE"),
+    ("weakness", "unmatched", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("weakness", "kind_signal", "VARCHAR(40) NOT NULL DEFAULT ''"),
+    ("weakness", "dedupe_key", "VARCHAR(120)"),
+    ("weakness", "created_at", "DATETIME"),
+    ("document", "weakness_extracted_at", "DATETIME"),
+    ("scenario", "origin_weakness_ids", "JSON NOT NULL DEFAULT '[]'"),
+]
+
+_POST_MIGRATION_INDEXES: list[str] = [
+    "CREATE INDEX IF NOT EXISTS ix_weakness_source_document_id ON weakness(source_document_id)",
+    "CREATE INDEX IF NOT EXISTS ix_weakness_dedupe_key ON weakness(dedupe_key)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_weakness_dedupe ON weakness(assessment_id, dedupe_key)",
+]
+
+
+def _ensure_columns() -> None:
+    """Idempotent additive migration for SQLite.
+
+    The project does not use Alembic — schema additions ship as
+    `ALTER TABLE … ADD COLUMN` statements run at startup. New databases get
+    the columns via `Base.metadata.create_all`; existing dev databases get
+    upgraded here. Only additive (column-add) changes belong in this list:
+    any rename / type change still needs a manual migration.
+    """
+    with _engine.begin() as conn:
+        for table, col, type_ddl in _ADDITIVE_COLUMNS:
+            existing = {
+                row[1]
+                for row in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+            }
+            if col not in existing:
+                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {type_ddl}")
+        for stmt in _POST_MIGRATION_INDEXES:
+            conn.exec_driver_sql(stmt)
+
+
 def init_db() -> None:
     """Create all tables and the FTS5 virtual table for chunks."""
     from app import models  # noqa: F401  (register mappers)
 
     Base.metadata.create_all(_engine)
+    _ensure_columns()
 
     # FTS5 virtual table mirrors `chunk.text`. Kept in sync via triggers.
     with _engine.begin() as conn:

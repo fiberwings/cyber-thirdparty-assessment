@@ -38,7 +38,11 @@ def patched_client(monkeypatch, fresh_db):
             "summary_so_far": "SaaS billing vendor processing EU PII over public APIs.",
         }
     )
-    # Scenario generation
+    # Per-document weakness extraction (auto-fired on SOC upload). Empty list
+    # — clean SOC report. With no extracted weaknesses, the auto-fired
+    # cross-correlation step sees nothing to do and exits without a call.
+    fake.push_json({"weaknesses": []})
+    # Scenario generation — phase 1 (skeletons)
     fake.push_json(
         {
             "scenarios": [
@@ -48,11 +52,16 @@ def patched_client(monkeypatch, fresh_db):
                     "description": "Vendor mishandles billing PII.",
                     "inherent_impact": 3,
                     "inherent_likelihood": 3,
-                    "expected_controls": [
-                        {"code": "ENC.REST", "name": "Encryption at rest", "description": "", "weight": 1.0, "rationale": ""},
-                        {"code": "IAM.MFA", "name": "MFA", "description": "", "weight": 1.0, "rationale": ""},
-                    ],
                 }
+            ]
+        }
+    )
+    # Scenario generation — phase 2 (per-scenario controls)
+    fake.push_json(
+        {
+            "expected_controls": [
+                {"code": "ENC.REST", "name": "Encryption at rest", "description": "", "weight": 1.0, "rationale": ""},
+                {"code": "IAM.MFA", "name": "MFA", "description": "", "weight": 1.0, "rationale": ""},
             ]
         }
     )
@@ -67,8 +76,9 @@ def patched_client(monkeypatch, fresh_db):
         "citations": [{"document_id": 1, "page": 1, "section_path": "Access", "quote": "Admins must use MFA"}],
         "rationale": "MFA mandated.", "meta_flags": [],
     })
-    # Weakness synthesis (no emergent scenarios)
-    fake.push_json({"weaknesses": [], "emergent_scenarios": []})
+    # Weakness synthesize endpoint now aliases cross-correlation. With no
+    # extracted weaknesses, the agent returns early without an LLM call —
+    # so no fake response is needed for that step.
     # Narratives — one per scenario
     fake.push_json("Residual risk Moderate. Strong encryption; adequate MFA.")
 
@@ -113,7 +123,7 @@ def test_full_flow(patched_client):
     assert r.status_code == 200
     assert r.json()["is_sufficient"] is True
 
-    # 4. Upload a SOC 2 PDF
+    # 4. Upload a SOC 2 PDF — auto-triggers per-document weakness extraction.
     pdf_bytes = _make_pdf("body")
     r = client.post(
         f"/api/assessments/{aid}/documents",
@@ -122,6 +132,17 @@ def test_full_flow(patched_client):
     )
     assert r.status_code == 201, r.text
     assert r.json()["filename"] == "soc2.pdf"
+    # Wait for the auto-fired extraction task before moving on so that the
+    # background task doesn't race with subsequent test steps for fake-LLM
+    # canned responses.
+    weakness_task_id = r.json().get("weakness_task_id")
+    assert weakness_task_id, "expected weakness_task_id on upload response"
+    for _ in range(30):
+        s = client.get(f"/api/tasks/{weakness_task_id}").json()
+        if s["status"] in {"done", "error"}:
+            break
+        import time; time.sleep(0.2)
+    assert s["status"] == "done", s
 
     # 5. Generate scenarios (background task)
     r = client.post(f"/api/assessments/{aid}/scenarios/generate")

@@ -116,17 +116,72 @@ class ControlAssessmentOut(BaseModel):
         return v
 
 
-# ---------- Weakness synthesis ----------
+# ---------- Per-document weakness extraction ----------
 
-class WeaknessOut(BaseModel):
-    severity: Literal["low", "medium", "high", "critical"]
+Severity = Literal["low", "medium", "high", "critical"]
+KindSignal = Literal[
+    "pentest_finding",
+    "soc_exception",
+    "iso_nonconformity",
+    "policy_gap",
+    "questionnaire_negative",
+    "dpa_clause_missing",
+    "other",
+]
+
+
+class DocumentWeaknessOut(BaseModel):
+    """One concrete finding extracted from a single document."""
+
+    severity: Severity
     description: str = Field(min_length=4)
-    quote: str = ""
-    citation: CitationOut | None = None
+    quote: str = Field(default="", max_length=2000)
+    section_path: str = ""
+    page: int | None = None
+    kind_signal: KindSignal
+    # Codes the model thinks could plausibly be related; cross-correlation
+    # is authoritative — these are hints only.
+    suggested_control_codes: list[str] = Field(default_factory=list)
+
+
+class DocumentWeaknessListOut(BaseModel):
+    weaknesses: list[DocumentWeaknessOut] = Field(default_factory=list)
+
+
+class WeaknessSkeletonOut(BaseModel):
+    """Phase-1 fallback output: enumerate findings without details."""
+
+    heading: str = Field(min_length=2, max_length=200)
+    severity: Severity
+    section_path: str = ""
+    kind_signal: KindSignal
+
+
+class WeaknessSkeletonListOut(BaseModel):
+    skeletons: list[WeaknessSkeletonOut] = Field(default_factory=list)
+
+
+# ---------- Cross-correlation ----------
+
+class WeaknessMappingOut(BaseModel):
+    """How a single weakness maps onto existing controls."""
+
+    weakness_id: int
+    # Empty list = unmatched; cross-correlation will leave `unmatched=true` set.
     mapped_control_codes: list[str] = Field(default_factory=list)
-    suggests_emergent_scenario_code: str | None = None  # references existing or new code
 
 
-class WeaknessSynthesisOut(BaseModel):
-    weaknesses: list[WeaknessOut] = Field(default_factory=list)
-    emergent_scenarios: list[ScenarioOut] = Field(default_factory=list)
+class WeaknessClusterMappingOut(BaseModel):
+    """Per-cluster output: one or more weaknesses → mapping or new scenario."""
+
+    weakness_mappings: list[WeaknessMappingOut] = Field(default_factory=list)
+    # When the cluster doesn't fit any existing scenario's controls, propose
+    # a new emergent scenario (same shape as initial scenario generation).
+    propose_emergent: ScenarioOut | None = None
+    # IDs of weaknesses that justify the emergent scenario; populated only
+    # when propose_emergent is not None.
+    origin_weakness_ids: list[int] = Field(default_factory=list)
+
+
+class CrossCorrelationOut(BaseModel):
+    clusters: list[WeaknessClusterMappingOut] = Field(default_factory=list)

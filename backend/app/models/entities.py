@@ -101,10 +101,14 @@ class Document(Base):
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     parsed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    weakness_extracted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     assessment: Mapped[Assessment] = relationship(back_populates="documents")
     chunks: Mapped[list["Chunk"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
+    weaknesses: Mapped[list["Weakness"]] = relationship(
         back_populates="document", cascade="all, delete-orphan"
     )
 
@@ -138,7 +142,8 @@ class Scenario(Base):
     code: Mapped[str] = mapped_column(String(60))
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text)
-    source: Mapped[str] = mapped_column(String(20), default="description")  # description|emergent
+    # description | emergent | emergent_from_weakness
+    source: Mapped[str] = mapped_column(String(40), default="description")
     inherent_impact: Mapped[int] = mapped_column(Integer, default=2)
     inherent_likelihood: Mapped[int] = mapped_column(Integer, default=2)
     residual_impact: Mapped[int] = mapped_column(Integer, default=2)
@@ -146,6 +151,7 @@ class Scenario(Base):
     score_band: Mapped[str] = mapped_column(String(20), default="Moderate")
     rationale: Mapped[str] = mapped_column(Text, default="")
     user_edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    origin_weakness_ids: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     assessment: Mapped[Assessment] = relationship(back_populates="scenarios")
@@ -214,6 +220,9 @@ class ControlEvidence(Base):
 
 class Weakness(Base):
     __tablename__ = "weakness"
+    __table_args__ = (
+        UniqueConstraint("assessment_id", "dedupe_key", name="uq_weakness_dedupe"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     assessment_id: Mapped[int] = mapped_column(
@@ -222,14 +231,29 @@ class Weakness(Base):
     source_chunk_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("chunk.id", ondelete="SET NULL"), nullable=True
     )
+    source_document_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("document.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     severity: Mapped[str] = mapped_column(String(20), default="medium")
     description: Mapped[str] = mapped_column(Text)
     mapped_control_codes: Mapped[list] = mapped_column(JSON, default=list)
     quote: Mapped[str] = mapped_column(Text, default="")
+    unmatched: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Free-form classifier label set by document_weaknesses agent
+    # (e.g. "pentest_finding", "soc_exception", "policy_gap").
+    kind_signal: Mapped[str] = mapped_column(String(40), default="")
+    # sha256 of (assessment_id + normalised quote + chunk_id) — DB-enforced
+    # uniqueness per assessment so concurrent / overlapping windows can't
+    # double-insert the same finding. Nullable for legacy rows.
+    dedupe_key: Mapped[Optional[str]] = mapped_column(String(120), nullable=True, index=True)
     user_edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, server_default=func.now()
+    )
 
     assessment: Mapped[Assessment] = relationship(back_populates="weaknesses")
     chunk: Mapped[Optional[Chunk]] = relationship()
+    document: Mapped[Optional[Document]] = relationship(back_populates="weaknesses")
 
 
 class MetaIssue(Base):

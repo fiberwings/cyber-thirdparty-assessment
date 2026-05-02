@@ -15,6 +15,7 @@ from app.scoring.engine import (
     ControlInput,
     MetaIssueInput,
     ScenarioInput,
+    WeaknessInput,
     aggregate,
     score_scenario,
 )
@@ -27,7 +28,36 @@ def _recalculate_in_session(db: Session, a: Assessment) -> tuple[list[ScenarioSc
     scored = []
     inherent_impacts = {}
 
+    # Pre-bucket every mapped weakness by the control codes it touches so each
+    # scenario can pull only the weaknesses that hit one of its expected
+    # controls. Unmatched weaknesses don't count here — they're either folded
+    # into emergent scenarios by cross_correlation or surfaced as advisory
+    # findings, but they don't move a mapped scenario's residual.
+    weaknesses_by_code: dict[str, list[tuple[str, list[str]]]] = {}
+    for w in a.weaknesses:
+        if w.unmatched:
+            continue
+        codes = list(w.mapped_control_codes or [])
+        for code in codes:
+            weaknesses_by_code.setdefault(code, []).append((w.severity, codes))
+
     for s in a.scenarios:
+        ec_codes = [ec.code for ec in s.expected_controls]
+        # Deduplicate weaknesses across overlapping mapped codes so one
+        # weakness mapped to multiple of this scenario's controls only counts
+        # once toward its uplift.
+        seen: set[int] = set()
+        scenario_weaknesses: list[WeaknessInput] = []
+        for code in ec_codes:
+            for sev, w_codes in weaknesses_by_code.get(code, []):
+                key = id((sev, tuple(w_codes)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                scenario_weaknesses.append(
+                    WeaknessInput(severity=sev, mapped_control_codes=list(w_codes))
+                )
+
         controls = [
             ControlInput(
                 code=ec.code,
@@ -49,6 +79,7 @@ def _recalculate_in_session(db: Session, a: Assessment) -> tuple[list[ScenarioSc
             inherent_likelihood=s.inherent_likelihood,
             controls=controls,
             meta_issues=meta_issues,
+            weaknesses=scenario_weaknesses,
         )
         result = score_scenario(si)
         s.residual_impact = result.residual_impact
@@ -73,6 +104,8 @@ def _recalculate_in_session(db: Session, a: Assessment) -> tuple[list[ScenarioSc
             coverage_index=res.coverage_index,
             likelihood_reduction=res.likelihood_reduction,
             meta_uplift=res.meta_uplift,
+            weakness_uplift=res.weakness_uplift,
+            effectiveness_downgrades=list(res.effectiveness_downgrades),
             rationale=s.rationale,
         )
         for s, res in scored

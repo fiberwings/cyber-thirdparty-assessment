@@ -50,6 +50,19 @@ _META_WEIGHTS: dict[str, float] = {
 }
 _META_UPLIFT_CAP = 2.0
 
+# Per-severity uplift contributed by a weakness mapped to a scenario's
+# expected_control. Capped per scenario at _WEAKNESS_UPLIFT_CAP so a single
+# noisy doc can't single-handedly max out residual; combined with meta_uplift
+# at _META_UPLIFT_CAP so the total uplift stays within the existing band.
+_WEAKNESS_SEVERITY_UPLIFT: dict[str, float] = {
+    "low": 0.0,
+    "medium": 0.25,
+    "high": 0.75,
+    "critical": 1.0,
+}
+_WEAKNESS_UPLIFT_CAP = 1.5
+_HIGH_SEVERITY = {"high", "critical"}
+
 
 def level_to_name(level: int) -> str:
     if not 1 <= level <= 4:
@@ -88,12 +101,21 @@ class MetaIssueInput:
 
 
 @dataclass
+class WeaknessInput:
+    """A weakness mapped to one or more of the scenario's expected controls."""
+
+    severity: str  # low|medium|high|critical
+    mapped_control_codes: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ScenarioInput:
     code: str
     inherent_impact: int  # 1..4
     inherent_likelihood: int  # 1..4
     controls: list[ControlInput] = field(default_factory=list)
     meta_issues: list[MetaIssueInput] = field(default_factory=list)
+    weaknesses: list[WeaknessInput] = field(default_factory=list)
 
 
 @dataclass
@@ -105,6 +127,8 @@ class ScenarioScore:
     coverage_index: float  # weighted avg eff_score, in [0, 1]
     likelihood_reduction: int
     meta_uplift: int
+    weakness_uplift: int
+    effectiveness_downgrades: list[str]
     rationale_breakdown: dict
 
 
@@ -121,28 +145,57 @@ def _meta_uplift_value(meta: Iterable[MetaIssueInput]) -> float:
     return min(raw, _META_UPLIFT_CAP)
 
 
+def _weakness_uplift_value(weaknesses: Iterable[WeaknessInput]) -> float:
+    raw = sum(_WEAKNESS_SEVERITY_UPLIFT.get(w.severity, 0.0) for w in weaknesses)
+    return min(raw, _WEAKNESS_UPLIFT_CAP)
+
+
+def _high_severity_mapped_codes(weaknesses: Iterable[WeaknessInput]) -> set[str]:
+    out: set[str] = set()
+    for w in weaknesses:
+        if w.severity in _HIGH_SEVERITY:
+            out.update(c for c in (w.mapped_control_codes or []) if c)
+    return out
+
+
 def score_scenario(s: ScenarioInput) -> ScenarioScore:
+    # Force-downgrade `strong` → `adequate` (for scoring only) on any control
+    # hit by a high/critical weakness. The display value on the underlying
+    # ControlAssessment is left untouched; the override is auditable via the
+    # `effectiveness_downgrades` list in the rationale_breakdown.
+    hi_codes = _high_severity_mapped_codes(s.weaknesses)
+    downgrades: list[str] = []
+
     if not s.controls:
         coverage_index = 0.0
     else:
-        total_w = sum(max(c.weight, 0.0) for c in s.controls)
-        if total_w <= 0:
-            coverage_index = 0.0
-        else:
-            coverage_index = (
-                sum(effectiveness_score(c.coverage, c.effectiveness) * max(c.weight, 0.0)
-                    for c in s.controls)
-                / total_w
-            )
+        total_w = 0.0
+        weighted_sum = 0.0
+        for c in s.controls:
+            eff = c.effectiveness
+            if eff == "strong" and c.code in hi_codes:
+                eff = "adequate"
+                downgrades.append(c.code)
+            w = max(c.weight, 0.0)
+            total_w += w
+            weighted_sum += effectiveness_score(c.coverage, eff) * w
+        coverage_index = (weighted_sum / total_w) if total_w > 0 else 0.0
 
     likelihood_reduction = round(coverage_index * 3)
-    raw_uplift = _meta_uplift_value(s.meta_issues)
-    meta_uplift_int = round(raw_uplift)
+
+    raw_meta = _meta_uplift_value(s.meta_issues)
+    raw_weakness = _weakness_uplift_value(s.weaknesses)
+    # Combined cap preserves the existing residual envelope so a scenario can
+    # never gain more than `_META_UPLIFT_CAP` bands of uplift in total.
+    combined_raw = min(_META_UPLIFT_CAP, raw_meta + raw_weakness)
+    combined_int = round(combined_raw)
+    meta_uplift_int = round(raw_meta)
+    weakness_uplift_int = max(0, combined_int - meta_uplift_int)
 
     inherent_l = max(1, min(4, s.inherent_likelihood))
     inherent_i = max(1, min(4, s.inherent_impact))
 
-    residual_l = max(1, min(4, inherent_l - likelihood_reduction + meta_uplift_int))
+    residual_l = max(1, min(4, inherent_l - likelihood_reduction + combined_int))
     residual_i = inherent_i  # impact does not reduce; controls reduce likelihood
     band = band_for(residual_i, residual_l)
 
@@ -154,13 +207,19 @@ def score_scenario(s: ScenarioInput) -> ScenarioScore:
         coverage_index=round(coverage_index, 3),
         likelihood_reduction=likelihood_reduction,
         meta_uplift=meta_uplift_int,
+        weakness_uplift=weakness_uplift_int,
+        effectiveness_downgrades=downgrades,
         rationale_breakdown={
             "inherent_impact": inherent_i,
             "inherent_likelihood": inherent_l,
             "coverage_index": round(coverage_index, 3),
             "likelihood_reduction_bands": likelihood_reduction,
             "meta_uplift_bands": meta_uplift_int,
-            "meta_uplift_raw": round(raw_uplift, 3),
+            "meta_uplift_raw": round(raw_meta, 3),
+            "weakness_uplift_bands": weakness_uplift_int,
+            "weakness_uplift_raw": round(raw_weakness, 3),
+            "combined_uplift_raw": round(combined_raw, 3),
+            "effectiveness_downgrades": list(downgrades),
         },
     )
 

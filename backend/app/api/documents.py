@@ -8,13 +8,17 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from app.ai.agents import cross_correlation as corr_agent
+from app.ai.agents import document_weaknesses as docw_agent
 from app.api.deps import db_session, get_assessment
 from app.api.serializers import serialize_document
 from app.config import settings
+from app.db import SessionLocal
 from app.models import Chunk, Document
 from app.parsing import parse_document
 from app.schemas.api import ChunkRead, DocumentRead
 from app.storage.files import signed_token, store_file, verify_token
+from app.tasks import registry
 
 router = APIRouter(prefix="/api", tags=["documents"])
 
@@ -81,6 +85,53 @@ async def upload_document(
     doc.parsed_at = datetime.utcnow()
     db.commit()
     db.refresh(doc)
+
+    # Auto-fire per-document weakness extraction. After extraction completes,
+    # if every document in this assessment has weakness_extracted_at set, also
+    # fire cross-correlation so emergent scenarios + score impact are reflected
+    # without requiring an extra click. The user gets a single task id to poll.
+    doc_id = doc.id
+    assessment_id = a.id
+
+    async def job(handle):
+        await handle.update(progress=0.05, detail="Extracting weaknesses...")
+
+        async def extract_progress(p: float, detail: str):
+            # Reserve [0.0, 0.85] for extraction; [0.85, 1.0] for the optional
+            # cross-correlation step.
+            await handle.update(progress=min(p * 0.85, 0.85), detail=detail)
+
+        with SessionLocal() as inner:
+            await docw_agent.extract(
+                inner, doc_id, on_progress=extract_progress
+            )
+            unprocessed = (
+                inner.query(Document)
+                .filter(
+                    Document.assessment_id == assessment_id,
+                    Document.weakness_extracted_at.is_(None),
+                )
+                .count()
+            )
+
+        if unprocessed == 0:
+            await handle.update(progress=0.85, detail="All documents extracted; cross-correlating...")
+
+            async def corr_progress(p: float, detail: str):
+                await handle.update(
+                    progress=0.85 + p * 0.15,
+                    detail=f"Correlation: {detail}",
+                )
+
+            with SessionLocal() as inner:
+                await corr_agent.run(
+                    inner, assessment_id, on_progress=corr_progress
+                )
+
+    handle = registry.submit(job)
+    # Attach the task id to the response so the frontend can poll
+    # /api/tasks/{id} for extraction progress.
+    doc.weakness_task_id = handle.id  # transient field on ORM instance
     return serialize_document(doc)
 
 

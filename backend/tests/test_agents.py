@@ -4,9 +4,23 @@ from __future__ import annotations
 
 import pytest
 
-from app.ai.agents import gap_analysis, scenarios, scoping, weaknesses
+from app.ai.agents import (
+    cross_correlation,
+    document_weaknesses,
+    gap_analysis,
+    scenarios,
+    scoping,
+)
 from app.db import SessionLocal
-from app.models import Assessment, Chunk, Document, ServiceDescription
+from app.models import (
+    Assessment,
+    Chunk,
+    Document,
+    ExpectedControl,
+    Scenario,
+    ServiceDescription,
+    Weakness,
+)
 
 
 @pytest.mark.asyncio
@@ -49,6 +63,7 @@ async def test_scoping_agent_persists_breakdown_and_question(fresh_db, fake_clie
 
 @pytest.mark.asyncio
 async def test_scenario_generator_persists(fresh_db, fake_client):
+    # Phase 1: skeletons.
     fake_client.push_json(
         {
             "scenarios": [
@@ -58,11 +73,16 @@ async def test_scenario_generator_persists(fresh_db, fake_client):
                     "description": "Vendor exfiltrates billing PII.",
                     "inherent_impact": 3,
                     "inherent_likelihood": 3,
-                    "expected_controls": [
-                        {"code": "ENC.REST", "name": "Encryption at rest", "description": "", "weight": 1.0, "rationale": ""},
-                        {"code": "IAM.MFA", "name": "MFA", "description": "", "weight": 1.0, "rationale": ""},
-                    ],
                 }
+            ]
+        }
+    )
+    # Phase 2: controls for DATA_LEAK.
+    fake_client.push_json(
+        {
+            "expected_controls": [
+                {"code": "ENC.REST", "name": "Encryption at rest", "description": "", "weight": 1.0, "rationale": ""},
+                {"code": "IAM.MFA", "name": "MFA", "description": "", "weight": 1.0, "rationale": ""},
             ]
         }
     )
@@ -149,68 +169,217 @@ async def test_gap_analysis_requires_citation_and_retries(fresh_db, fake_client)
 
 
 @pytest.mark.asyncio
-async def test_weakness_synthesis_skips_existing_codes(fresh_db, fake_client):
+async def test_document_weakness_extraction_persists(fresh_db, fake_client):
+    """Per-document extraction agent: single-call default path with two findings."""
     fake_client.push_json(
         {
             "weaknesses": [
                 {
                     "severity": "high",
-                    "description": "Pen test found unpatched OpenSSL.",
-                    "quote": "OpenSSL 1.0.2 in production.",
-                    "citation": {"document_id": 1, "page": 3, "section_path": "Findings", "quote": "OpenSSL 1.0.2 in production."},
-                    "mapped_control_codes": ["ENDPOINT.PATCH"],
-                    "suggests_emergent_scenario_code": None,
-                }
-            ],
-            "emergent_scenarios": [
-                {
-                    "code": "DATA_LEAK",
-                    "name": "Already exists - ignore",
-                    "description": "duplicate",
-                    "inherent_impact": 2,
-                    "inherent_likelihood": 2,
-                    "expected_controls": [{"code": "ENC.REST", "name": "Encryption at rest", "description": "", "weight": 1.0, "rationale": ""}],
+                    "description": "JWT signature is not verified, allowing token forgery.",
+                    "quote": "JWT signature not verified",
+                    "section_path": "4. Findings / 4.7 Authentication",
+                    "page": 12,
+                    "kind_signal": "pentest_finding",
+                    "suggested_control_codes": ["IAM.MFA"],
                 },
                 {
-                    "code": "CRYPTO_DEPRECATED",
-                    "name": "Use of deprecated crypto",
-                    "description": "OpenSSL 1.0.2 is EOL.",
-                    "inherent_impact": 3,
-                    "inherent_likelihood": 3,
-                    "expected_controls": [{"code": "ENDPOINT.PATCH", "name": "Patch", "description": "", "weight": 1.0, "rationale": ""}],
+                    "severity": "medium",
+                    "description": "TLS 1.0 still enabled on a legacy endpoint.",
+                    "quote": "TLS 1.0 enabled on /legacy",
+                    "section_path": "4. Findings / 4.3 Transport",
+                    "page": 8,
+                    "kind_signal": "pentest_finding",
+                    "suggested_control_codes": ["ENC.TRANSIT"],
                 },
-            ],
+            ]
         }
     )
     with SessionLocal() as db:
-        from app.models import ExpectedControl, Scenario
         a = Assessment(vendor_name="Acme")
         db.add(a)
         db.flush()
-        # Pretend a scenario with code DATA_LEAK already exists.
+        doc = Document(
+            assessment_id=a.id,
+            kind="pentest",
+            filename="pentest.pdf",
+            mime="application/pdf",
+            sha256="abc",
+            size_bytes=1,
+        )
+        db.add(doc)
+        db.flush()
+        db.add(
+            Chunk(
+                document_id=doc.id,
+                page=12,
+                section_path="4. Findings / 4.7 Authentication",
+                ord=1,
+                text="The JWT signature was not verified, allowing token forgery via algorithm substitution.",
+            )
+        )
+        db.add(
+            Chunk(
+                document_id=doc.id,
+                page=8,
+                section_path="4. Findings / 4.3 Transport",
+                ord=2,
+                text="TLS 1.0 is enabled on /legacy endpoint.",
+            )
+        )
+        db.commit()
+        doc_id = doc.id
+
+        inserted = await document_weaknesses.extract(db, doc_id, client=fake_client)
+        assert inserted == 2
+
+        rows = (
+            db.query(Weakness)
+            .filter(Weakness.source_document_id == doc_id)
+            .order_by(Weakness.id)
+            .all()
+        )
+        assert len(rows) == 2
+        assert {r.severity for r in rows} == {"high", "medium"}
+        assert all(r.kind_signal == "pentest_finding" for r in rows)
+        assert all(r.unmatched is True for r in rows)
+        assert all(r.dedupe_key for r in rows)
+        # quote-based source_chunk_id resolution should land on the correct chunk
+        high = next(r for r in rows if r.severity == "high")
+        assert high.source_chunk_id is not None
+        assert db.get(Chunk, high.source_chunk_id).page == 12
+
+        db.refresh(doc)
+        assert doc.weakness_extracted_at is not None
+
+
+@pytest.mark.asyncio
+async def test_document_weakness_extraction_dedupes_re_run(fresh_db, fake_client):
+    """A second run on the same doc with the same canned response is a no-op
+    (DB-level uniqueness on dedupe_key)."""
+    base_response = {
+        "weaknesses": [
+            {
+                "severity": "medium",
+                "description": "Some finding",
+                "quote": "verbatim quote",
+                "section_path": "Findings",
+                "page": 1,
+                "kind_signal": "pentest_finding",
+                "suggested_control_codes": [],
+            }
+        ]
+    }
+    fake_client.push_json(base_response)
+    fake_client.push_json(base_response)
+
+    with SessionLocal() as db:
+        a = Assessment(vendor_name="Acme")
+        db.add(a)
+        db.flush()
+        doc = Document(
+            assessment_id=a.id,
+            kind="pentest",
+            filename="p.pdf",
+            mime="application/pdf",
+            sha256="x",
+            size_bytes=1,
+        )
+        db.add(doc)
+        db.flush()
+        db.add(
+            Chunk(
+                document_id=doc.id,
+                page=1,
+                section_path="Findings",
+                ord=1,
+                text="verbatim quote about something bad",
+            )
+        )
+        db.commit()
+        doc_id = doc.id
+
+        first = await document_weaknesses.extract(db, doc_id, client=fake_client)
+        second = await document_weaknesses.extract(db, doc_id, client=fake_client)
+        assert first == 1
+        assert second == 0  # dedupe_key prevents the duplicate
+        rows = db.query(Weakness).filter(Weakness.source_document_id == doc_id).all()
+        assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_cross_correlation_maps_and_force_emerges(fresh_db, fake_client):
+    """Reasoner pass maps one weakness; deterministic floor force-spawns an
+    emergent scenario for an unmapped critical."""
+    with SessionLocal() as db:
+        a = Assessment(vendor_name="Acme")
+        db.add(a)
+        db.flush()
         s = Scenario(
-            assessment_id=a.id, code="DATA_LEAK", name="Existing", description="x",
-            inherent_impact=3, inherent_likelihood=3,
+            assessment_id=a.id,
+            code="DATA_LEAK",
+            name="PII leakage",
+            description="x",
+            inherent_impact=3,
+            inherent_likelihood=3,
         )
         db.add(s)
         db.flush()
-        db.add(ExpectedControl(scenario_id=s.id, code="ENC.REST", name="Encryption at rest"))
-        # Add a pentest doc + chunk so the agent has something to look at.
-        doc = Document(assessment_id=a.id, kind="pentest", filename="p.docx",
-                        mime="application/vnd...", sha256="z", size_bytes=10)
-        db.add(doc)
-        db.flush()
-        db.add(Chunk(document_id=doc.id, section_path="Findings",
-                      text="OpenSSL 1.0.2 is in production."))
+        db.add(ExpectedControl(scenario_id=s.id, code="IAM.MFA", name="MFA"))
+
+        w1 = Weakness(
+            assessment_id=a.id,
+            severity="high",
+            description="Weak admin auth",
+            kind_signal="pentest_finding",
+            unmatched=True,
+            mapped_control_codes=[],
+        )
+        w2 = Weakness(
+            assessment_id=a.id,
+            severity="critical",
+            description="No DLP for regulated PII",
+            kind_signal="pentest_finding",
+            unmatched=True,
+            mapped_control_codes=[],
+        )
+        db.add(w1)
+        db.add(w2)
         db.commit()
-        db.refresh(a)
 
-        await weaknesses.synthesize(db, a, "summary", client=fake_client)
+        # Push fake AFTER inserting so we know the IDs.
+        fake_client.push_json(
+            {
+                "weakness_mappings": [
+                    {"weakness_id": w1.id, "mapped_control_codes": ["IAM.MFA"]},
+                    {"weakness_id": w2.id, "mapped_control_codes": []},
+                ],
+                "propose_emergent": None,
+                "origin_weakness_ids": [],
+            }
+        )
 
-        db.refresh(a)
-        codes = sorted(s.code for s in a.scenarios)
-        assert "DATA_LEAK" in codes
-        assert "CRYPTO_DEPRECATED" in codes
-        # DATA_LEAK should not have been duplicated
-        assert codes.count("DATA_LEAK") == 1
-        assert len(a.weaknesses) == 1
+        stats = await cross_correlation.run(db, a.id, client=fake_client)
+        assert stats["mapped"] == 1
+        assert stats["forced_emergent"] == 1
+
+        # Re-query to bypass the parent session cache (cross_correlation
+        # commits via a fresh session).
+        scenarios = (
+            db.query(Scenario).filter(Scenario.assessment_id == a.id).all()
+        )
+        emergent = [s for s in scenarios if s.source == "emergent_from_weakness"]
+        assert len(emergent) == 1
+        assert w2.id in emergent[0].origin_weakness_ids
+
+        # Both weaknesses should now be marked matched.
+        db.expire_all()
+        w1_after = db.get(Weakness, w1.id)
+        w2_after = db.get(Weakness, w2.id)
+        assert w1_after.unmatched is False
+        assert w1_after.mapped_control_codes == ["IAM.MFA"]
+        assert w2_after.unmatched is False
+        # w2 should now be mapped to the X-REMEDIATE placeholder.
+        assert any(
+            c.startswith("X-REMEDIATE-") for c in (w2_after.mapped_control_codes or [])
+        )

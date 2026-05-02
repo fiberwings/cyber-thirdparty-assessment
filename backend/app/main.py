@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app.ai.router import OpenRouterError
 from app.api import (
     assessments,
+    document_weaknesses,
     documents,
     gap_analysis,
     models,
@@ -66,6 +67,7 @@ for router in (
     assessments.router,
     scoping.router,
     documents.router,
+    document_weaknesses.router,
     scenarios.router,
     gap_analysis.router,
     weaknesses.router,
