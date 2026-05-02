@@ -6,6 +6,7 @@ import { use, useState } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
 import { ScenarioCard } from "@/components/ScenarioCard";
 import { ScenarioDrawer } from "@/components/ScenarioDrawer";
+import { compareScenariosByRisk } from "@/lib/utils";
 import { useRouter } from "next/navigation";
 
 export default function ScenariosPage({ params }: { params: Promise<{ id: string }> }) {
@@ -33,6 +34,7 @@ export default function ScenariosPage({ params }: { params: Promise<{ id: string
     },
   });
 
+  const sortedScenarios = scenarios ? [...scenarios].sort(compareScenariosByRisk) : undefined;
   const selected = scenarios?.find((s) => s.id === selectedId) || null;
 
   return (
@@ -73,8 +75,8 @@ export default function ScenariosPage({ params }: { params: Promise<{ id: string
       <div className="mt-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {isLoading ? (
           <div className="text-sm text-ink-500 col-span-full">Loading…</div>
-        ) : scenarios && scenarios.length > 0 ? (
-          scenarios.map((s) => (
+        ) : sortedScenarios && sortedScenarios.length > 0 ? (
+          sortedScenarios.map((s) => (
             <ScenarioCard key={s.id} scenario={s} onOpen={() => setSelectedId(s.id)} />
           ))
         ) : (

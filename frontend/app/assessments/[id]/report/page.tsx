@@ -4,7 +4,13 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { use } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
-import { bandColor, bandLabel, formatPercent } from "@/lib/utils";
+import {
+  bandColor,
+  bandLabel,
+  compareScenarioScoresByRisk,
+  compareWeaknessesBySeverity,
+  formatPercent,
+} from "@/lib/utils";
 import clsx from "clsx";
 
 export default function ReportPage({ params }: { params: Promise<{ id: string }> }) {
@@ -70,7 +76,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
 
           <Section title={`Scenarios (${report.scenarios.length})`}>
             <ul className="rounded-lg border border-ink-200 bg-white divide-y divide-ink-100">
-              {report.scenarios.map((s) => (
+              {[...report.scenarios].sort(compareScenarioScoresByRisk).map((s) => (
                 <li key={s.code} className="px-4 py-3">
                   <div className="flex items-center justify-between">
                     <div className="font-medium text-sm text-ink-900">{s.name}</div>
@@ -92,7 +98,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
 
           <Section title={`Weaknesses (${report.weaknesses.length})`}>
             <ul className="rounded-lg border border-ink-200 bg-white divide-y divide-ink-100">
-              {report.weaknesses.map((w) => (
+              {[...report.weaknesses].sort(compareWeaknessesBySeverity).map((w) => (
                 <li key={w.id} className="px-4 py-3 text-sm">
                   <span className={clsx(
                     "text-[10px] uppercase tracking-wide font-bold mr-2 rounded px-1.5 py-0.5",

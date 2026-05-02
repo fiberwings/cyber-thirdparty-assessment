@@ -1,13 +1,14 @@
 "use client";
 
 import { ReportOut } from "@/lib/types";
-import { bandColor, bandLabel, formatPercent } from "@/lib/utils";
+import { bandColor, bandLabel, compareScenarioScoresByRisk, formatPercent } from "@/lib/utils";
 import clsx from "clsx";
 
 export function ScoreExplanation({ report }: { report: ReportOut }) {
+  const scenarios = [...report.scenarios].sort(compareScenarioScoresByRisk);
   return (
     <div className="space-y-3">
-      {report.scenarios.map((s) => {
+      {scenarios.map((s) => {
         const meta = report.meta_issues.filter((m) => m.scenario_code === s.code);
         return (
           <div key={s.code} className="rounded-lg border border-ink-200 bg-white p-4">
