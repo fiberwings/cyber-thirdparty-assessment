@@ -47,6 +47,22 @@ export function ControlEditor({
     },
   });
 
+  const remove = useMutation({
+    mutationFn: () => api.deleteExpectedControl(control.id),
+    onSuccess: async () => {
+      await api.recalculate(assessmentId);
+      qc.invalidateQueries({ queryKey: ["scenarios", assessmentId] });
+      qc.invalidateQueries({ queryKey: ["report", assessmentId] });
+    },
+  });
+
+  const onDelete = () => {
+    const ok = window.confirm(
+      `Remove control "${control.code}" from this scenario?\n\nCoverage, effectiveness, and citations are deleted with it. Weaknesses mapped to this control code stop affecting this scenario's score.`,
+    );
+    if (ok) remove.mutate();
+  };
+
   const indicator =
     coverage === "full" ? "bg-emerald-500" : coverage === "partial" ? "bg-amber-500" : "bg-rose-500";
 
@@ -62,6 +78,14 @@ export function ControlEditor({
                 user-edited
               </span>
             )}
+            <button
+              onClick={onDelete}
+              disabled={remove.isPending}
+              title="Remove control from scenario"
+              className="ml-auto text-ink-400 hover:text-rose-600 disabled:opacity-40 text-xs leading-none"
+            >
+              {remove.isPending ? "…" : "🗑"}
+            </button>
           </div>
           <div className="text-sm font-medium text-ink-900">{control.name}</div>
           {control.description && (

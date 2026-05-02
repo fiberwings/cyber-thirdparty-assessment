@@ -154,6 +154,14 @@ class ExpectedControlPatch(BaseModel):
     rationale: Optional[str] = None
 
 
+class ExpectedControlCreate(BaseModel):
+    code: str = Field(min_length=1, max_length=60)
+    name: str = Field(min_length=1, max_length=200)
+    description: str = ""
+    weight: float = Field(default=1.0, ge=0.0, le=2.0)
+    rationale: str = ""
+
+
 # ---------- Weaknesses ----------
 
 class WeaknessRead(BaseModel):

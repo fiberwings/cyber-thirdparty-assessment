@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ScenarioRead, ExpectedControlRead, Coverage, Effectiveness } from "@/lib/types";
+import { ScenarioRead } from "@/lib/types";
 import { api } from "@/lib/api";
 import { ControlEditor } from "./ControlEditor";
 import { useState } from "react";
@@ -21,15 +21,35 @@ export function ScenarioDrawer({
   const [inherentI, setInherentI] = useState(scenario.inherent_impact);
   const [inherentL, setInherentL] = useState(scenario.inherent_likelihood);
 
+  const invalidateScores = () => {
+    qc.invalidateQueries({ queryKey: ["scenarios", assessmentId] });
+    qc.invalidateQueries({ queryKey: ["report", assessmentId] });
+  };
+
   const patch = useMutation({
     mutationFn: () =>
       api.patchScenario(scenario.id, { inherent_impact: inherentI, inherent_likelihood: inherentL }),
     onSuccess: async () => {
       await api.recalculate(assessmentId);
-      qc.invalidateQueries({ queryKey: ["scenarios", assessmentId] });
-      qc.invalidateQueries({ queryKey: ["report", assessmentId] });
+      invalidateScores();
     },
   });
+
+  const remove = useMutation({
+    mutationFn: () => api.deleteScenario(scenario.id),
+    onSuccess: async () => {
+      await api.recalculate(assessmentId);
+      invalidateScores();
+      onClose();
+    },
+  });
+
+  const onDeleteScenario = () => {
+    const ok = window.confirm(
+      `Delete scenario "${scenario.code}"?\n\nThis removes the scenario, its expected controls, and all associated evidence. This cannot be undone.`,
+    );
+    if (ok) remove.mutate();
+  };
 
   return (
     <aside className="fixed inset-y-0 right-0 w-[640px] bg-white border-l border-ink-200 shadow-2xl z-40 flex flex-col">
@@ -42,6 +62,14 @@ export function ScenarioDrawer({
           <span className={clsx("rounded-md text-white text-[11px] font-semibold px-2 py-1", bandColor(scenario.score_band))}>
             {bandLabel(scenario.score_band)}
           </span>
+          <button
+            onClick={onDeleteScenario}
+            disabled={remove.isPending}
+            title="Delete scenario"
+            className="text-ink-400 hover:text-rose-600 disabled:opacity-40 text-sm leading-none"
+          >
+            {remove.isPending ? "…" : "🗑"}
+          </button>
           <button onClick={onClose} className="text-ink-500 hover:text-ink-900 text-xl leading-none">×</button>
         </div>
         <p className="mt-3 text-sm text-ink-700">{scenario.description}</p>
@@ -69,6 +97,9 @@ export function ScenarioDrawer({
             scenarioId={scenario.id}
           />
         ))}
+
+        <AddControlForm scenarioId={scenario.id} assessmentId={assessmentId} />
+
         {scenario.rationale && (
           <div className="mt-6 rounded border border-ink-200 bg-ink-50 p-3">
             <div className="text-xs uppercase tracking-wide text-ink-500 font-semibold mb-1">Score explanation</div>
@@ -95,5 +126,115 @@ function LevelSelect({ label, value, onChange }: { label: string; value: number;
         <option value={4}>Very High</option>
       </select>
     </label>
+  );
+}
+
+function AddControlForm({
+  scenarioId,
+  assessmentId,
+}: {
+  scenarioId: number;
+  assessmentId: number;
+}) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const reset = () => {
+    setCode("");
+    setName("");
+    setDescription("");
+    setError(null);
+  };
+
+  const create = useMutation({
+    mutationFn: () =>
+      api.createExpectedControl(scenarioId, {
+        code: code.trim().toUpperCase(),
+        name: name.trim(),
+        description: description.trim() || undefined,
+      }),
+    onSuccess: async () => {
+      await api.recalculate(assessmentId);
+      qc.invalidateQueries({ queryKey: ["scenarios", assessmentId] });
+      qc.invalidateQueries({ queryKey: ["report", assessmentId] });
+      reset();
+      setOpen(false);
+    },
+    onError: (e: Error) => setError(e.message),
+  });
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="w-full rounded-md border border-dashed border-ink-300 text-ink-600 hover:text-ink-900 hover:border-ink-500 text-xs font-medium py-2 transition"
+      >
+        + Add expected control
+      </button>
+    );
+  }
+
+  const canSubmit = code.trim().length > 0 && name.trim().length > 0 && !create.isPending;
+
+  return (
+    <div className="rounded-md border border-ink-300 bg-ink-50 p-3 space-y-2">
+      <div className="text-[11px] uppercase tracking-wide text-ink-500 font-semibold">
+        Add expected control
+      </div>
+      <input
+        autoFocus
+        className="w-full rounded border border-ink-200 px-2 py-1 text-xs font-mono uppercase"
+        placeholder="CODE (e.g. MFA_REQUIRED)"
+        value={code}
+        onChange={(e) => setCode(e.target.value)}
+        onBlur={(e) => setCode(e.target.value.trim().toUpperCase())}
+      />
+      <input
+        className="w-full rounded border border-ink-200 px-2 py-1 text-sm"
+        placeholder="Control name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+      />
+      <textarea
+        className="w-full rounded border border-ink-200 px-2 py-1 text-xs min-h-[44px]"
+        placeholder="Description (optional)"
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+      />
+      <p className="text-[10px] text-ink-500 leading-snug">
+        Newly added controls have no coverage assessment yet, so they reduce coverage_index until you assess them.
+      </p>
+      {error && (
+        <div className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">
+          {error}
+        </div>
+      )}
+      <div className="flex justify-end gap-2">
+        <button
+          onClick={() => {
+            reset();
+            setOpen(false);
+          }}
+          disabled={create.isPending}
+          className="rounded text-ink-600 hover:text-ink-900 text-xs px-2 py-1 disabled:opacity-40"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={() => {
+            setError(null);
+            create.mutate();
+          }}
+          disabled={!canSubmit}
+          className="rounded bg-ink-900 text-white text-xs font-medium px-3 py-1 hover:bg-ink-700 disabled:opacity-40"
+        >
+          {create.isPending ? "Adding…" : "Add control"}
+        </button>
+      </div>
+    </div>
   );
 }

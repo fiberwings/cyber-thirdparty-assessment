@@ -63,10 +63,16 @@ export const api = {
     http<{ task_id: string }>(`/api/assessments/${id}/scenarios/generate`, { method: "POST" }),
   patchScenario: (id: number, patch: Partial<{ inherent_impact: number; inherent_likelihood: number; name: string; description: string }>) =>
     http<ScenarioRead>(`/api/scenarios/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteScenario: (id: number) =>
+    http<void>(`/api/scenarios/${id}`, { method: "DELETE" }),
   patchControlAssessment: (caId: number, patch: Partial<{ coverage: string; effectiveness: string; rationale: string; is_locked_by_user: boolean }>) =>
     http<ScenarioRead>(`/api/control-assessments/${caId}`, { method: "PATCH", body: JSON.stringify(patch) }),
   upsertControlAssessment: (ecId: number, patch: { coverage?: string; effectiveness?: string; rationale?: string }) =>
     http<ScenarioRead>(`/api/expected-controls/${ecId}/assess`, { method: "POST", body: JSON.stringify(patch) }),
+  createExpectedControl: (scenarioId: number, payload: { code: string; name: string; description?: string; weight?: number; rationale?: string }) =>
+    http<ScenarioRead>(`/api/scenarios/${scenarioId}/expected-controls`, { method: "POST", body: JSON.stringify(payload) }),
+  deleteExpectedControl: (id: number) =>
+    http<void>(`/api/expected-controls/${id}`, { method: "DELETE" }),
 
   // gap analysis / weaknesses / scoring
   runGapAnalysis: (id: number) =>

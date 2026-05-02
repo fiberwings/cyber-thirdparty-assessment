@@ -7,9 +7,10 @@ from app.ai.agents import scenarios as scenarios_agent
 from app.api.deps import db_session, get_assessment, get_control, get_scenario
 from app.api.serializers import serialize_scenario
 from app.db import SessionLocal
-from app.models import ControlAssessment
+from app.models import ControlAssessment, ExpectedControl
 from app.schemas.api import (
     ControlAssessmentPatch,
+    ExpectedControlCreate,
     ExpectedControlPatch,
     ScenarioPatch,
     ScenarioRead,
@@ -87,6 +88,50 @@ def patch_expected_control(
     db.commit()
     db.refresh(ec)
     return serialize_scenario(ec.scenario)
+
+
+@router.post(
+    "/scenarios/{scenario_id}/expected-controls",
+    response_model=ScenarioRead,
+    status_code=201,
+)
+def add_expected_control(
+    scenario_id: int,
+    payload: ExpectedControlCreate,
+    db: Session = Depends(db_session),
+):
+    s = get_scenario(scenario_id, db)
+    code = payload.code.strip().upper()
+    if not code:
+        raise HTTPException(status_code=422, detail="Code is required")
+    if any(ec.code == code for ec in s.expected_controls):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Control {code} already exists on this scenario",
+        )
+    ec = ExpectedControl(
+        scenario_id=s.id,
+        code=code,
+        name=payload.name.strip(),
+        description=payload.description,
+        weight=payload.weight,
+        rationale=payload.rationale,
+    )
+    db.add(ec)
+    s.user_edited = True
+    db.commit()
+    db.refresh(s)
+    return serialize_scenario(s)
+
+
+@router.delete("/expected-controls/{control_id}", status_code=204)
+def delete_expected_control(control_id: int, db: Session = Depends(db_session)):
+    ec = get_control(control_id, db)
+    scenario = ec.scenario
+    db.delete(ec)
+    if scenario is not None:
+        scenario.user_edited = True
+    db.commit()
 
 
 @router.patch("/control-assessments/{ca_id}", response_model=ScenarioRead)
