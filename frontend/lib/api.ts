@@ -86,6 +86,8 @@ export const api = {
     ),
   runNarratives: (id: number) =>
     http<{ task_id: string }>(`/api/assessments/${id}/narratives/run`, { method: "POST" }),
+  runExecutiveSummary: (id: number) =>
+    http<{ task_id: string }>(`/api/assessments/${id}/executive-summary/run`, { method: "POST" }),
   listWeaknesses: (id: number) => http<WeaknessRead[]>(`/api/assessments/${id}/weaknesses`),
   report: (id: number) => http<ReportOut>(`/api/assessments/${id}/report`),
 

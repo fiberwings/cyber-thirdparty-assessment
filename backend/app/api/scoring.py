@@ -19,7 +19,7 @@ from app.scoring.engine import (
     aggregate,
     score_scenario,
 )
-from app.tasks import registry
+from app.tasks import mark_phase_done, mark_phase_error, mark_phase_started, registry
 
 router = APIRouter(prefix="/api/assessments", tags=["scoring"])
 
@@ -33,13 +33,13 @@ def _recalculate_in_session(db: Session, a: Assessment) -> tuple[list[ScenarioSc
     # controls. Unmatched weaknesses don't count here — they're either folded
     # into emergent scenarios by cross_correlation or surfaced as advisory
     # findings, but they don't move a mapped scenario's residual.
-    weaknesses_by_code: dict[str, list[tuple[str, list[str]]]] = {}
+    weaknesses_by_code: dict[str, list[tuple[int, str, list[str]]]] = {}
     for w in a.weaknesses:
         if w.unmatched:
             continue
         codes = list(w.mapped_control_codes or [])
         for code in codes:
-            weaknesses_by_code.setdefault(code, []).append((w.severity, codes))
+            weaknesses_by_code.setdefault(code, []).append((w.id, w.severity, codes))
 
     for s in a.scenarios:
         ec_codes = [ec.code for ec in s.expected_controls]
@@ -49,11 +49,10 @@ def _recalculate_in_session(db: Session, a: Assessment) -> tuple[list[ScenarioSc
         seen: set[int] = set()
         scenario_weaknesses: list[WeaknessInput] = []
         for code in ec_codes:
-            for sev, w_codes in weaknesses_by_code.get(code, []):
-                key = id((sev, tuple(w_codes)))
-                if key in seen:
+            for w_id, sev, w_codes in weaknesses_by_code.get(code, []):
+                if w_id in seen:
                     continue
-                seen.add(key)
+                seen.add(w_id)
                 scenario_weaknesses.append(
                     WeaknessInput(severity=sev, mapped_control_codes=list(w_codes))
                 )
@@ -103,8 +102,9 @@ def _recalculate_in_session(db: Session, a: Assessment) -> tuple[list[ScenarioSc
             inherent_likelihood=s.inherent_likelihood,
             coverage_index=res.coverage_index,
             likelihood_reduction=res.likelihood_reduction,
-            meta_uplift=res.meta_uplift,
-            weakness_uplift=res.weakness_uplift,
+            combined_uplift=res.combined_uplift,
+            meta_uplift_raw=res.meta_uplift_raw,
+            weakness_uplift_raw=res.weakness_uplift_raw,
             effectiveness_downgrades=list(res.effectiveness_downgrades),
             rationale=s.rationale,
         )
@@ -131,17 +131,46 @@ async def run_narratives(assessment_id: int, db: Session = Depends(db_session)):
     """Generate score-explanation prose for every scenario."""
     a = get_assessment(assessment_id, db)
 
+    aid = a.id
+
     async def job(handle):
+        from app.ai.agents import executive_summary as summary_agent
         from app.ai.agents import narrative as narr_agent
+        try:
+            with SessionLocal() as inner:
+                assessment = inner.get(Assessment, aid)
+                scenarios = list(assessment.scenarios)
+                total = max(1, len(scenarios))
+                for i, s in enumerate(scenarios, start=1):
+                    await narr_agent.write_for_scenario(inner, assessment, s)
+                    await handle.update(progress=0.9 * i / total, detail=s.code)
+                await handle.update(progress=0.9, detail="Writing executive summary")
+                await summary_agent.write(inner, aid)
+                assessment = inner.get(Assessment, aid)
+                assessment.current_phase = "score"
+                inner.commit()
+            mark_phase_done(aid, "narratives")
+        except Exception as e:
+            mark_phase_error(aid, "narratives", str(e))
+            raise
+
+    handle = registry.submit(job)
+    mark_phase_started(aid, "narratives", handle.id)
+    return TaskStatusRead(task_id=handle.id, status=handle.status, progress=0.0, detail="")
+
+
+@router.post("/{assessment_id}/executive-summary/run", response_model=TaskStatusRead)
+async def run_executive_summary(assessment_id: int, db: Session = Depends(db_session)):
+    """(Re)generate only the executive summary, e.g. after edits made it stale."""
+    a = get_assessment(assessment_id, db)
+    aid = a.id
+
+    async def job(handle):
+        from app.ai.agents import executive_summary as summary_agent
         with SessionLocal() as inner:
-            assessment = inner.get(Assessment, a.id)
-            scenarios = list(assessment.scenarios)
-            total = max(1, len(scenarios))
-            for i, s in enumerate(scenarios, start=1):
-                await narr_agent.write_for_scenario(inner, assessment, s)
-                await handle.update(progress=i / total, detail=s.code)
-            assessment.current_phase = "score"
-            inner.commit()
+            await handle.update(progress=0.1, detail="Writing executive summary")
+            await summary_agent.write(inner, aid)
+        await handle.update(progress=1.0, detail="Executive summary updated")
 
     handle = registry.submit(job)
     return TaskStatusRead(task_id=handle.id, status=handle.status, progress=0.0, detail="")

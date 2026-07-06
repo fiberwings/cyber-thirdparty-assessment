@@ -57,6 +57,9 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("weakness", "created_at", "DATETIME"),
     ("document", "weakness_extracted_at", "DATETIME"),
     ("scenario", "origin_weakness_ids", "JSON NOT NULL DEFAULT '[]'"),
+    ("assessment", "phase_state", "JSON NOT NULL DEFAULT '{}'"),
+    ("assessment", "executive_summary", "JSON"),
+    ("control_assessment", "unresolved_citations", "JSON NOT NULL DEFAULT '[]'"),
 ]
 
 _POST_MIGRATION_INDEXES: list[str] = [
@@ -87,12 +90,70 @@ def _ensure_columns() -> None:
             conn.exec_driver_sql(stmt)
 
 
+def _backfill_phase_state() -> None:
+    """Seed phase_state for legacy rows from current_phase.
+
+    Existing assessments that predate the phase_state column have no per-phase
+    timestamps. Use the assessment's current_phase to mark previous phases as
+    completed (timestamped at updated_at) so the listing UI shows them as done
+    instead of "all pending". Idempotent: only touches rows whose phase_state
+    is empty.
+    """
+    PHASE_ORDER = [
+        "scoping",
+        "scenarios_generation",
+        "cross_correlation",
+        "gap_analysis",
+        "narratives",
+    ]
+    PHASES_BY_CURRENT = {
+        "scoping": [],
+        "scenarios": ["scoping"],
+        "evidence": ["scoping", "scenarios_generation"],
+        "analysis": ["scoping", "scenarios_generation", "cross_correlation", "gap_analysis"],
+        "score": PHASE_ORDER,
+        "report": PHASE_ORDER,
+    }
+    import json as _json
+    with _engine.begin() as conn:
+        rows = conn.exec_driver_sql(
+            "SELECT id, current_phase, updated_at, phase_state FROM assessment"
+        ).fetchall()
+        for aid, current_phase, updated_at, phase_state_raw in rows:
+            try:
+                existing = _json.loads(phase_state_raw) if phase_state_raw else {}
+            except (TypeError, ValueError):
+                existing = {}
+            if existing:
+                continue
+            done_phases = PHASES_BY_CURRENT.get(current_phase or "", [])
+            if not done_phases:
+                continue
+            backfill = {
+                phase: {
+                    "started_at": updated_at,
+                    "completed_at": updated_at,
+                    "task_id": None,
+                    "error": None,
+                }
+                for phase in done_phases
+                if phase != "scoping"  # scoping is derived, not tracked here
+            }
+            if not backfill:
+                continue
+            conn.exec_driver_sql(
+                "UPDATE assessment SET phase_state = ? WHERE id = ?",
+                (_json.dumps(backfill), aid),
+            )
+
+
 def init_db() -> None:
     """Create all tables and the FTS5 virtual table for chunks."""
     from app import models  # noqa: F401  (register mappers)
 
     Base.metadata.create_all(_engine)
     _ensure_columns()
+    _backfill_phase_state()
 
     # FTS5 virtual table mirrors `chunk.text`. Kept in sync via triggers.
     with _engine.begin() as conn:

@@ -33,6 +33,15 @@ class Assessment(Base):
     current_phase: Mapped[str] = mapped_column(String(40), default="scoping")
     force_continued: Mapped[bool] = mapped_column(Boolean, default=False)
     model_overrides: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Per-phase run state for the four long-running orchestrators
+    # (scenarios_generation, cross_correlation, gap_analysis, narratives).
+    # Shape per phase: {started_at, completed_at, task_id, error}.
+    # Other phases (scoping, evidence, score) are derived from data presence.
+    phase_state: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Persisted AI executive summary:
+    # {generated_at, model_id, fingerprint, summary: ExecutiveSummaryOut dump}.
+    # `fingerprint` hashes the scored state so the API can flag staleness.
+    executive_summary: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=_now
@@ -192,6 +201,10 @@ class ControlAssessment(Base):
     effectiveness: Mapped[str] = mapped_column(String(20), default="unknown")
     rationale: Mapped[str] = mapped_column(Text, default="")
     is_locked_by_user: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Citations the model returned whose quote could not be located in any
+    # chunk of the cited document: [{document_id, page, section_path, quote}].
+    # Kept verbatim instead of being bound to a wrong chunk.
+    unresolved_citations: Mapped[list] = mapped_column(JSON, default=list)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=_now
     )

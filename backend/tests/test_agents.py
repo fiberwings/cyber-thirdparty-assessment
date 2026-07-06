@@ -17,6 +17,7 @@ from app.models import (
     Chunk,
     Document,
     ExpectedControl,
+    MetaIssue,
     Scenario,
     ServiceDescription,
     Weakness,
@@ -123,7 +124,7 @@ async def test_gap_analysis_requires_citation_and_retries(fresh_db, fake_client)
                     "document_id": 1,
                     "page": 7,
                     "section_path": "CC6.1",
-                    "quote": "All admins must use MFA.",
+                    "quote": "All administrative users must authenticate with MFA.",
                 }
             ],
             "rationale": "MFA is mandatory per CC6.1.",
@@ -166,6 +167,174 @@ async def test_gap_analysis_requires_citation_and_retries(fresh_db, fake_client)
         assert ec.assessment is not None
         assert ec.assessment.coverage == "full"
         assert len(ec.assessment.evidence) == 1
+
+
+def _gap_fixture(db):
+    """Assessment + scenario + control + two chunks for citation-binding tests."""
+    a = Assessment(vendor_name="Acme")
+    db.add(a)
+    db.flush()
+    s = Scenario(
+        assessment_id=a.id, code="DATA_LEAK", name="x", description="x",
+        inherent_impact=3, inherent_likelihood=3,
+    )
+    db.add(s)
+    db.flush()
+    ec = ExpectedControl(scenario_id=s.id, code="IAM.MFA", name="MFA")
+    db.add(ec)
+    doc = Document(assessment_id=a.id, kind="soc", filename="soc.pdf",
+                   mime="application/pdf", sha256="abc", size_bytes=100)
+    db.add(doc)
+    db.flush()
+    db.add(Chunk(document_id=doc.id, page=7, section_path="CC6.1", ord=1,
+                 text="Access reviews are performed quarterly for MFA and admin accounts."))
+    db.add(Chunk(document_id=doc.id, page=9, section_path="CC6.2", ord=2,
+                 text="All administrative users must authenticate with MFA on every login."))
+    db.commit()
+    db.refresh(a)
+    db.refresh(s)
+    db.refresh(ec)
+    return a, s, ec, doc
+
+
+@pytest.mark.asyncio
+async def test_gap_analysis_binds_citation_to_chunk_containing_quote(fresh_db, fake_client):
+    """A citation without chunk_id binds to the chunk that actually contains
+    the quote — not the first chunk of the document."""
+    with SessionLocal() as db:
+        a, s, ec, doc = _gap_fixture(db)
+        fake_client.push_json(
+            {
+                "control_code": "IAM.MFA",
+                "coverage": "full",
+                "effectiveness": "strong",
+                "citations": [
+                    {
+                        "document_id": doc.id,
+                        "page": 9,
+                        "section_path": "CC6.2",
+                        "quote": "administrative users must authenticate with MFA",
+                    }
+                ],
+                "rationale": "MFA is enforced.",
+                "meta_flags": [],
+            }
+        )
+        await gap_analysis.assess_control(db, a, s, ec, client=fake_client)
+        db.refresh(ec)
+        (ev,) = ec.assessment.evidence
+        assert ev.chunk.page == 9  # the chunk with the quote, not page 7
+        assert ec.assessment.unresolved_citations == []
+
+
+@pytest.mark.asyncio
+async def test_gap_analysis_unlocatable_quote_is_unresolved_not_misbound(fresh_db, fake_client):
+    """A quote that appears in no chunk must never produce an evidence row;
+    it is preserved verbatim in unresolved_citations."""
+    with SessionLocal() as db:
+        a, s, ec, doc = _gap_fixture(db)
+        fake_client.push_json(
+            {
+                "control_code": "IAM.MFA",
+                "coverage": "partial",
+                "effectiveness": "adequate",
+                "citations": [
+                    {
+                        "document_id": doc.id,
+                        "page": 3,
+                        "section_path": "CC1.1",
+                        "quote": "This sentence does not exist anywhere in the document.",
+                    }
+                ],
+                "rationale": "Some coverage claimed.",
+                "meta_flags": [],
+            }
+        )
+        await gap_analysis.assess_control(db, a, s, ec, client=fake_client)
+        db.refresh(ec)
+        assert ec.assessment.evidence == []
+        (unres,) = ec.assessment.unresolved_citations
+        assert unres["quote"] == "This sentence does not exist anywhere in the document."
+        assert unres["document_id"] == doc.id
+
+
+@pytest.mark.asyncio
+async def test_gap_analysis_second_retrieval_pass(fresh_db, fake_client):
+    """coverage=none + proposed_queries triggers one extra FTS pass and one
+    final re-assessment on the combined evidence; the round-2 verdict wins."""
+    from app.models import ModelCall
+
+    with SessionLocal() as db:
+        a, s, ec, doc = _gap_fixture(db)
+        # A chunk round-1 retrieval misses (no 'IAM'/'MFA'/scenario terms) but
+        # the model's proposed query finds.
+        db.add(Chunk(document_id=doc.id, page=14, section_path="A.9", ord=3,
+                     text="Privileged accounts are reviewed every quarter by the security team."))
+        db.commit()
+
+        fake_client.push_json(
+            {
+                "control_code": "IAM.MFA",
+                "coverage": "none",
+                "effectiveness": "unknown",
+                "citations": [],
+                "rationale": "No evidence in the candidates.",
+                "meta_flags": ["insufficient_info"],
+                "proposed_queries": ["privileged accounts quarter security team"],
+            }
+        )
+        fake_client.push_json(
+            {
+                "control_code": "IAM.MFA",
+                "coverage": "partial",
+                "effectiveness": "adequate",
+                "citations": [
+                    {
+                        "document_id": doc.id,
+                        "page": 14,
+                        "section_path": "A.9",
+                        "quote": "Privileged accounts are reviewed every quarter",
+                    }
+                ],
+                "rationale": "Quarterly review found on second pass.",
+                "meta_flags": [],
+                "proposed_queries": [],
+            }
+        )
+
+        out = await gap_analysis.assess_control(db, a, s, ec, client=fake_client)
+        assert out.coverage == "partial"
+        db.refresh(ec)
+        assert ec.assessment.coverage == "partial"
+        (ev,) = ec.assessment.evidence
+        assert ev.chunk.page == 14
+
+        purposes = [m.purpose for m in db.query(ModelCall).order_by(ModelCall.id).all()]
+        assert purposes == ["gap_analysis_control", "gap_analysis_control_r2"]
+
+
+@pytest.mark.asyncio
+async def test_gap_analysis_rerun_does_not_stack_meta_issues(fresh_db, fake_client):
+    """Re-running gap analysis on the same control replaces its meta issues
+    instead of duplicating them (duplicates would inflate meta uplift)."""
+    canned = {
+        "control_code": "IAM.MFA",
+        "coverage": "none",
+        "effectiveness": "unknown",
+        "citations": [],
+        "rationale": "No evidence found.",
+        "meta_flags": ["insufficient_info"],
+    }
+    with SessionLocal() as db:
+        a, s, ec, doc = _gap_fixture(db)
+        fake_client.push_json(canned)
+        await gap_analysis.assess_control(db, a, s, ec, client=fake_client)
+        db.refresh(ec)  # each production worker loads the control in a fresh session
+        fake_client.push_json(canned)
+        await gap_analysis.assess_control(db, a, s, ec, client=fake_client)
+        issues = db.query(MetaIssue).filter(MetaIssue.assessment_id == a.id).all()
+        assert len(issues) == 1
+        assert issues[0].kind == "insufficient_info"
 
 
 @pytest.mark.asyncio
@@ -383,3 +552,140 @@ async def test_cross_correlation_maps_and_force_emerges(fresh_db, fake_client):
         assert any(
             c.startswith("X-REMEDIATE-") for c in (w2_after.mapped_control_codes or [])
         )
+
+
+@pytest.mark.asyncio
+async def test_cross_correlation_splits_batch_on_truncation(fresh_db, fake_client):
+    """When a cluster call truncates even after the router's enlarged-budget
+    retry, the batch is split in half and each half correlated separately."""
+    with SessionLocal() as db:
+        a = Assessment(vendor_name="Acme")
+        db.add(a)
+        db.flush()
+        s = Scenario(
+            assessment_id=a.id,
+            code="DATA_LEAK",
+            name="PII leakage",
+            description="x",
+            inherent_impact=3,
+            inherent_likelihood=3,
+        )
+        db.add(s)
+        db.flush()
+        db.add(ExpectedControl(scenario_id=s.id, code="IAM.MFA", name="MFA"))
+        ws = []
+        for i in range(2):
+            w = Weakness(
+                assessment_id=a.id,
+                severity="medium",
+                description=f"finding {i}",
+                kind_signal="policy_gap",
+                unmatched=True,
+                mapped_control_codes=[],
+            )
+            db.add(w)
+            ws.append(w)
+        db.commit()
+
+        # Full-batch call truncates twice (initial + router retry), then each
+        # half succeeds.
+        fake_client.push_truncated("{}")
+        fake_client.push_truncated("{}")
+        for w in ws:
+            fake_client.push_json(
+                {
+                    "weakness_mappings": [
+                        {"weakness_id": w.id, "mapped_control_codes": ["IAM.MFA"]},
+                    ],
+                    "propose_emergent": None,
+                    "origin_weakness_ids": [],
+                }
+            )
+
+        stats = await cross_correlation.run(db, a.id, client=fake_client)
+        assert stats["mapped"] == 2
+        assert len(fake_client.calls) == 4
+
+        db.expire_all()
+        for w in ws:
+            w_after = db.get(Weakness, w.id)
+            assert w_after.unmatched is False
+            assert w_after.mapped_control_codes == ["IAM.MFA"]
+
+
+@pytest.mark.asyncio
+async def test_cross_correlation_surfaces_catalogue_only_mapping(fresh_db, fake_client):
+    """A medium weakness the model maps to a catalogue code that is not on any
+    scenario must stay unmatched but be surfaced: proposal preserved as a
+    suggestion + an `unscored_finding` MetaIssue, exactly once across reruns."""
+    with SessionLocal() as db:
+        a = Assessment(vendor_name="Acme")
+        db.add(a)
+        db.flush()
+        s = Scenario(
+            assessment_id=a.id,
+            code="DATA_LEAK",
+            name="PII leakage",
+            description="x",
+            inherent_impact=3,
+            inherent_likelihood=3,
+        )
+        db.add(s)
+        db.flush()
+        db.add(ExpectedControl(scenario_id=s.id, code="IAM.MFA", name="MFA"))
+
+        w = Weakness(
+            assessment_id=a.id,
+            severity="medium",
+            description="Backups are not encrypted",
+            kind_signal="policy_gap",
+            unmatched=True,
+            mapped_control_codes=[],
+        )
+        db.add(w)
+        db.commit()
+
+        # ENC.BACKUP is a catalogue-style code that is NOT on any scenario.
+        canned = {
+            "weakness_mappings": [
+                {"weakness_id": w.id, "mapped_control_codes": ["ENC.BACKUP"]},
+            ],
+            "propose_emergent": None,
+            "origin_weakness_ids": [],
+        }
+        fake_client.push_json(canned)
+        stats = await cross_correlation.run(db, a.id, client=fake_client)
+        assert stats["mapped"] == 0
+        assert stats["unscored"] == 1
+        assert stats["forced_emergent"] == 0  # medium never hits the floor
+
+        db.expire_all()
+        w_after = db.get(Weakness, w.id)
+        assert w_after.unmatched is True  # never enters scoring
+        assert w_after.mapped_control_codes == ["ENC.BACKUP"]  # suggestion kept
+
+        issues = (
+            db.query(MetaIssue)
+            .filter(
+                MetaIssue.assessment_id == a.id,
+                MetaIssue.kind == "unscored_finding",
+            )
+            .all()
+        )
+        assert len(issues) == 1
+        assert issues[0].target_ref == f"weakness:{w.id}"
+        assert issues[0].scenario_code is None  # non-scoring by construction
+        assert issues[0].weight == 0.0
+
+        # Re-run: still unmatched, no duplicate MetaIssue.
+        fake_client.push_json(canned)
+        await cross_correlation.run(db, a.id, client=fake_client)
+        issues = (
+            db.query(MetaIssue)
+            .filter(
+                MetaIssue.assessment_id == a.id,
+                MetaIssue.kind == "unscored_finding",
+            )
+            .all()
+        )
+        assert len(issues) == 1

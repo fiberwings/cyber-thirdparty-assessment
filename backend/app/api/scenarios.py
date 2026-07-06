@@ -16,7 +16,7 @@ from app.schemas.api import (
     ScenarioRead,
     TaskStatusRead,
 )
-from app.tasks import registry
+from app.tasks import mark_phase_done, mark_phase_error, mark_phase_started, registry
 
 router = APIRouter(prefix="/api", tags=["scenarios"])
 
@@ -34,22 +34,30 @@ async def generate_scenarios(assessment_id: int, db: Session = Depends(db_sessio
         raise HTTPException(status_code=400, detail="Set the service description first.")
     summary = (a.description.sufficiency_json or {}).get("summary_so_far") or a.description.text
 
+    aid = a.id
+
     async def job(handle):
         await handle.update(progress=0.05, detail="Generating scenario skeletons...")
 
         async def on_progress(p: float, detail: str):
             await handle.update(progress=p, detail=detail)
 
-        # New session inside the background task to avoid sharing the request session.
-        with SessionLocal() as inner:
-            assessment = inner.get(type(a), a.id)
-            await scenarios_agent.generate(
-                inner, assessment, summary, on_progress=on_progress
-            )
-            assessment.current_phase = "evidence"
-            inner.commit()
+        try:
+            # New session inside the background task to avoid sharing the request session.
+            with SessionLocal() as inner:
+                assessment = inner.get(type(a), aid)
+                await scenarios_agent.generate(
+                    inner, assessment, summary, on_progress=on_progress
+                )
+                assessment.current_phase = "evidence"
+                inner.commit()
+            mark_phase_done(aid, "scenarios_generation")
+        except Exception as e:
+            mark_phase_error(aid, "scenarios_generation", str(e))
+            raise
 
     handle = registry.submit(job)
+    mark_phase_started(aid, "scenarios_generation", handle.id)
     return TaskStatusRead(
         task_id=handle.id, status=handle.status, progress=handle.progress, detail=""
     )

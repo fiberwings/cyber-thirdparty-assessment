@@ -118,6 +118,25 @@ export function ControlEditor({
             </div>
           )}
 
+          {ca && (ca.unresolved_citations?.length ?? 0) > 0 && (
+            <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-2">
+              <div className="text-[10px] uppercase tracking-wide text-amber-800 font-semibold mb-1">
+                Citations that could not be located in the document
+              </div>
+              <ul className="space-y-1 text-[11px] text-amber-900">
+                {ca.unresolved_citations.map((c, i) => (
+                  <li key={i} className="italic">
+                    &ldquo;{c.quote}&rdquo;
+                    {c.page != null && <span className="not-italic text-amber-700"> — claimed p.{c.page}</span>}
+                  </li>
+                ))}
+              </ul>
+              <div className="mt-1 text-[10px] text-amber-700">
+                The model quoted text that was not found verbatim — treat this evidence with caution.
+              </div>
+            </div>
+          )}
+
           <textarea
             className="mt-3 w-full text-xs rounded border border-ink-200 px-2 py-1.5 min-h-[44px]"
             placeholder="Rationale (editable)…"

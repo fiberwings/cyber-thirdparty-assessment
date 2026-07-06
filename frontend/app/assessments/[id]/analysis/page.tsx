@@ -2,11 +2,12 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, pollTask } from "@/lib/api";
-import { use, useState } from "react";
+import { use, useEffect, useState } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
 import { ScenarioCard } from "@/components/ScenarioCard";
 import { ScenarioDrawer } from "@/components/ScenarioDrawer";
-import { compareScenariosByRisk } from "@/lib/utils";
+import { compareScenariosByRisk, relativeTime } from "@/lib/utils";
+import type { Assessment, PhaseInfo, PhaseKey } from "@/lib/types";
 import { useRouter } from "next/navigation";
 
 export default function AnalysisPage({ params }: { params: Promise<{ id: string }> }) {
@@ -20,49 +21,91 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
     queryFn: () => api.listScenarios(aid),
   });
 
-  const [progress, setProgress] = useState<{ status: string; progress: number; detail: string } | null>(null);
+  // Read live phase status from the same assessment query AssessmentShell uses.
+  // Refetch every 1.5s while any of the three phases is running so the page
+  // stays live even if the user reloaded mid-run.
+  const { data: assessment } = useQuery({
+    queryKey: ["assessment", aid],
+    queryFn: () => api.getAssessment(aid),
+    refetchInterval: (q) => {
+      const a = q.state.data as Assessment | undefined;
+      const running = (["correlation", "analysis", "score"] as (PhaseKey | "correlation")[]).some(
+        (k) => a?.phases?.[k]?.state === "running",
+      );
+      return running ? 1500 : false;
+    },
+  });
+
   const [selectedId, setSelectedId] = useState<number | null>(null);
+
+  // After a mutation completes, refresh the assessment so the green checkmark
+  // and timestamp render. If the page is loaded while a job is already in
+  // flight, attach to the existing task_id so we still drive a refetch on done.
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["assessment", aid] });
+    qc.invalidateQueries({ queryKey: ["scenarios", aid] });
+    qc.invalidateQueries({ queryKey: ["weaknesses", aid] });
+    qc.invalidateQueries({ queryKey: ["report", aid] });
+  };
 
   const runGap = useMutation({
     mutationFn: async () => {
       const { task_id } = await api.runGapAnalysis(aid);
-      await pollTask(task_id, setProgress, 800);
+      qc.invalidateQueries({ queryKey: ["assessment", aid] });
+      await pollTask(task_id, undefined, 800);
       await api.recalculate(aid);
     },
-    onSuccess: () => {
-      setProgress(null);
-      qc.invalidateQueries({ queryKey: ["scenarios", aid] });
-      qc.invalidateQueries({ queryKey: ["report", aid] });
-    },
+    onSettled: invalidate,
   });
 
   const synthesize = useMutation({
     mutationFn: async () => {
       const { task_id } = await api.synthesizeWeaknesses(aid);
-      await pollTask(task_id, setProgress, 800);
+      qc.invalidateQueries({ queryKey: ["assessment", aid] });
+      await pollTask(task_id, undefined, 800);
     },
-    onSuccess: () => {
-      setProgress(null);
-      qc.invalidateQueries({ queryKey: ["scenarios", aid] });
-      qc.invalidateQueries({ queryKey: ["weaknesses", aid] });
-    },
+    onSettled: invalidate,
   });
 
   const writeNarratives = useMutation({
     mutationFn: async () => {
       await api.recalculate(aid);
       const { task_id } = await api.runNarratives(aid);
-      await pollTask(task_id, setProgress, 800);
+      qc.invalidateQueries({ queryKey: ["assessment", aid] });
+      await pollTask(task_id, undefined, 800);
     },
     onSuccess: () => {
-      setProgress(null);
-      qc.invalidateQueries({ queryKey: ["scenarios", aid] });
       router.push(`/assessments/${aid}/score`);
     },
+    onSettled: invalidate,
   });
+
+  // Auto-attach to running tasks discovered via phase_state on first render —
+  // means a refresh mid-run still refetches once the task lands.
+  useEffect(() => {
+    const tasksToWatch = (["correlation", "analysis", "score"] as (PhaseKey | "correlation")[])
+      .map((k) => assessment?.phases?.[k])
+      .filter((p): p is PhaseInfo => !!p && p.state === "running" && !!p.task_id)
+      .map((p) => p.task_id as string);
+    if (tasksToWatch.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      tasksToWatch.map((tid) => pollTask(tid, undefined, 1200).catch(() => undefined)),
+    ).then(() => {
+      if (!cancelled) invalidate();
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assessment?.phases?.analysis?.task_id, assessment?.phases?.score?.task_id, assessment?.phases?.correlation?.task_id]);
 
   const sortedScenarios = scenarios ? [...scenarios].sort(compareScenariosByRisk) : undefined;
   const selected = scenarios?.find((s) => s.id === selectedId) || null;
+
+  const gapInfo = assessment?.phases?.analysis;
+  const synthInfo = assessment?.phases?.correlation;
+  const narrInfo = assessment?.phases?.score;
 
   return (
     <AssessmentShell id={aid}>
@@ -72,33 +115,30 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
         Every claim must be cited.
       </p>
 
-      <div className="rounded-lg border border-ink-200 bg-white p-5 max-w-3xl space-y-3">
+      <div className="rounded-lg border border-ink-200 bg-white p-5 max-w-3xl space-y-4">
         <Step
           title="1. Run gap analysis"
           desc="Reasoner walks every scenario × expected control and pulls evidence from your uploaded documents."
-          buttonLabel="Run gap analysis"
-          loading={runGap.isPending}
+          info={gapInfo}
+          submitting={runGap.isPending}
           onRun={() => runGap.mutate()}
         />
+        <div className="border-t border-ink-100" />
         <Step
-          title="2. Synthesize weaknesses & emergent scenarios"
-          desc="Looks for findings the original scoping missed (e.g., pen-test highs surfacing a new attack path)."
-          buttonLabel="Run synthesis"
-          loading={synthesize.isPending}
+          title="2. Cross-correlate weaknesses"
+          desc="Maps extracted findings onto scenario controls and spawns emergent scenarios for risks the original scoping missed."
+          info={synthInfo}
+          submitting={synthesize.isPending}
           onRun={() => synthesize.mutate()}
         />
+        <div className="border-t border-ink-100" />
         <Step
-          title="3. Generate narratives & continue"
-          desc="Recalculates residual risk and writes the score-explanation prose for each scenario."
-          buttonLabel="Generate & view scores"
-          loading={writeNarratives.isPending}
+          title="3. Generate narratives & summary, then continue"
+          desc="Recalculates residual risk, writes the score-explanation prose per scenario and the executive summary."
+          info={narrInfo}
+          submitting={writeNarratives.isPending}
           onRun={() => writeNarratives.mutate()}
         />
-        {progress && (
-          <div className="rounded border border-ink-200 bg-ink-50 p-3 text-xs text-ink-700">
-            {progress.status} · {Math.round(progress.progress * 100)}% · {progress.detail || "…"}
-          </div>
-        )}
       </div>
 
       <div className="mt-8">
@@ -121,21 +161,83 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
   );
 }
 
+function StatusIcon({ state }: { state: PhaseInfo["state"] | undefined }) {
+  switch (state) {
+    case "done":
+      return (
+        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500 text-white text-[11px] font-bold">
+          ✓
+        </span>
+      );
+    case "running":
+      return (
+        <span className="flex h-5 w-5 items-center justify-center rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
+      );
+    case "error":
+      return (
+        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-risk-high text-white text-[11px] font-bold">
+          !
+        </span>
+      );
+    case "pending":
+    default:
+      return <span className="flex h-5 w-5 items-center justify-center rounded-full border-2 border-ink-300" />;
+  }
+}
+
+function statusLine(info: PhaseInfo | undefined): { text: string; cls: string } {
+  if (!info || info.state === "pending") return { text: "Not run yet", cls: "text-ink-500" };
+  if (info.state === "running") {
+    const pct = info.progress != null ? `${Math.round(info.progress * 100)}%` : "running";
+    const det = info.detail ? ` · ${info.detail}` : "";
+    const since = info.started_at ? ` · started ${relativeTime(info.started_at)}` : "";
+    return { text: `${pct}${det}${since}`, cls: "text-amber-700" };
+  }
+  if (info.state === "error") {
+    return { text: info.error || "Failed — try again", cls: "text-risk-high" };
+  }
+  // done
+  return {
+    text: info.completed_at ? `Completed ${new Date(info.completed_at).toLocaleString()}` : "Completed",
+    cls: "text-ink-500",
+  };
+}
+
+function buttonLabel(info: PhaseInfo | undefined, submitting: boolean): string {
+  if (submitting) return "Running…";
+  if (info?.state === "running") return "Running…";
+  if (info?.state === "done") return "Re-run";
+  if (info?.state === "error") return "Retry";
+  return "Run";
+}
+
 function Step({
-  title, desc, buttonLabel, loading, onRun,
-}: { title: string; desc: string; buttonLabel: string; loading: boolean; onRun: () => void }) {
+  title, desc, info, submitting, onRun,
+}: {
+  title: string;
+  desc: string;
+  info: PhaseInfo | undefined;
+  submitting: boolean;
+  onRun: () => void;
+}) {
+  const status = statusLine(info);
+  const isRunning = submitting || info?.state === "running";
   return (
-    <div className="flex items-start justify-between gap-3">
-      <div>
+    <div className="flex items-start gap-3">
+      <div className="pt-0.5">
+        <StatusIcon state={info?.state} />
+      </div>
+      <div className="flex-1 min-w-0">
         <div className="text-sm font-semibold text-ink-900">{title}</div>
         <div className="text-xs text-ink-600 mt-0.5">{desc}</div>
+        <div className={`text-xs mt-1 ${status.cls}`}>{status.text}</div>
       </div>
       <button
         onClick={onRun}
-        disabled={loading}
+        disabled={isRunning}
         className="rounded bg-ink-900 text-white text-xs font-medium px-3 py-1.5 hover:bg-ink-700 disabled:opacity-40 shrink-0"
       >
-        {loading ? "Running…" : buttonLabel}
+        {buttonLabel(info, submitting)}
       </button>
     </div>
   );

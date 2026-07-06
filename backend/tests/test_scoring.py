@@ -55,7 +55,7 @@ def test_meta_uplift_capped():
     )
     r = score_scenario(s)
     # Uplift cap = 2; reduction = 3 → -3 + 2 = -1 → likelihood = 1
-    assert r.meta_uplift == 2
+    assert r.combined_uplift == 2
     assert r.residual_likelihood == 1
 
 
@@ -69,7 +69,8 @@ def test_vague_answer_capped_to_two():
     )
     r = score_scenario(s)
     # Only first 2 vague answers count → 0.5 + 0.5 = 1.0 → rounded uplift = 1
-    assert r.meta_uplift == 1
+    assert r.combined_uplift == 1
+    assert r.meta_uplift_raw == 1.0
 
 
 def test_aggregate_takes_higher_of_top2_and_weighted():

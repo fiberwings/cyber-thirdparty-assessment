@@ -53,8 +53,22 @@ def _format_chunks(chunks: list[Chunk]) -> str:
     return "\n\n---\n\n".join(parts) if parts else "(no candidate evidence found)"
 
 
-def _build_messages(scenario: Scenario, control: ExpectedControl, chunks: list[Chunk]) -> list[dict]:
+def _build_messages(
+    scenario: Scenario,
+    control: ExpectedControl,
+    chunks: list[Chunk],
+    *,
+    second_pass: bool = False,
+) -> list[dict]:
+    note = (
+        "This is the SECOND retrieval pass — the candidate evidence now includes "
+        "the extra chunks located with your proposed queries. This is your final "
+        "assessment: judge on the combined evidence and return proposed_queries: [].\n\n"
+        if second_pass
+        else ""
+    )
     user_block = (
+        f"{note}"
         f"# Scenario\n{scenario.code} — {scenario.name}\n{scenario.description}\n\n"
         f"# Control under assessment\n"
         f"code: {control.code}\nname: {control.name}\n"
@@ -66,6 +80,23 @@ def _build_messages(scenario: Scenario, control: ExpectedControl, chunks: list[C
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_block},
     ]
+
+
+def _norm(s: str) -> str:
+    return " ".join((s or "").lower().split())
+
+
+def _quote_in_chunk(quote: str, chunk_text: str) -> bool:
+    """True when the (normalized) quote genuinely appears in the chunk.
+
+    Falls back to a long prefix for quotes that straddle a chunk boundary —
+    but never to anything shorter, so a match is always a real occurrence.
+    """
+    q = _norm(quote)
+    if len(q) < 10:
+        return False  # too short to be a trustworthy anchor
+    t = _norm(chunk_text)
+    return q in t or (len(q) > 60 and q[:60] in t)
 
 
 def _retrieve_for_control(
@@ -90,7 +121,7 @@ async def assess_control(
     client: OpenRouterClient | None = None,
 ) -> ControlAssessmentOut:
     chunks = _retrieve_for_control(db, assessment.id, control, scenario)
-    chunk_index = {c.id: c for c in chunks}
+    model_override = (assessment.model_overrides or {}).get("gap_analysis")
 
     out: ControlAssessmentOut = await call_structured(
         db,
@@ -99,10 +130,34 @@ async def assess_control(
         messages=_build_messages(scenario, control, chunks),
         schema=ControlAssessmentOut,
         assessment_id=assessment.id,
-        model_override=(assessment.model_overrides or {}).get("gap_analysis"),
+        model_override=model_override,
         max_tokens=4096,
         client=client,
     )
+
+    # Agentic second retrieval pass (bounded to exactly one extra round): when
+    # the first pass found no usable evidence and the model proposed better
+    # search terms, re-retrieve and re-assess on the combined evidence.
+    needs_more = out.coverage == "none" or "insufficient_info" in out.meta_flags
+    if needs_more and out.proposed_queries:
+        extra = retrieval.search(db, assessment.id, *out.proposed_queries)
+        seen_ids = {c.id for c in chunks}
+        new_chunks = [c for c in extra if c.id not in seen_ids]
+        if new_chunks:
+            chunks = chunks + new_chunks
+            out = await call_structured(
+                db,
+                purpose="gap_analysis_control_r2",
+                profile="reasoner",
+                messages=_build_messages(scenario, control, chunks, second_pass=True),
+                schema=ControlAssessmentOut,
+                assessment_id=assessment.id,
+                model_override=model_override,
+                max_tokens=4096,
+                client=client,
+            )
+
+    chunk_index = {c.id: c for c in chunks}
 
     ca = control.assessment or ControlAssessment(expected_control_id=control.id)
     if ca.is_locked_by_user:
@@ -118,21 +173,47 @@ async def assess_control(
     for ev in list(ca.evidence):
         db.delete(ev)
     db.flush()
+    doc_chunk_cache: dict[int, list[Chunk]] = {}
+    unresolved: list[dict] = []
     for cite in out.citations:
-        chunk_id = cite.chunk_id
-        if chunk_id is None and cite.document_id and cite.quote:
-            # Find any chunk whose text contains the quote — best-effort
+        chunk_id = None
+        # Trust the model's chunk_id only when the quote is actually in it.
+        if cite.chunk_id is not None:
+            c = chunk_index.get(cite.chunk_id)
+            if c is not None and _quote_in_chunk(cite.quote, c.text):
+                chunk_id = cite.chunk_id
+        # Otherwise search the retrieved chunks of the cited document.
+        if chunk_id is None and cite.document_id:
             for cid, c in chunk_index.items():
-                if c.document_id == cite.document_id and cite.quote[:30].lower() in c.text.lower():
+                if c.document_id == cite.document_id and _quote_in_chunk(cite.quote, c.text):
                     chunk_id = cid
                     break
-        if chunk_id is None:
-            # As a last resort, attach to the first chunk from that document we retrieved
-            for cid, c in chunk_index.items():
-                if c.document_id == cite.document_id:
-                    chunk_id = cid
+        # Then every chunk of that document (quotes can come from sections the
+        # retrieval pass didn't surface).
+        if chunk_id is None and cite.document_id:
+            if cite.document_id not in doc_chunk_cache:
+                doc_chunk_cache[cite.document_id] = (
+                    db.query(Chunk)
+                    .filter(Chunk.document_id == cite.document_id)
+                    .order_by(Chunk.ord)
+                    .all()
+                )
+            for c in doc_chunk_cache[cite.document_id]:
+                if c.id not in chunk_index and _quote_in_chunk(cite.quote, c.text):
+                    chunk_id = c.id
                     break
         if chunk_id is None:
+            # Never bind evidence to a chunk the quote does not appear in.
+            # Keep the citation verbatim as unresolved — itself a signal about
+            # evidence quality.
+            unresolved.append(
+                {
+                    "document_id": cite.document_id,
+                    "page": cite.page,
+                    "section_path": cite.section_path,
+                    "quote": cite.quote,
+                }
+            )
             continue
         db.add(
             ControlEvidence(
@@ -143,14 +224,27 @@ async def assess_control(
                 ai_rationale=out.rationale[:500],
             )
         )
+    ca.unresolved_citations = unresolved
 
-    # Meta flags become MetaIssues at the assessment level
+    # Meta flags become MetaIssues at the assessment level. Clear this
+    # control's previous flags first so re-running gap analysis stays
+    # idempotent instead of stacking duplicate uplift.
+    target_ref = f"{scenario.code}/{control.code}"
+    (
+        db.query(MetaIssue)
+        .filter(
+            MetaIssue.assessment_id == assessment.id,
+            MetaIssue.target_ref == target_ref,
+            MetaIssue.kind != "unscored_finding",
+        )
+        .delete(synchronize_session=False)
+    )
     for flag in out.meta_flags:
         db.add(
             MetaIssue(
                 assessment_id=assessment.id,
                 kind=flag,
-                target_ref=f"{scenario.code}/{control.code}",
+                target_ref=target_ref,
                 weight={"insufficient_info": 1.0, "vague_answer": 0.5,
                         "missing_doc": 0.75, "conflicting_evidence": 1.0}.get(flag, 0.5),
                 rationale=out.rationale[:300],

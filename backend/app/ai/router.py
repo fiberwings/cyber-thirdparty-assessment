@@ -86,6 +86,9 @@ class OpenRouterError(RuntimeError):
 
 _TRANSIENT_HTTP_CODES = {408, 429, 500, 502, 503, 504, 524}
 
+# Ceiling for the automatic retry-with-more-tokens on truncated output.
+_TRUNCATION_TOKEN_CAP = 16384
+
 
 class OpenRouterClient:
     def __init__(self, api_key: str | None = None, base_url: str | None = None):
@@ -224,15 +227,19 @@ async def call_structured(
     ok = False
     transport_err: OpenRouterError | None = None
 
+    validation_retried = False
+    truncation_retried = False
+    tokens = max_tokens
+
     try:
-        for attempt in range(2):
+        while True:
             try:
                 resp = await cli.chat(
                     messages,
                     model,
                     response_format=response_format,
                     temperature=temperature,
-                    max_tokens=max_tokens,
+                    max_tokens=tokens,
                 )
             except OpenRouterError as e:
                 last_err = str(e)
@@ -246,13 +253,20 @@ async def call_structured(
             out_tok += o_tok
 
             if _finish_reason(resp) == "length":
-                # Output was truncated — a stricter retry won't help, since the
-                # model already used every token it had. Fail fast with a clear
-                # message so callers can bump max_tokens or fall back to a
-                # multi-call strategy.
+                # Output was truncated. A truncated response must never be
+                # parsed or masked — retry once with a doubled output budget,
+                # then fail loudly so callers can segment the work.
+                if not truncation_retried and tokens < _TRUNCATION_TOKEN_CAP:
+                    truncation_retried = True
+                    last_err = (
+                        f"truncated at max_tokens={tokens}; retried with larger budget"
+                    )
+                    tokens = min(tokens * 2, _TRUNCATION_TOKEN_CAP)
+                    continue
                 raise OpenRouterError(
-                    f"Structured call '{purpose}' truncated at max_tokens={max_tokens}. "
-                    f"Bump max_tokens or shorten the schema.",
+                    f"Structured call '{purpose}' output truncated at max_tokens={tokens} "
+                    "even after retrying with a larger budget — the requested output may "
+                    "be too large; re-run, reduce the input, or split the work.",
                     truncated=True,
                 )
 
@@ -263,7 +277,8 @@ async def call_structured(
                 return obj
             except (json.JSONDecodeError, ValidationError) as e:
                 last_err = f"{type(e).__name__}: {e}"
-                if attempt == 0:
+                if not validation_retried:
+                    validation_retried = True
                     # Stricter retry — append the model's bad output and the validator error.
                     messages = list(messages) + [
                         {"role": "assistant", "content": content},
@@ -330,13 +345,30 @@ async def call_text(
     content = ""
     try:
         try:
-            resp = await cli.chat(
-                messages, model, temperature=temperature, max_tokens=max_tokens
-            )
-            content = _extract_content(resp)
-            in_tok, out_tok = _extract_usage(resp)
-            ok = True
-            return content
+            tokens = max_tokens
+            truncation_retried = False
+            while True:
+                resp = await cli.chat(
+                    messages, model, temperature=temperature, max_tokens=tokens
+                )
+                content = _extract_content(resp)
+                i_tok, o_tok = _extract_usage(resp)
+                in_tok += i_tok
+                out_tok += o_tok
+                if _finish_reason(resp) == "length":
+                    # A cut-off narrative must never be persisted silently.
+                    if not truncation_retried and tokens < _TRUNCATION_TOKEN_CAP:
+                        truncation_retried = True
+                        tokens = min(tokens * 2, _TRUNCATION_TOKEN_CAP)
+                        continue
+                    raise OpenRouterError(
+                        f"Text call '{purpose}' output truncated at max_tokens={tokens} "
+                        "even after retrying with a larger budget — re-run or reduce "
+                        "the input.",
+                        truncated=True,
+                    )
+                ok = True
+                return content
         except OpenRouterError as e:
             err = str(e)
             raise

@@ -25,6 +25,12 @@ Add `meta_flags` for any of:
 
 If `coverage = none` because nothing was provided, prefer `meta_flags: ["insufficient_info"]` over fabricating absence.
 
+# Second-chance retrieval (`proposed_queries`)
+
+The candidate chunks come from a keyword search that can miss relevant sections. When you set `coverage: "none"` or flag `insufficient_info`, also propose 2–4 alternative search queries in `proposed_queries` — synonyms, vendor/product terms, or framework references (e.g. "CC6.1", "annex A.12", "privileged access review") that might locate the evidence elsewhere in the documents. One extra retrieval pass will run with your queries and you may be asked to re-assess with the additional chunks. In every other case return an empty `proposed_queries` list.
+
+If the user message says it is the **second retrieval pass**, this is your final assessment: judge on the combined evidence and always return `proposed_queries: []`.
+
 # Output schema (JSON only — no prose, no code fences)
 
 ```
@@ -36,7 +42,8 @@ If `coverage = none` because nothing was provided, prefer `meta_flags: ["insuffi
     {"document_id": 12, "page": 7, "section_path": "CC6.1 Logical Access", "quote": "All administrative users must authenticate with MFA."}
   ],
   "rationale": "1–3 sentences explaining the verdict; reference your citations.",
-  "meta_flags": ["..."]
+  "meta_flags": ["..."],
+  "proposed_queries": []
 }
 ```
 

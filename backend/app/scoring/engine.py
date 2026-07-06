@@ -4,7 +4,9 @@ Pipeline (per scenario):
   1. effectiveness_score(coverage, effectiveness) ∈ [0, 1] for each expected control
   2. weighted average across expected controls
   3. likelihood_reduction = round(weighted_avg × 3) — best case drops 3 bands
-  4. residual_likelihood = clamp(inherent − reduction + meta_uplift, 1, 4)
+  4. residual_likelihood = clamp(inherent − reduction + combined_uplift, 1, 4)
+     where combined_uplift = round(min(cap, meta_raw + weakness_raw)); the raw
+     components are reported alongside so the split stays faithful
   5. band = lookup_4x4(residual_impact, residual_likelihood)
 
 Aggregation (across scenarios):
@@ -126,8 +128,9 @@ class ScenarioScore:
     band: str
     coverage_index: float  # weighted avg eff_score, in [0, 1]
     likelihood_reduction: int
-    meta_uplift: int
-    weakness_uplift: int
+    combined_uplift: int  # bands actually applied to residual likelihood
+    meta_uplift_raw: float  # pre-cap meta contribution, for faithful reporting
+    weakness_uplift_raw: float  # pre-cap weakness contribution
     effectiveness_downgrades: list[str]
     rationale_breakdown: dict
 
@@ -189,8 +192,6 @@ def score_scenario(s: ScenarioInput) -> ScenarioScore:
     # never gain more than `_META_UPLIFT_CAP` bands of uplift in total.
     combined_raw = min(_META_UPLIFT_CAP, raw_meta + raw_weakness)
     combined_int = round(combined_raw)
-    meta_uplift_int = round(raw_meta)
-    weakness_uplift_int = max(0, combined_int - meta_uplift_int)
 
     inherent_l = max(1, min(4, s.inherent_likelihood))
     inherent_i = max(1, min(4, s.inherent_impact))
@@ -206,17 +207,17 @@ def score_scenario(s: ScenarioInput) -> ScenarioScore:
         band=band,
         coverage_index=round(coverage_index, 3),
         likelihood_reduction=likelihood_reduction,
-        meta_uplift=meta_uplift_int,
-        weakness_uplift=weakness_uplift_int,
+        combined_uplift=combined_int,
+        meta_uplift_raw=round(raw_meta, 3),
+        weakness_uplift_raw=round(raw_weakness, 3),
         effectiveness_downgrades=downgrades,
         rationale_breakdown={
             "inherent_impact": inherent_i,
             "inherent_likelihood": inherent_l,
             "coverage_index": round(coverage_index, 3),
             "likelihood_reduction_bands": likelihood_reduction,
-            "meta_uplift_bands": meta_uplift_int,
+            "combined_uplift_bands": combined_int,
             "meta_uplift_raw": round(raw_meta, 3),
-            "weakness_uplift_bands": weakness_uplift_int,
             "weakness_uplift_raw": round(raw_weakness, 3),
             "combined_uplift_raw": round(combined_raw, 3),
             "effectiveness_downgrades": list(downgrades),

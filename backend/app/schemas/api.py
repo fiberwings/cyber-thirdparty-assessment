@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -12,6 +12,17 @@ from pydantic import BaseModel, Field
 
 class AssessmentCreate(BaseModel):
     vendor_name: str = Field(min_length=1, max_length=200)
+
+
+class PhaseInfo(BaseModel):
+    state: Literal["pending", "running", "done", "error"]
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    task_id: Optional[str] = None
+    error: Optional[str] = None
+    # Live detail when state == "running" (e.g. "37% · synthesizing weaknesses").
+    detail: Optional[str] = None
+    progress: Optional[float] = None
 
 
 class AssessmentRead(BaseModel):
@@ -23,6 +34,8 @@ class AssessmentRead(BaseModel):
     model_overrides: dict
     created_at: datetime
     updated_at: datetime
+    # UI-facing phase tracker. Keys: scoping, scenarios, evidence, analysis, score.
+    phases: dict[str, PhaseInfo] = Field(default_factory=dict)
 
     class Config:
         from_attributes = True
@@ -98,6 +111,13 @@ class CitationRead(BaseModel):
     polarity: str
 
 
+class UnresolvedCitationRead(BaseModel):
+    document_id: Optional[int] = None
+    page: Optional[int] = None
+    section_path: str = ""
+    quote: str
+
+
 class ControlAssessmentRead(BaseModel):
     id: int
     coverage: str
@@ -105,6 +125,7 @@ class ControlAssessmentRead(BaseModel):
     rationale: str
     is_locked_by_user: bool
     citations: list[CitationRead]
+    unresolved_citations: list[UnresolvedCitationRead] = Field(default_factory=list)
 
 
 class ExpectedControlRead(BaseModel):
@@ -130,6 +151,7 @@ class ScenarioRead(BaseModel):
     score_band: str
     rationale: str
     user_edited: bool
+    origin_weakness_ids: list[int] = []
     expected_controls: list[ExpectedControlRead]
 
 
@@ -221,8 +243,9 @@ class ScenarioScoreRead(BaseModel):
     inherent_likelihood: int
     coverage_index: float
     likelihood_reduction: int
-    meta_uplift: int
-    weakness_uplift: int = 0
+    combined_uplift: int
+    meta_uplift_raw: float
+    weakness_uplift_raw: float
     effectiveness_downgrades: list[str] = Field(default_factory=list)
     rationale: str
 
@@ -234,6 +257,31 @@ class AggregateScoreRead(BaseModel):
     top2_mean_rank: float
 
 
+class KeyRiskRead(BaseModel):
+    title: str
+    why_it_matters: str
+    scenario_codes: list[str] = Field(default_factory=list)
+    weakness_ids: list[int] = Field(default_factory=list)
+    evidence_basis: str = ""
+
+
+class RecommendedActionRead(BaseModel):
+    action: str
+    priority: str  # immediate|near_term|monitor
+    related_scenario_codes: list[str] = Field(default_factory=list)
+
+
+class ExecutiveSummaryRead(BaseModel):
+    generated_at: str
+    model_id: str
+    # True when scores/weaknesses changed after this summary was written.
+    stale: bool
+    verdict: str
+    key_risks: list[KeyRiskRead]
+    limitations: list[str] = Field(default_factory=list)
+    recommended_actions: list[RecommendedActionRead] = Field(default_factory=list)
+
+
 class ReportOut(BaseModel):
     assessment: AssessmentRead
     description: Optional[DescriptionRead]
@@ -242,6 +290,7 @@ class ReportOut(BaseModel):
     weaknesses: list[WeaknessRead]
     meta_issues: list[MetaIssueRead]
     aggregate: AggregateScoreRead
+    executive_summary: Optional[ExecutiveSummaryRead] = None
 
 
 # ---------- Models ----------
@@ -258,6 +307,7 @@ class ModelOverrides(BaseModel):
     gap_analysis: Optional[str] = None
     weaknesses: Optional[str] = None
     narrative: Optional[str] = None
+    executive_summary: Optional[str] = None
 
 
 # ---------- Tasks ----------

@@ -33,6 +33,13 @@ def fresh_db() -> Iterator[None]:
     get_engine().dispose()
 
 
+class _Truncated:
+    """Marker wrapper: this canned response was cut off at max_tokens."""
+
+    def __init__(self, content: str):
+        self.content = content
+
+
 class FakeOpenRouterClient:
     """Returns canned JSON/text responses in FIFO order."""
 
@@ -46,6 +53,10 @@ class FakeOpenRouterClient:
     def push_json(self, obj: dict | list) -> None:
         self.queue.append(json.dumps(obj))
 
+    def push_truncated(self, content: str = "") -> None:
+        """Queue a response whose finish_reason is `length` (truncated output)."""
+        self.queue.append(_Truncated(content))
+
     async def chat(
         self,
         messages: list[dict],
@@ -56,16 +67,32 @@ class FakeOpenRouterClient:
         max_tokens: int = 2048,
         timeout: float = 120.0,
     ) -> dict:
-        self.calls.append({"model": model, "messages": messages, "response_format": response_format})
+        self.calls.append(
+            {
+                "model": model,
+                "messages": messages,
+                "response_format": response_format,
+                "max_tokens": max_tokens,
+            }
+        )
         if not self.queue:
             raise AssertionError(
                 f"FakeOpenRouterClient out of canned responses (call #{len(self.calls)} for {model})"
             )
         content = self.queue.popleft()
+        finish_reason = "stop"
+        if isinstance(content, _Truncated):
+            finish_reason = "length"
+            content = content.content
         if not isinstance(content, str):
             content = json.dumps(content)
         return {
-            "choices": [{"message": {"role": "assistant", "content": content}}],
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": finish_reason,
+                }
+            ],
             "usage": {"prompt_tokens": 100, "completion_tokens": 50},
         }
 

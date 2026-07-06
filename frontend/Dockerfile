@@ -8,6 +8,11 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
+# next build resolves next.config.mjs's rewrites() once and bakes the result
+# into .next/routes-manifest.json; it is NOT re-evaluated by `next start` at
+# runtime. BACKEND_URL must therefore be correct at build time, not just in
+# docker-compose's runtime `environment:`.
+ENV BACKEND_URL=http://backend:8000
 RUN npm run build
 
 FROM node:22-slim AS runner

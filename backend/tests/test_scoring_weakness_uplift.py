@@ -103,7 +103,8 @@ def test_critical_weakness_lifts_residual_likelihood():
         ],
     )
     weak_score = score_scenario(with_weak)
-    assert weak_score.weakness_uplift >= 1
+    assert weak_score.weakness_uplift_raw >= 1.0
+    assert weak_score.combined_uplift >= 1
     assert weak_score.residual_likelihood >= base_score.residual_likelihood
 
 
@@ -133,7 +134,41 @@ def test_combined_uplift_capped_at_two_bands():
         ],
     )
     score = score_scenario(s)
-    assert score.meta_uplift + score.weakness_uplift <= 2
+    assert score.combined_uplift <= 2
+
+
+def test_uplift_components_reported_faithfully():
+    """When meta saturates the 2.0 cap, the old int split reported
+    weakness_uplift=0 despite real weaknesses. The raws must stay faithful and
+    combined_uplift must equal what was applied to the residual."""
+    s = ScenarioInput(
+        code="X",
+        inherent_impact=4,
+        inherent_likelihood=1,
+        controls=[
+            ControlInput(
+                code="X.A",
+                name="a",
+                weight=1.0,
+                coverage="none",
+                effectiveness="unknown",
+            ),
+        ],
+        meta_issues=[
+            MetaIssueInput(kind="insufficient_info"),  # 1.0
+            MetaIssueInput(kind="conflicting_evidence"),  # 1.0 → meta raw = 2.0 (cap)
+        ],
+        weaknesses=[
+            WeaknessInput(severity="critical", mapped_control_codes=["X.A"]),  # 1.0
+            WeaknessInput(severity="high", mapped_control_codes=["X.A"]),  # 0.75 → 1.75, capped to 1.5
+        ],
+    )
+    score = score_scenario(s)
+    assert score.meta_uplift_raw == 2.0
+    assert score.weakness_uplift_raw == 1.5
+    assert score.combined_uplift == 2  # cap applied to the combination
+    # applied uplift is visible in the residual: 1 + 0 reduction + 2 = 3
+    assert score.residual_likelihood == 3
 
 
 def test_unmapped_weakness_does_not_affect_score():

@@ -5,11 +5,24 @@ import { api } from "@/lib/api";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { phaseDotColor, phaseList, phaseSummary } from "@/lib/utils";
+import type { Assessment } from "@/lib/types";
 
 export default function Home() {
   const qc = useQueryClient();
   const router = useRouter();
-  const { data, isLoading } = useQuery({ queryKey: ["assessments"], queryFn: () => api.listAssessments() });
+  const { data, isLoading } = useQuery({
+    queryKey: ["assessments"],
+    queryFn: () => api.listAssessments(),
+    // Refetch periodically so running phases update without a manual reload.
+    refetchInterval: (q) => {
+      const rows = q.state.data as Assessment[] | undefined;
+      const anyRunning = rows?.some((a) =>
+        Object.values(a.phases ?? {}).some((p) => p?.state === "running"),
+      );
+      return anyRunning ? 2000 : false;
+    },
+  });
   const [vendor, setVendor] = useState("");
   const create = useMutation({
     mutationFn: (name: string) => api.createAssessment(name),
@@ -65,14 +78,25 @@ export default function Home() {
             <ul className="rounded-lg border border-ink-200 bg-white divide-y divide-ink-100">
               {data.map((a) => (
                 <li key={a.id}>
-                  <Link href={`/assessments/${a.id}/scoping`} className="flex items-center justify-between px-5 py-3 hover:bg-ink-50">
-                    <div>
-                      <div className="text-sm font-medium text-ink-900">{a.vendor_name}</div>
-                      <div className="text-xs text-ink-500 mt-0.5">
-                        Phase: <span className="text-ink-700">{a.current_phase}</span> · #{a.id}
+                  <Link href={`/assessments/${a.id}/scoping`} className="flex items-center justify-between gap-4 px-5 py-3 hover:bg-ink-50">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-ink-900">
+                        {a.vendor_name} <span className="text-ink-400 font-normal">#{a.id}</span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1.5">
+                        <div className="flex items-center gap-1" aria-label="Phase tracker">
+                          {phaseList(a).map(({ key, info }) => (
+                            <span
+                              key={key}
+                              title={`${key}: ${info.state}`}
+                              className={`h-2 w-2 rounded-full ${phaseDotColor(info.state)}`}
+                            />
+                          ))}
+                        </div>
+                        <span className="text-xs text-ink-600 truncate">{phaseSummary(a)}</span>
                       </div>
                     </div>
-                    <div className="text-xs text-ink-500">
+                    <div className="text-xs text-ink-500 shrink-0">
                       {new Date(a.created_at).toLocaleString()}
                     </div>
                   </Link>

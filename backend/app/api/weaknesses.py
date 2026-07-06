@@ -7,7 +7,7 @@ from app.ai.agents import cross_correlation as corr_agent
 from app.api.deps import db_session, get_assessment
 from app.db import SessionLocal
 from app.schemas.api import TaskStatusRead, WeaknessRead
-from app.tasks import registry
+from app.tasks import mark_phase_done, mark_phase_error, mark_phase_started, registry
 
 router = APIRouter(prefix="/api/assessments", tags=["weaknesses"])
 
@@ -31,6 +31,7 @@ async def synthesize(assessment_id: int, db: Session = Depends(db_session)):
     cross-correlation over already-extracted weaknesses.
     """
     a = get_assessment(assessment_id, db)
+    aid = a.id
 
     async def job(handle):
         await handle.update(progress=0.05, detail="Correlating weaknesses...")
@@ -38,10 +39,16 @@ async def synthesize(assessment_id: int, db: Session = Depends(db_session)):
         async def on_progress(p: float, detail: str):
             await handle.update(progress=p, detail=detail)
 
-        with SessionLocal() as inner:
-            await corr_agent.run(inner, a.id, on_progress=on_progress)
+        try:
+            with SessionLocal() as inner:
+                await corr_agent.run(inner, aid, on_progress=on_progress)
+            mark_phase_done(aid, "cross_correlation")
+        except Exception as e:
+            mark_phase_error(aid, "cross_correlation", str(e))
+            raise
 
     handle = registry.submit(job)
+    mark_phase_started(aid, "cross_correlation", handle.id)
     return TaskStatusRead(
         task_id=handle.id, status=handle.status, progress=0.0, detail=""
     )

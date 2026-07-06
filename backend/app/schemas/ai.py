@@ -103,6 +103,9 @@ class ControlAssessmentOut(BaseModel):
     citations: list[CitationOut] = Field(default_factory=list)
     rationale: str
     meta_flags: list[MetaKind] = Field(default_factory=list)
+    # Alternative search queries the model proposes when the candidate
+    # evidence was insufficient — drives one bounded second retrieval pass.
+    proposed_queries: list[str] = Field(default_factory=list, max_length=4)
 
     @field_validator("citations")
     @classmethod
@@ -185,3 +188,29 @@ class WeaknessClusterMappingOut(BaseModel):
 
 class CrossCorrelationOut(BaseModel):
     clusters: list[WeaknessClusterMappingOut] = Field(default_factory=list)
+
+
+# ---------- Executive summary ----------
+
+class KeyRiskOut(BaseModel):
+    """One of the assessment's most important risks, in priority order."""
+
+    title: str = Field(min_length=3)
+    why_it_matters: str
+    # References into the supplied data — validated post-hoc by the agent.
+    scenario_codes: list[str] = Field(default_factory=list)
+    weakness_ids: list[int] = Field(default_factory=list)
+    evidence_basis: str = ""
+
+
+class RecommendedActionOut(BaseModel):
+    action: str
+    priority: Literal["immediate", "near_term", "monitor"]
+    related_scenario_codes: list[str] = Field(default_factory=list)
+
+
+class ExecutiveSummaryOut(BaseModel):
+    verdict: str = Field(min_length=20)
+    key_risks: list[KeyRiskOut] = Field(min_length=1, max_length=5)
+    limitations: list[str] = Field(default_factory=list)
+    recommended_actions: list[RecommendedActionOut] = Field(default_factory=list)

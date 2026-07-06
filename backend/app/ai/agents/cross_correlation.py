@@ -31,15 +31,16 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 import json
 
 from sqlalchemy.orm import Session
 
 from app.ai.prompts import load as load_prompt
-from app.ai.router import OpenRouterClient, call_structured
+from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
 from app.db import SessionLocal
-from app.models import Assessment, ExpectedControl, Scenario, Weakness
+from app.models import Assessment, ExpectedControl, MetaIssue, Scenario, Weakness
 from app.schemas.ai import (
     CrossCorrelationOut,
     WeaknessClusterMappingOut,
@@ -77,7 +78,20 @@ def _format_existing_scenarios(scenarios: list[Scenario]) -> str:
     return "\n\n".join(parts)
 
 
-def _format_weaknesses(batch: list[Weakness]) -> str:
+def _format_source_doc(w: Weakness, analysis_dt: datetime) -> str:
+    doc = w.document
+    if doc is None:
+        return ""
+    if doc.created_at is None:
+        return f' [source_doc="{doc.filename}" uploaded=unknown]'
+    days_ago = max(0, (analysis_dt - doc.created_at).days)
+    return (
+        f' [source_doc="{doc.filename}" '
+        f"uploaded={doc.created_at.strftime('%Y-%m-%d')}, {days_ago} days ago]"
+    )
+
+
+def _format_weaknesses(batch: list[Weakness], analysis_dt: datetime) -> str:
     parts = []
     for w in batch:
         hint = ""
@@ -85,7 +99,7 @@ def _format_weaknesses(batch: list[Weakness]) -> str:
             hint = f" (suggested: {', '.join(w.mapped_control_codes)})"
         parts.append(
             f"[id={w.id} severity={w.severity} kind_signal={w.kind_signal}]"
-            f"{hint}\n"
+            f"{hint}{_format_source_doc(w, analysis_dt)}\n"
             f"description: {w.description}\n"
             f"quote: {w.quote or '(no quote)'}"
         )
@@ -93,15 +107,16 @@ def _format_weaknesses(batch: list[Weakness]) -> str:
 
 
 def _build_messages(
-    scenarios: list[Scenario], batch: list[Weakness]
+    scenarios: list[Scenario], batch: list[Weakness], analysis_dt: datetime
 ) -> list[dict]:
     user = (
+        f"# Analysis date: {analysis_dt.strftime('%Y-%m-%d')} (UTC)\n"
         "# Existing scenarios with their expected controls\n"
         f"{_format_existing_scenarios(scenarios)}\n\n"
         "# Control catalogue (additional codes you may use when proposing emergent scenarios)\n"
         f"{_catalog_lines()}\n\n"
         "# Weaknesses to map\n"
-        f"{_format_weaknesses(batch)}\n\n"
+        f"{_format_weaknesses(batch, analysis_dt)}\n\n"
         "Return one cluster mapping per the schema. Use only the integer "
         "weakness_ids shown above. Use only control codes that appear in the "
         "scenarios above or in the catalogue (or X- prefixed for invented codes "
@@ -128,9 +143,13 @@ def _apply_mapping(
     valid_codes: set[str],
     existing_scenario_codes: set[str],
     assessment_id: int,
-) -> tuple[int, int]:
-    """Apply one cluster's mappings. Returns (mapped_count, emergent_count)."""
+) -> tuple[int, int, int]:
+    """Apply one cluster's mappings.
+
+    Returns (mapped_count, emergent_count, unscored_count).
+    """
     mapped_count = 0
+    unscored_count = 0
     for m in cluster.weakness_mappings:
         w = inner.get(Weakness, m.weakness_id)
         if w is None or w.assessment_id != assessment_id:
@@ -141,8 +160,44 @@ def _apply_mapping(
             w.mapped_control_codes = sorted(set(good_codes))
             w.unmatched = False
             mapped_count += 1
-        # else: leave unmatched flagged true; might still get propose_emergent
-        # or forced-emergent in the next pass.
+        elif m.mapped_control_codes:
+            # The model matched this weakness to controls that exist only in
+            # the catalogue, not on any scenario — it cannot reach the score
+            # through a mapping. Keep it unmatched (high/critical will still
+            # hit the forced-emergent floor) but preserve the proposal as a
+            # suggestion and surface an explicit, non-scoring audit record so
+            # the finding is never silently lost.
+            proposed = sorted(set(m.mapped_control_codes))
+            w.mapped_control_codes = proposed
+            target_ref = f"weakness:{w.id}"
+            already = (
+                inner.query(MetaIssue)
+                .filter(
+                    MetaIssue.assessment_id == assessment_id,
+                    MetaIssue.kind == "unscored_finding",
+                    MetaIssue.target_ref == target_ref,
+                )
+                .first()
+            )
+            if already is None:
+                inner.add(
+                    MetaIssue(
+                        assessment_id=assessment_id,
+                        kind="unscored_finding",
+                        scenario_code=None,
+                        target_ref=target_ref,
+                        weight=0.0,
+                        rationale=(
+                            f"{w.severity} weakness maps to catalogue control(s) "
+                            f"{', '.join(proposed)} that are not expected controls of "
+                            "any scenario; it does not contribute to the residual "
+                            "score. Review whether a scenario should cover it."
+                        ),
+                    )
+                )
+            unscored_count += 1
+        # else: no codes proposed at all; leave unmatched for propose_emergent
+        # or the forced-emergent floor.
 
     emergent_count = 0
     if cluster.propose_emergent is not None:
@@ -185,7 +240,7 @@ def _apply_mapping(
             if w is not None and w.assessment_id == assessment_id:
                 w.unmatched = False
         emergent_count = 1
-    return mapped_count, emergent_count
+    return mapped_count, emergent_count, unscored_count
 
 
 def _force_emergent_for_unmapped(
@@ -288,7 +343,7 @@ async def run(
     if not weaknesses:
         if on_progress:
             await on_progress(1.0, "No unmatched weaknesses; nothing to correlate.")
-        return {"mapped": 0, "emergent_proposed": 0, "forced_emergent": 0}
+        return {"mapped": 0, "emergent_proposed": 0, "forced_emergent": 0, "unscored": 0}
 
     # Valid control codes the reasoner may map to: codes from existing
     # scenarios. The catalogue is for emergent scenario *expected_controls*
@@ -306,34 +361,59 @@ async def run(
         for i in range(0, len(ws), _BATCH_SIZE):
             batches.append(ws[i : i + _BATCH_SIZE])
 
+    # Single analysis timestamp shared across all cluster calls so the model
+    # sees a consistent "now" when reasoning about source-document age.
+    analysis_dt = datetime.utcnow()
+
     semaphore = asyncio.Semaphore(_PHASE_CONCURRENCY)
     n = len(batches)
     done = 0
     mapped_total = 0
     emergent_total = 0
+    unscored_total = 0
 
-    async def worker(batch: list[Weakness]) -> WeaknessClusterMappingOut:
+    async def correlate(inner: Session, batch: list[Weakness]) -> WeaknessClusterMappingOut:
+        return await call_structured(
+            inner,
+            purpose="cross_correlation",
+            profile="reasoner",
+            messages=_build_messages(scenarios, batch, analysis_dt),
+            schema=WeaknessClusterMappingOut,
+            assessment_id=assessment_id,
+            model_override=model_override,
+            max_tokens=8192,
+            client=client,
+        )
+
+    async def worker(batch: list[Weakness]) -> list[WeaknessClusterMappingOut]:
         nonlocal done
         async with semaphore:
             with SessionLocal() as inner:
-                out: WeaknessClusterMappingOut = await call_structured(
-                    inner,
-                    purpose="cross_correlation",
-                    profile="reasoner",
-                    messages=_build_messages(scenarios, batch),
-                    schema=WeaknessClusterMappingOut,
-                    assessment_id=assessment_id,
-                    model_override=model_override,
-                    max_tokens=4096,
-                    client=client,
-                )
+                try:
+                    outs = [await correlate(inner, batch)]
+                except OpenRouterError as e:
+                    if not e.truncated or len(batch) < 2:
+                        raise
+                    # Even the router's enlarged-budget retry truncated: split
+                    # the cluster in half and correlate each part on its own
+                    # (batches are ≤ _BATCH_SIZE, so one split is enough).
+                    if on_progress:
+                        await on_progress(
+                            0.05 + 0.85 * done / n,
+                            f"Cluster of {len(batch)} truncated; splitting in half",
+                        )
+                    mid = len(batch) // 2
+                    outs = [
+                        await correlate(inner, batch[:mid]),
+                        await correlate(inner, batch[mid:]),
+                    ]
         done += 1
         if on_progress:
             await on_progress(
                 0.05 + 0.85 * done / n,
                 f"Correlated cluster {done}/{n}",
             )
-        return out
+        return outs
 
     results = await asyncio.gather(
         *[worker(b) for b in batches], return_exceptions=True
@@ -346,11 +426,13 @@ async def run(
             if isinstance(result, BaseException):
                 failures.append(result)
                 continue
-            mapped, emergent = _apply_mapping(
-                inner, result, valid_codes, existing_scenario_codes, assessment_id
-            )
-            mapped_total += mapped
-            emergent_total += emergent
+            for out in result:
+                mapped, emergent, unscored = _apply_mapping(
+                    inner, out, valid_codes, existing_scenario_codes, assessment_id
+                )
+                mapped_total += mapped
+                emergent_total += emergent
+                unscored_total += unscored
         inner.commit()
 
         # Deterministic floor for any high/critical still unmatched.
@@ -363,18 +445,28 @@ async def run(
 
     if failures:
         first = failures[0]
-        raise type(first)(
+        msg = (
             f"cross_correlation: {len(failures)}/{n} clusters failed; "
             f"first failure: {first}"
-        ) if not hasattr(first, "transient") else first
+        )
+        if isinstance(first, OpenRouterError):
+            raise OpenRouterError(
+                msg,
+                transient=first.transient,
+                upstream_code=first.upstream_code,
+                truncated=first.truncated,
+            )
+        raise RuntimeError(msg)
 
     if on_progress:
         await on_progress(
             1.0,
-            f"Mapped {mapped_total}; proposed {emergent_total} emergent; forced {forced}",
+            f"Mapped {mapped_total}; proposed {emergent_total} emergent; "
+            f"forced {forced}; {unscored_total} unscored (catalogue-only)",
         )
     return {
         "mapped": mapped_total,
         "emergent_proposed": emergent_total,
         "forced_emergent": forced,
+        "unscored": unscored_total,
     }

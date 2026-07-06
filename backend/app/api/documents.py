@@ -18,7 +18,7 @@ from app.models import Chunk, Document
 from app.parsing import parse_document
 from app.schemas.api import ChunkRead, DocumentRead
 from app.storage.files import signed_token, store_file, verify_token
-from app.tasks import registry
+from app.tasks import mark_phase_done, mark_phase_error, mark_phase_started, registry
 
 router = APIRouter(prefix="/api", tags=["documents"])
 
@@ -123,10 +123,16 @@ async def upload_document(
                     detail=f"Correlation: {detail}",
                 )
 
-            with SessionLocal() as inner:
-                await corr_agent.run(
-                    inner, assessment_id, on_progress=corr_progress
-                )
+            mark_phase_started(assessment_id, "cross_correlation", handle.id)
+            try:
+                with SessionLocal() as inner:
+                    await corr_agent.run(
+                        inner, assessment_id, on_progress=corr_progress
+                    )
+                mark_phase_done(assessment_id, "cross_correlation")
+            except Exception as e:
+                mark_phase_error(assessment_id, "cross_correlation", str(e))
+                raise
 
     handle = registry.submit(job)
     # Attach the task id to the response so the frontend can poll

@@ -10,6 +10,7 @@ const STAGES: { key: string; label: string; profile: "fast" | "reasoner" }[] = [
   { key: "gap_analysis", label: "Gap analysis",        profile: "reasoner" },
   { key: "weaknesses",   label: "Weakness synth.",     profile: "reasoner" },
   { key: "narrative",    label: "Narratives",          profile: "fast" },
+  { key: "executive_summary", label: "Exec summary",   profile: "reasoner" },
 ];
 
 export function ModelPicker({ assessmentId, overrides }: { assessmentId: number; overrides: Record<string, string> }) {

@@ -114,6 +114,19 @@ def _approx_tokens(text: str) -> int:
     return len(text) // 4
 
 
+def _temporal_header(analysis_dt: datetime, uploaded_dt: datetime | None) -> str:
+    analysis_line = f"# Analysis date: {analysis_dt.strftime('%Y-%m-%d')} (UTC)"
+    if uploaded_dt is None:
+        uploaded_line = "# Document uploaded: unknown"
+    else:
+        days_ago = max(0, (analysis_dt - uploaded_dt).days)
+        uploaded_line = (
+            f"# Document uploaded: {uploaded_dt.strftime('%Y-%m-%d')} "
+            f"({days_ago} days ago)"
+        )
+    return f"{analysis_line}\n{uploaded_line}"
+
+
 def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text.lower().strip())
 
@@ -333,8 +346,12 @@ async def extract(
     kind = doc.kind if doc.kind in _PROMPT_BY_KIND else "other"
     prompt_kind = _kind_prompt(kind)
 
+    analysis_dt = datetime.utcnow()
+    temporal_header = _temporal_header(analysis_dt, doc.created_at)
+
     full_text = _render_chunks(chunks)
     full_input = (
+        f"{temporal_header}\n"
         f"# Vendor service: {vendor_name}\n"
         f"# Document: {doc.filename} (kind: {doc.kind})\n\n"
         f"{full_text}"
@@ -461,6 +478,7 @@ async def extract(
                 or ""
             )
             user_block = (
+                f"{temporal_header}\n"
                 f"# Vendor service: {vendor_name}\n"
                 f"# Document: {doc.filename} (kind: {doc.kind})\n\n"
                 f"# Document preamble\n{preamble}\n\n"

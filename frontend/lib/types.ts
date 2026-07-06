@@ -4,6 +4,29 @@ export type Coverage = "none" | "partial" | "full";
 export type Effectiveness = "weak" | "adequate" | "strong" | "unknown";
 export type Band = "Low" | "Moderate" | "High" | "VeryHigh";
 
+export type PhaseState = "pending" | "running" | "done" | "error";
+
+export interface PhaseInfo {
+  state: PhaseState;
+  started_at: string | null;
+  completed_at: string | null;
+  task_id: string | null;
+  error: string | null;
+  detail: string | null;
+  progress: number | null;
+}
+
+export const PHASE_KEYS = ["scoping", "scenarios", "evidence", "analysis", "score"] as const;
+export type PhaseKey = (typeof PHASE_KEYS)[number];
+
+export const PHASE_LABELS: Record<PhaseKey, string> = {
+  scoping: "Scoping",
+  scenarios: "Inherent risk",
+  evidence: "Evidence",
+  analysis: "Gap analysis",
+  score: "Residual score",
+};
+
 export interface Assessment {
   id: number;
   vendor_name: string;
@@ -13,6 +36,9 @@ export interface Assessment {
   model_overrides: Record<string, string>;
   created_at: string;
   updated_at: string;
+  // "correlation" is a sixth, non-nav key: the pure cross-correlation phase
+  // (the composite "evidence" key also folds per-document extraction in).
+  phases: Partial<Record<PhaseKey | "correlation", PhaseInfo>>;
 }
 
 export interface Turn { id: number; role: string; content: string; created_at: string; }
@@ -49,6 +75,13 @@ export interface CitationRead {
   polarity: string;
 }
 
+export interface UnresolvedCitationRead {
+  document_id: number | null;
+  page: number | null;
+  section_path: string;
+  quote: string;
+}
+
 export interface ControlAssessmentRead {
   id: number;
   coverage: Coverage;
@@ -56,6 +89,7 @@ export interface ControlAssessmentRead {
   rationale: string;
   is_locked_by_user: boolean;
   citations: CitationRead[];
+  unresolved_citations: UnresolvedCitationRead[];
 }
 
 export interface ExpectedControlRead {
@@ -81,6 +115,7 @@ export interface ScenarioRead {
   score_band: Band;
   rationale: string;
   user_edited: boolean;
+  origin_weakness_ids: number[];
   expected_controls: ExpectedControlRead[];
 }
 
@@ -94,7 +129,10 @@ export interface ScenarioScoreRead {
   inherent_likelihood: number;
   coverage_index: number;
   likelihood_reduction: number;
-  meta_uplift: number;
+  combined_uplift: number;
+  meta_uplift_raw: number;
+  weakness_uplift_raw: number;
+  effectiveness_downgrades: string[];
   rationale: string;
 }
 
@@ -112,6 +150,9 @@ export interface WeaknessRead {
   quote: string;
   mapped_control_codes: string[];
   source_chunk_id: number | null;
+  source_document_id: number | null;
+  unmatched: boolean;
+  kind_signal: string;
   user_edited: boolean;
 }
 
@@ -124,6 +165,30 @@ export interface MetaIssueRead {
   scenario_code: string | null;
 }
 
+export interface KeyRiskRead {
+  title: string;
+  why_it_matters: string;
+  scenario_codes: string[];
+  weakness_ids: number[];
+  evidence_basis: string;
+}
+
+export interface RecommendedActionRead {
+  action: string;
+  priority: "immediate" | "near_term" | "monitor";
+  related_scenario_codes: string[];
+}
+
+export interface ExecutiveSummaryRead {
+  generated_at: string;
+  model_id: string;
+  stale: boolean;
+  verdict: string;
+  key_risks: KeyRiskRead[];
+  limitations: string[];
+  recommended_actions: RecommendedActionRead[];
+}
+
 export interface ReportOut {
   assessment: Assessment;
   description: DescriptionRead | null;
@@ -132,6 +197,7 @@ export interface ReportOut {
   weaknesses: WeaknessRead[];
   meta_issues: MetaIssueRead[];
   aggregate: AggregateScoreRead;
+  executive_summary: ExecutiveSummaryRead | null;
 }
 
 export interface ModelProfile {

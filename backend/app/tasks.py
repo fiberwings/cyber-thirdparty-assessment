@@ -10,6 +10,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 JobFn = Callable[["TaskHandle"], Awaitable[Any]]
@@ -103,3 +104,71 @@ class TaskRegistry:
 
 
 registry = TaskRegistry()
+
+
+# ---------- Phase-state helpers ----------
+#
+# Persistent per-phase markers on Assessment.phase_state. Each long-running
+# orchestrator (scenarios_generation, cross_correlation, gap_analysis,
+# narratives) calls mark_phase_started at submit time and mark_phase_done /
+# mark_phase_error from inside the job. Survives server restarts so the UI
+# can render "running / done / failed" without relying on volatile React state.
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat() + "Z"
+
+
+def mark_phase_started(assessment_id: int, phase: str, task_id: str) -> None:
+    from app.db import SessionLocal
+    from app.models import Assessment
+
+    with SessionLocal() as db:
+        a = db.get(Assessment, assessment_id)
+        if a is None:
+            return
+        state = dict(a.phase_state or {})
+        state[phase] = {
+            "started_at": _now_iso(),
+            "completed_at": None,
+            "task_id": task_id,
+            "error": None,
+        }
+        a.phase_state = state
+        db.commit()
+
+
+def mark_phase_done(assessment_id: int, phase: str) -> None:
+    from app.db import SessionLocal
+    from app.models import Assessment
+
+    with SessionLocal() as db:
+        a = db.get(Assessment, assessment_id)
+        if a is None:
+            return
+        state = dict(a.phase_state or {})
+        existing = dict(state.get(phase, {}))
+        existing["completed_at"] = _now_iso()
+        existing["task_id"] = None
+        existing["error"] = None
+        existing.setdefault("started_at", existing["completed_at"])
+        state[phase] = existing
+        a.phase_state = state
+        db.commit()
+
+
+def mark_phase_error(assessment_id: int, phase: str, err: str) -> None:
+    from app.db import SessionLocal
+    from app.models import Assessment
+
+    with SessionLocal() as db:
+        a = db.get(Assessment, assessment_id)
+        if a is None:
+            return
+        state = dict(a.phase_state or {})
+        existing = dict(state.get(phase, {}))
+        existing["task_id"] = None
+        existing["error"] = err[:500]
+        state[phase] = existing
+        a.phase_state = state
+        db.commit()

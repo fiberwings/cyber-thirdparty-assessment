@@ -23,6 +23,8 @@ For each finding / exception / gap, emit:
 
 You are receiving a (possibly large) section of the document. Be **exhaustive within this section** — list every finding the section contains. Duplicate detection across sections is handled downstream by `section_path` + heading normalisation, so do not skip a finding because you suspect it might also be mentioned elsewhere.
 
+If the supplied input includes an `Analysis date` line and the document is meaningfully old relative to it (judged against typical industry expectations for this document type), enumerate one additional skeleton for the staleness itself — heading like "Stale evidence: <document type> dated <date>", severity reflecting how stale, `section_path` of the chunk where the date appears, and the appropriate `kind_signal` for the document type.
+
 # Output schema (JSON only — no prose, no code fences)
 
 ```
