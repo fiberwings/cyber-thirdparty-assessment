@@ -1,0 +1,35 @@
+[project]
+name = "tprm-benchmark"
+version = "0.1.0"
+description = "Automated accuracy benchmark for the TPRM assessment app"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "PyYAML>=6.0",
+    "sqlalchemy>=2.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "respx>=0.21",
+]
+
+[project.scripts]
+bench = "bench.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bench*", "dashboard*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

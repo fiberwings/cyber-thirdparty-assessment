@@ -1,0 +1,114 @@
+/* Chart chrome + ink tokens (reference palette; see dataviz palette.md) */
+.viz-root, body {
+  --surface-1: #fcfcfb;
+  --page: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --grid: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --series-1: #2a78d6;  /* blue */
+  --series-2: #1baf7a;  /* aqua */
+  --series-3: #eda100;  /* yellow */
+  --status-good: #0ca30c;
+  --status-critical: #d03b3b;
+  --delta-good: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  .viz-root, body {
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --series-1: #3987e5;
+    --series-2: #199e70;
+    --series-3: #c98500;
+    --status-good: #0ca30c;
+    --status-critical: #d03b3b;
+    --delta-good: #0ca30c;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.topbar {
+  display: flex; align-items: center; gap: 24px;
+  padding: 12px 24px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+}
+.brand { font-weight: 600; color: var(--text-primary); text-decoration: none; }
+.topbar nav a { color: var(--text-secondary); text-decoration: none; margin-right: 16px; }
+.topbar nav a:hover { color: var(--text-primary); }
+
+main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 16px; }
+h2 { font-size: 16px; font-weight: 600; margin: 32px 0 12px; }
+h3 { font-size: 14px; font-weight: 600; margin: 20px 0 8px; }
+
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.chart-wrap { position: relative; height: 320px; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { color: var(--text-muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: color-mix(in srgb, var(--text-primary) 3%, transparent); }
+a { color: var(--series-1); }
+
+.kpi-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+.stat-tile {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 18px;
+  min-width: 150px;
+}
+.stat-tile .label { color: var(--text-muted); font-size: 12px; }
+.stat-tile .value { font-size: 28px; font-weight: 600; }
+
+.badge {
+  display: inline-block; padding: 1px 8px; border-radius: 10px;
+  font-size: 12px; border: 1px solid var(--border); color: var(--text-secondary);
+}
+.badge.ok { color: var(--status-good); border-color: var(--status-good); }
+.badge.error, .badge.failed { color: var(--status-critical); border-color: var(--status-critical); }
+.badge.judge_error, .badge.partial { color: var(--series-3); border-color: var(--series-3); }
+
+.delta-pos { color: var(--delta-good); }
+.delta-neg { color: var(--status-critical); }
+.muted { color: var(--text-muted); }
+.small { font-size: 12px; }
+.mono { font-family: ui-monospace, monospace; font-size: 12px; }
+
+details { margin: 8px 0; }
+details summary { cursor: pointer; color: var(--text-secondary); }
+details pre {
+  background: color-mix(in srgb, var(--text-primary) 4%, var(--surface-1));
+  padding: 12px; border-radius: 6px; overflow-x: auto;
+  font-size: 12px; max-height: 400px; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-word;
+}
+.meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 24px; }
+.meta-grid dt { color: var(--text-muted); font-size: 12px; }
+.meta-grid dd { margin: 0 0 8px; }

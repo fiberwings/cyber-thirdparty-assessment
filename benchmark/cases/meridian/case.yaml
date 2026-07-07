@@ -1,0 +1,142 @@
+id: meridian
+vendor_name: "Meridian Data Solutions"
+description: |
+  Meridian is a mid-size market data and analytics provider headquartered at
+  200 State Street, Suite 1400, Boston, MA. Founded in 2011, the company
+  employs approximately 450 people and holds ISO 27001:2022 certification with
+  an annual SOC 2 Type II audit.
+
+  ### Services Provided
+  - **Real-time market data feeds** — Equities, fixed income, FX, and
+    derivatives pricing streamed via dedicated REST APIs over TLS 1.2+
+  - **Portfolio risk analytics** — Value-at-Risk (VaR) modeling, stress
+    testing, and scenario analysis
+  - **Regulatory reporting data** — Aggregated data for MiFID II, Dodd-Frank,
+    and other regulatory submissions
+
+  ### Data Exchanged
+  - Bank → Meridian: portfolio positions, trade execution records,
+    pseudonymized client account identifiers, risk model parameters
+    (Confidential / Restricted)
+  - Meridian → Bank: market data feeds, risk analytics outputs, regulatory
+    report data, benchmark indices (Confidential)
+
+  ### Connectivity
+  - REST APIs (real-time market data and analytics): TLS 1.2+, API key +
+    OAuth 2.0
+  - SFTP (batch EOD positions, regulatory reports): SSH keys, IP whitelisting
+  - Site-to-site VPN (administrative access and support): IPSec,
+    certificate-based
+
+  ### Infrastructure
+  - Primary Data Center: Tier III colocation facility, Boston, MA
+  - Disaster Recovery Site: hosted by CloudBridge Regional Services in
+    Toronto, Canada
+  - Cloud: select workloads on AWS US-East-1
+  - CISO: David Chen
+
+  ### Criticality
+  The service feeds front-office risk models and regulatory submissions;
+  a sustained outage would disrupt daily VaR reporting and regulatory
+  deadlines. No direct client PII is exchanged (account identifiers are
+  pseudonymized before transfer).
+documents:
+  - path: docs/Meridian_SIG_Lite_Questionnaire_Response.xlsx
+    kind: questionnaire
+  - path: docs/Meridian_SOC3_Report_2025.pdf
+    kind: soc
+  - path: docs/Meridian_Information_Security_Policy.docx
+    kind: policy
+  - path: docs/Meridian_BC_DR_Policy.docx
+    kind: policy
+golden:
+  expected_weaknesses:
+    - id: MER-W1
+      description: >-
+        Multi-factor authentication is not enforced for privileged or
+        administrative access to production systems; privileged access relies
+        on complex passwords with rotation only.
+      severity: high
+      mapped_control_codes: [IAM.MFA]
+    - id: MER-W2
+      description: >-
+        The disaster recovery hosting subservice organization (CloudBridge,
+        Toronto) is carved out of the SOC examination scope, so its controls
+        are untested by the audit.
+      severity: high
+    - id: MER-W3
+      description: >-
+        No time-bound commitment to notify customers or affected parties of
+        security incidents; notification timing is discretionary.
+      severity: high
+    - id: MER-W4
+      description: >-
+        Shared service accounts remain in use (e.g. for database replication
+        and vendor integration) despite a policy prohibiting shared accounts.
+      severity: medium
+    - id: MER-W5
+      description: >-
+        No privileged account management (PAM) solution; privileged accounts
+        are tracked in a spreadsheet with manual quarterly password rotation.
+      severity: medium
+    - id: MER-W6
+      description: >-
+        Endpoint DLP is deployed on only ~85% of endpoints, leaving the
+        remainder without data loss prevention coverage.
+      severity: medium
+    - id: MER-W7
+      description: >-
+        API key rotation is ad-hoc with no automated rotation; a formal
+        rotation policy is only in draft.
+      severity: medium
+    - id: MER-W8
+      description: >-
+        Recovery Point Objective is not specified for Tier 2 systems in the
+        BC/DR policy (only Tier 1 has a stated RPO).
+      severity: medium
+      optional: true
+    - id: MER-W9
+      description: >-
+        The Business Impact Analysis dates from 2022 and has not been
+        refreshed; business continuity planning for non-IT operations is
+        basic.
+      severity: medium
+      optional: true
+    - id: MER-W10
+      description: >-
+        Legacy systems are allowed a weaker 8-character password minimum
+        versus the 12-character standard, and identified legacy systems
+        remain in place pending replacement.
+      severity: medium
+      optional: true
+  exec_summary_rubric:
+    must_cover:
+      - id: MER-K1
+        point: >-
+          An overall residual risk verdict is stated and is consistent with
+          the computed aggregate band.
+      - id: MER-K2
+        point: >-
+          The lack of MFA for privileged/administrative access to production
+          is identified as a key risk or driver.
+      - id: MER-K3
+        point: >-
+          The untested/carved-out disaster recovery subservice organization
+          (or DR assurance gap generally) is mentioned as a risk or
+          limitation.
+      - id: MER-K4
+        point: >-
+          At least one recommended action addresses privileged access
+          management (MFA, PAM, or shared account remediation).
+    must_not_claim:
+      - id: MER-F1
+        claim: >-
+          Meridian processes or stores payment card data or directly
+          identifiable client PII.
+      - id: MER-F2
+        claim: >-
+          Meridian has completed a full-scale incident response drill or
+          live DR failover test.
+      - id: MER-F3
+        claim: >-
+          No material security weaknesses were identified in the assessment.

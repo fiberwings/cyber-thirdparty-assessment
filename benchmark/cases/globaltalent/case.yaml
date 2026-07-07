@@ -1,0 +1,151 @@
+id: globaltalent
+vendor_name: "GlobalTalent HR Solutions LLC"
+description: |
+  GlobalTalent is a cloud-hosted (SaaS) HR information system used by the
+  bank for employee onboarding/offboarding workflows, time tracking,
+  performance review storage, benefits enrollment, and US payroll processing
+  covering approximately 1,800 employees and contractors.
+
+  ### Data Exchanged
+  - Bank → GlobalTalent: employee PII (names, home addresses, dates of
+    birth, Social Security numbers), compensation and payroll data, bank
+    account details for salary payments, benefits elections, performance
+    review content.
+  - GlobalTalent → Bank: payroll registers, tax filings data, time and
+    attendance reports, benefits enrollment confirmations.
+
+  ### Hosting & Geography
+  The platform is single-tenant-per-customer logical separation on shared
+  infrastructure hosted in AWS (US regions). All data is stored and
+  processed in the United States. Payment processing for benefits add-ons is
+  handled by Stripe as a sub-processor.
+
+  ### Connectivity & Identity
+  - Bank HR and finance staff access the service through a web portal;
+    authentication federates to the bank's identity provider via SAML SSO.
+  - Automated integrations use REST APIs with API tokens and scheduled SFTP
+    batch transfers for payroll files.
+  - No inbound network connectivity into the bank; all integration is
+    outbound or vendor-hosted.
+
+  ### Regulatory Scope
+  The service processes data subject to US federal and state tax and
+  employment law (IRS payroll filings, W-2s), and holds sensitive personal
+  data (SSNs, bank details) subject to state breach-notification statutes.
+
+  ### Criticality
+  Payroll processing is business-critical on a biweekly cycle: a multi-day
+  outage or data-integrity failure would prevent on-time salary payments to
+  ~1,800 staff and jeopardize statutory tax filings.
+documents:
+  - path: docs/SIG_Lite_Response_GlobalTalent_2026Q2.xlsx
+    kind: questionnaire
+  - path: docs/SOC_Report_GlobalTalent_2024-2025.pdf
+    kind: soc
+  - path: docs/Information_Security_Policy_GlobalTalent_v1.2.docx
+    kind: policy
+  - path: "docs/BCP_DR_Policy_GlobalTalent_v0.9_(DRAFT).docx"
+    kind: policy
+  - path: docs/PenTest_Attestation_GlobalTalent.pdf
+    kind: pentest
+golden:
+  expected_weaknesses:
+    - id: GT-W1
+      description: >-
+        The SOC report carries a qualified opinion: the auditor identified
+        material weaknesses in multiple control areas.
+      severity: high
+    - id: GT-W2
+      description: >-
+        Multi-factor authentication for administrative accounts is only
+        recommended, not mandated, by policy.
+      severity: high
+      mapped_control_codes: [IAM.MFA]
+    - id: GT-W3
+      description: >-
+        No formal RTO or RPO values are defined; recovery objectives are
+        stated only as "best effort", providing no measurable recovery
+        commitment.
+      severity: high
+    - id: GT-W4
+      description: >-
+        No BCP/DR test has ever been performed and the policy defines no
+        testing cadence, leaving recovery capability unvalidated.
+      severity: high
+    - id: GT-W5
+      description: >-
+        Privileged account review evidence was missing for 6 of 12 sampled
+        quarters during the audit period.
+      severity: high
+    - id: GT-W6
+      description: >-
+        Change management control failures: 14 of 35 sampled production
+        deployments lacked documented evidence of the required secondary
+        approval.
+      severity: high
+    - id: GT-W7
+      description: >-
+        AWS, the primary hosting provider, is excluded from the audit scope
+        via the carve-out method with no equivalent testing of its controls.
+      severity: high
+    - id: GT-W8
+      description: >-
+        Three high-severity vulnerabilities were found in the external-facing
+        portal and production VPCs, and no independent retest verified the
+        vendor's claimed remediation.
+      severity: medium
+    - id: GT-W9
+      description: >-
+        No evidence that production payroll database backups were
+        restore-tested during the audit period; restore testing is triggered
+        only by configuration changes, not a periodic cadence.
+      severity: medium
+    - id: GT-W10
+      description: >-
+        No patch SLAs tied to vulnerability severity are documented, and no
+        vulnerability scanning cadence is defined.
+      severity: medium
+      optional: true
+    - id: GT-W11
+      description: >-
+        The BCP/DR policy is an unapproved draft (v0.9), so recovery
+        governance is not ratified.
+      severity: medium
+      optional: true
+    - id: GT-W12
+      description: >-
+        Stripe (payment processing sub-processor) is excluded from the audit
+        scope via carve-out with no equivalent testing.
+      severity: medium
+      optional: true
+  exec_summary_rubric:
+    must_cover:
+      - id: GT-K1
+        point: >-
+          An overall residual risk verdict is stated and is consistent with
+          the computed aggregate band.
+      - id: GT-K2
+        point: >-
+          The qualified SOC audit opinion and/or the identified material
+          weaknesses are called out as a key risk.
+      - id: GT-K3
+        point: >-
+          Unvalidated recovery capability (no RTO/RPO, never-tested BCP/DR,
+          or unverified backup restores) is identified as a key risk given
+          payroll criticality.
+      - id: GT-K4
+        point: >-
+          At least one recommended action addresses privileged access or
+          change management control failures observed in the audit.
+    must_not_claim:
+      - id: GT-F1
+        claim: >-
+          The SOC report opinion was unqualified or "clean".
+      - id: GT-F2
+        claim: >-
+          Business continuity / disaster recovery capabilities have been
+          successfully tested.
+      - id: GT-F3
+        claim: >-
+          The penetration test findings were independently verified as
+          remediated.

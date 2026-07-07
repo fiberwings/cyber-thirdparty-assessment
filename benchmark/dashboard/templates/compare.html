@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Compare #{{ meta_a.id }} vs #{{ meta_b.id }}{% endblock %}
+{% block content %}
+<h1>Compare run <a href="/runs/{{ meta_a.id }}">#{{ meta_a.id }}</a> (A) → <a href="/runs/{{ meta_b.id }}">#{{ meta_b.id }}</a> (B)</h1>
+
+<div class="card">
+  <table>
+    <thead><tr><th></th><th>Run A #{{ meta_a.id }}</th><th>Run B #{{ meta_b.id }}</th></tr></thead>
+    <tbody>
+      <tr><td class="muted">Date</td><td>{{ (meta_a.started_at or '')[:16] | replace('T',' ') }}</td><td>{{ (meta_b.started_at or '')[:16] | replace('T',' ') }}</td></tr>
+      <tr><td class="muted">App</td><td class="mono">{{ meta_a.app_version }} @ {{ meta_a.app_git_sha }}{% if meta_a.app_git_dirty %}+dirty{% endif %}</td><td class="mono">{{ meta_b.app_version }} @ {{ meta_b.app_git_sha }}{% if meta_b.app_git_dirty %}+dirty{% endif %}</td></tr>
+      <tr><td class="muted">Models</td><td class="small">{{ meta_a.model_label }}</td><td class="small">{{ meta_b.model_label }}</td></tr>
+      <tr><td class="muted">Judge</td><td class="small">{{ meta_a.judge_model }}</td><td class="small">{{ meta_b.judge_model }}</td></tr>
+      <tr><td class="muted">Mean F1</td><td class="num">{{ '%.3f' % meta_a.mean_f1 if meta_a.mean_f1 is not none else '—' }}</td><td class="num">{{ '%.3f' % meta_b.mean_f1 if meta_b.mean_f1 is not none else '—' }}</td></tr>
+      <tr><td class="muted">Mean exec</td><td class="num">{{ '%.0f' % meta_a.mean_exec if meta_a.mean_exec is not none else '—' }}</td><td class="num">{{ '%.0f' % meta_b.mean_exec if meta_b.mean_exec is not none else '—' }}</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>Per-case deltas (B − A, mean over reps)</h2>
+<div class="card">
+  <table>
+    <thead>
+      <tr><th>Case</th>
+        <th class="num">F1 A</th><th class="num">F1 B</th><th class="num">ΔF1</th>
+        <th class="num">Recall A</th><th class="num">Recall B</th><th class="num">ΔRecall</th>
+        <th class="num">Exec A</th><th class="num">Exec B</th><th class="num">ΔExec</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in delta_rows %}
+      <tr>
+        <td>{{ row.case_id }}</td>
+        <td class="num">{{ '%.3f' % row.a.f1 if row.a and row.a.f1 is not none else '—' }}</td>
+        <td class="num">{{ '%.3f' % row.b.f1 if row.b and row.b.f1 is not none else '—' }}</td>
+        <td class="num {% if row.deltas.get('f1', 0) > 0 %}delta-pos{% elif row.deltas.get('f1', 0) < 0 %}delta-neg{% endif %}">
+          {{ '%+.3f' % row.deltas.f1 if 'f1' in row.deltas else '—' }}</td>
+        <td class="num">{{ '%.3f' % row.a.recall if row.a and row.a.recall is not none else '—' }}</td>
+        <td class="num">{{ '%.3f' % row.b.recall if row.b and row.b.recall is not none else '—' }}</td>
+        <td class="num {% if row.deltas.get('recall', 0) > 0 %}delta-pos{% elif row.deltas.get('recall', 0) < 0 %}delta-neg{% endif %}">
+          {{ '%+.3f' % row.deltas.recall if 'recall' in row.deltas else '—' }}</td>
+        <td class="num">{{ '%.0f' % row.a.exec_overall if row.a and row.a.exec_overall is not none else '—' }}</td>
+        <td class="num">{{ '%.0f' % row.b.exec_overall if row.b and row.b.exec_overall is not none else '—' }}</td>
+        <td class="num {% if row.deltas.get('exec_overall', 0) > 0 %}delta-pos{% elif row.deltas.get('exec_overall', 0) < 0 %}delta-neg{% endif %}">
+          {{ '%+.1f' % row.deltas.exec_overall if 'exec_overall' in row.deltas else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>Finding-level changes (B vs A)</h2>
+{% for case_id, d in diffs.items() %}
+<div class="card">
+  <h3>{{ case_id }}</h3>
+  {% if d.newly_missed %}
+  <p><strong class="delta-neg">Newly missed golden findings:</strong> {{ d.newly_missed | join(', ') }}</p>
+  {% endif %}
+  {% if d.fixed_missed %}
+  <p><strong class="delta-pos">No longer missed:</strong> {{ d.fixed_missed | join(', ') }}</p>
+  {% endif %}
+  {% if d.newly_extra %}
+  <p><strong>New extra (unexpected) findings in B:</strong></p>
+  <ul class="small">
+    {% for e in d.newly_extra %}<li>{{ e }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if not d.newly_missed and not d.fixed_missed and not d.newly_extra %}
+  <p class="muted small">no finding-level changes</p>
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}

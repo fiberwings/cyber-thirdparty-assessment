@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Run #{{ meta.id }} · TPRM Benchmark{% endblock %}
+{% block content %}
+<h1>Run #{{ meta.id }} <span class="badge {{ meta.status }}">{{ meta.status }}</span></h1>
+
+<div class="card">
+  <dl class="meta-grid">
+    <div><dt>Started</dt><dd>{{ (meta.started_at or '')[:19] | replace('T', ' ') }}</dd></div>
+    <div><dt>Finished</dt><dd>{{ (meta.finished_at or '')[:19] | replace('T', ' ') }}</dd></div>
+    <div><dt>App version</dt><dd class="mono">{{ meta.app_version }} @ {{ meta.full_sha }}{% if meta.app_git_dirty %} (dirty){% endif %}</dd></div>
+    <div><dt>Backend</dt><dd class="mono">{{ meta.backend_url }}</dd></div>
+    <div><dt>Models</dt><dd class="small">{{ meta.model_label }}</dd></div>
+    <div><dt>Judge</dt><dd class="mono">{{ meta.judge_model }} ({{ meta.judge_prompts | tojson }})</dd></div>
+  </dl>
+  <details>
+    <summary>Full run config &amp; model snapshot</summary>
+    <pre>{{ meta.config | tojson(indent=2) }}
+{{ meta.models | tojson(indent=2) }}</pre>
+  </details>
+</div>
+
+<div class="kpi-row">
+  <div class="stat-tile"><div class="label">Cases ok</div><div class="value">{{ meta.n_ok }}/{{ meta.n_cases }}</div></div>
+  <div class="stat-tile"><div class="label">Mean findings F1</div><div class="value">{{ '%.3f' % meta.mean_f1 if meta.mean_f1 is not none else '—' }}</div></div>
+  <div class="stat-tile"><div class="label">Mean exec score</div><div class="value">{{ '%.0f' % meta.mean_exec if meta.mean_exec is not none else '—' }}</div></div>
+</div>
+
+<div class="grid-2">
+  <div class="card">
+    <h3>Findings accuracy per case</h3>
+    <div class="chart-wrap"><canvas id="findings-bars"></canvas></div>
+  </div>
+  <div class="card">
+    <h3>Exec summary subscores per case</h3>
+    <div class="chart-wrap"><canvas id="exec-bars"></canvas></div>
+  </div>
+</div>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>Case</th><th>Rep</th><th>Status</th><th>Band</th>
+        <th class="num">P</th><th class="num">R</th><th class="num">F1</th>
+        <th class="num">Sev =</th><th class="num">Sev MAE</th>
+        <th class="num">Cov</th><th class="num">Faith</th><th class="num">Viol</th><th class="num">Exec</th>
+        <th class="num">Time (s)</th><th class="num">Cost ($)</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.case_id }}</td>
+        <td class="num">{{ r.repetition }}</td>
+        <td><span class="badge {{ r.status }}">{{ r.status }}</span>
+          {% if r.error_stage %}<div class="small muted">{{ r.error_stage }}: {{ r.error_detail[:120] }}</div>{% endif %}
+        </td>
+        <td>{{ r.band or '—' }}</td>
+        <td class="num">{{ '%.2f' % r.precision if r.precision is not none else '—' }}</td>
+        <td class="num">{{ '%.2f' % r.recall if r.recall is not none else '—' }}</td>
+        <td class="num">{{ '%.2f' % r.f1 if r.f1 is not none else '—' }}</td>
+        <td class="num">{{ '%.2f' % r.severity_exact if r.severity_exact is not none else '—' }}</td>
+        <td class="num">{{ '%.2f' % r.severity_mae if r.severity_mae is not none else '—' }}</td>
+        <td class="num">{{ '%.2f' % r.exec_coverage if r.exec_coverage is not none else '—' }}</td>
+        <td class="num">{{ '%.2f' % r.exec_faithfulness if r.exec_faithfulness is not none else '—' }}</td>
+        <td class="num">{{ '%.2f' % r.exec_violation if r.exec_violation is not none else '—' }}</td>
+        <td class="num">{{ '%.0f' % r.exec_overall if r.exec_overall is not none else '—' }}</td>
+        <td class="num">{{ r.duration_s if r.duration_s is not none else '—' }}</td>
+        <td class="num">{{ '%.3f' % r.cost_usd if r.cost_usd is not none else '—' }}</td>
+        <td><a href="/runs/{{ meta.id }}/cases/{{ r.id }}">detail</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script type="application/json" id="charts-data">{{ charts_json | safe }}</script>
+<script>
+window.initCharts = function () {
+  const c = readJSON('charts-data');
+  if (!c || !c.labels.length) return;
+  barChart('findings-bars', c.labels,
+    { Precision: c.precision, Recall: c.recall, F1: c.f1 }, 1);
+  barChart('exec-bars', c.labels,
+    { Coverage: c.exec_coverage, Faithfulness: c.exec_faithfulness, 'No-violation': c.exec_violation }, 1);
+};
+</script>
+{% endblock %}

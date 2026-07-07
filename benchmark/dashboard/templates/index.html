@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Runs · TPRM Benchmark{% endblock %}
+{% block content %}
+<h1>Benchmark runs</h1>
+
+{% if summaries %}
+<div class="grid-2">
+  <div class="card">
+    <h3>Findings F1 per case, across runs</h3>
+    <div class="chart-wrap"><canvas id="trend-f1"></canvas></div>
+  </div>
+  <div class="card">
+    <h3>Exec summary score per case, across runs</h3>
+    <div class="chart-wrap"><canvas id="trend-exec"></canvas></div>
+  </div>
+</div>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>Run</th><th>Date</th><th>Status</th><th>App</th><th>Models</th>
+        <th>Judge</th><th class="num">Cases ok</th><th class="num">Mean F1</th>
+        <th class="num">Mean exec</th><th>Notes</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in summaries %}
+      <tr>
+        <td><a href="/runs/{{ s.id }}">#{{ s.id }}</a></td>
+        <td class="small">{{ (s.started_at or '')[:16] | replace('T', ' ') }}</td>
+        <td><span class="badge {{ s.status }}">{{ s.status }}</span></td>
+        <td class="mono">{{ s.app_version }} @ {{ s.app_git_sha }}{% if s.app_git_dirty %}+dirty{% endif %}</td>
+        <td class="small">{{ s.model_label }}</td>
+        <td class="small">{{ s.judge_model.split('/')[-1] }}</td>
+        <td class="num">{{ s.n_ok }}/{{ s.n_cases }}</td>
+        <td class="num">{{ '%.3f' % s.mean_f1 if s.mean_f1 is not none else '—' }}</td>
+        <td class="num">{{ '%.0f' % s.mean_exec if s.mean_exec is not none else '—' }}</td>
+        <td class="small muted">{{ s.notes }}</td>
+        <td class="small">
+          {% if not loop.last %}
+          <a href="/compare?a={{ summaries[loop.index].id }}&b={{ s.id }}">vs prev</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script type="application/json" id="trend-data">{{ trend_json | safe }}</script>
+<script>
+window.initCharts = function () {
+  const trend = readJSON('trend-data');
+  if (!trend || !trend.labels.length) return;
+  lineChart('trend-f1', trend.labels, trend.f1, 1);
+  lineChart('trend-exec', trend.labels, trend.exec, 100);
+};
+</script>
+{% else %}
+<div class="card">No runs yet. Start one with <code class="mono">bench run</code>.</div>
+{% endif %}
+{% endblock %}

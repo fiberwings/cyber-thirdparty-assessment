@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}Case {{ cr.case_id }} · Run #{{ run_id }}{% endblock %}
+{% block content %}
+<h1>
+  <a href="/runs/{{ run_id }}">Run #{{ run_id }}</a> · {{ cr.case_id }} (rep {{ cr.repetition }})
+  <span class="badge {{ cr.status }}">{{ cr.status }}</span>
+</h1>
+
+<div class="card">
+  <dl class="meta-grid">
+    <div><dt>Assessment</dt><dd>#{{ cr.assessment_id or '—' }}{% if cr.assessment_deleted %} <span class="muted">(deleted after run)</span>{% endif %}</dd></div>
+    <div><dt>Aggregate</dt><dd>{{ cr.aggregate_band or '—' }} (rank {{ cr.aggregate_rank if cr.aggregate_rank is not none else '—' }})</dd></div>
+    <div><dt>Findings</dt><dd>TP {{ cr.tp }} · FP {{ cr.fp }} · FN {{ cr.fn }} → P {{ '%.2f' % cr.precision if cr.precision is not none else '—' }} / R {{ '%.2f' % cr.recall if cr.recall is not none else '—' }} / F1 {{ '%.2f' % cr.f1 if cr.f1 is not none else '—' }}</dd></div>
+    <div><dt>Exec summary</dt><dd>{{ '%.0f' % cr.exec_overall if cr.exec_overall is not none else '—' }} (cov {{ '%.2f' % cr.exec_coverage if cr.exec_coverage is not none else '—' }} · faith {{ '%.2f' % cr.exec_faithfulness if cr.exec_faithfulness is not none else '—' }} · viol {{ '%.2f' % cr.exec_violation if cr.exec_violation is not none else '—' }})</dd></div>
+  </dl>
+  {% if cr.error_stage %}
+  <p><strong>Error at {{ cr.error_stage }}:</strong> <span class="mono">{{ cr.error_detail }}</span></p>
+  {% endif %}
+</div>
+
+<h2>Matched findings ({{ matched | length }})</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>Golden</th><th>Expected (golden)</th><th>Reported by app</th><th>Sev (exp / act)</th><th>Confidence</th><th>Counted</th><th>Judge justification</th></tr></thead>
+    <tbody>
+      {% for m in matched %}
+      <tr>
+        <td class="mono">{{ m.expected_id }}{% if m.expected_optional %} <span class="muted">(opt)</span>{% endif %}</td>
+        <td>{{ m.expected_description }}</td>
+        <td>{{ m.actual_description }}</td>
+        <td>{{ m.expected_severity }} / {{ m.actual_severity }}</td>
+        <td>{{ m.confidence }}</td>
+        <td>{{ 'yes' if m.counted else 'no' }}</td>
+        <td class="small muted">{{ m.justification }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">none</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>Missed golden findings ({{ missed | length }})</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>Golden</th><th>Expected (golden)</th><th>Severity</th><th>Counted as FN</th><th>Judge justification</th></tr></thead>
+    <tbody>
+      {% for m in missed %}
+      <tr>
+        <td class="mono">{{ m.expected_id }}{% if m.expected_optional %} <span class="muted">(opt)</span>{% endif %}</td>
+        <td>{{ m.expected_description }}</td>
+        <td>{{ m.expected_severity }}</td>
+        <td>{{ 'yes' if m.counted else 'no' }}</td>
+        <td class="small muted">{{ m.justification }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted">none</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>Extra findings reported by the app ({{ extra | length }})</h2>
+<div class="card">
+  <p class="small muted">Reported but not in the answer key. These count as false positives —
+  review them: a defensible extra finding may deserve promotion into the golden set.</p>
+  <table>
+    <thead><tr><th>App weakness</th><th>Severity</th><th>Judge justification</th></tr></thead>
+    <tbody>
+      {% for m in extra %}
+      <tr>
+        <td>{{ m.actual_description }}</td>
+        <td>{{ m.actual_severity }}</td>
+        <td class="small muted">{{ m.justification }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="3" class="muted">none</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if rubric %}
+<h2>Executive summary rubric</h2>
+<div class="card">
+  <h3>Coverage</h3>
+  <table>
+    <thead><tr><th>Point</th><th>Status</th><th>Justification</th></tr></thead>
+    <tbody>
+      {% for c in rubric.coverage %}
+      <tr><td class="mono">{{ c.point_id }}</td><td><span class="badge {{ 'ok' if c.status == 'covered' else ('error' if c.status == 'missing' else '') }}">{{ c.status }}</span></td><td class="small">{{ c.justification }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <h3>Forbidden claims</h3>
+  <table>
+    <thead><tr><th>Claim</th><th>Status</th><th>Justification</th></tr></thead>
+    <tbody>
+      {% for v in rubric.violations %}
+      <tr><td class="mono">{{ v.claim_id }}</td><td><span class="badge {{ 'error' if v.status == 'violated' else 'ok' }}">{{ v.status }}</span></td><td class="small">{{ v.justification }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <h3>Faithfulness: {{ rubric.faithfulness.score }}/5</h3>
+  <p class="small">{{ rubric.faithfulness.justification }}</p>
+  {% if rubric.faithfulness.unsupported_claims %}
+  <p class="small"><strong>Unsupported claims:</strong></p>
+  <ul class="small">
+    {% for u in rubric.faithfulness.unsupported_claims %}<li>{{ u }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if exec_summary %}
+<h2>Executive summary (as produced by the app)</h2>
+<div class="card">
+  <p><strong>Verdict:</strong> {{ exec_summary.verdict }} <span class="muted small">(model: {{ exec_summary.model_id }}{% if exec_summary.stale %}, stale{% endif %})</span></p>
+  {% for kr in exec_summary.key_risks %}
+  <p><strong>{{ kr.title }}</strong> — {{ kr.why_it_matters }}</p>
+  {% endfor %}
+  {% if exec_summary.limitations %}
+  <p class="small"><strong>Limitations:</strong> {{ exec_summary.limitations | join(' · ') }}</p>
+  {% endif %}
+</div>
+{% endif %}
+
+<h2>Stage timings</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>Stage</th><th class="num">Seconds</th></tr></thead>
+    <tbody>
+      {% for stage, secs in timings.items() %}
+      <tr><td>{{ stage }}</td><td class="num">{{ secs }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if tokens %}
+  <h3>Model usage (from app telemetry)</h3>
+  <table>
+    <thead><tr><th>Purpose</th><th>Model</th><th class="num">Calls</th><th class="num">In tok</th><th class="num">Out tok</th><th class="num">Cost ($)</th><th class="num">Errors</th></tr></thead>
+    <tbody>
+      {% for p in tokens.by_purpose %}
+      <tr><td>{{ p.purpose }}</td><td class="mono small">{{ p.model_id }}</td><td class="num">{{ p.calls }}</td><td class="num">{{ p.input_tokens }}</td><td class="num">{{ p.output_tokens }}</td><td class="num">{{ '%.4f' % p.cost_usd }}</td><td class="num">{{ p.errors }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+<h2>Judge calls (raw, for audit)</h2>
+<div class="card">
+  {% for jc in judge_calls %}
+  <details>
+    <summary>
+      {{ jc.purpose }} · {{ jc.model_id }} · {{ jc.prompt_version }} ·
+      {{ 'ok' if jc.ok else 'FAILED' }} · {{ jc.latency_ms }}ms ·
+      {{ jc.input_tokens }}/{{ jc.output_tokens }} tok
+      {% if jc.error %} · <span class="delta-neg">{{ jc.error[:100] }}</span>{% endif %}
+    </summary>
+    <h3>Request</h3>
+    <pre>{{ jc.request_json }}</pre>
+    <h3>Raw response</h3>
+    <pre>{{ jc.response_json }}</pre>
+  </details>
+  {% else %}
+  <p class="muted">no judge calls recorded</p>
+  {% endfor %}
+</div>
+{% endblock %}
