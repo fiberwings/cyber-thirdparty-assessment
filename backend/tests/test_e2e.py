@@ -118,8 +118,17 @@ def test_full_flow(patched_client):
                     json={"text": "Acme is a SaaS billing vendor processing EU PII via REST APIs."})
     assert r.status_code == 200
 
-    # 3. Scoping turn → sufficient
+    # 3. Scoping turn (background task) → sufficient
     r = client.post(f"/api/assessments/{aid}/scoping/turn", json={"answer": "Looks good."})
+    assert r.status_code == 200
+    task_id = r.json()["task_id"]
+    for _ in range(30):
+        s = client.get(f"/api/tasks/{task_id}").json()
+        if s["status"] in {"done", "error"}:
+            break
+        import time; time.sleep(0.2)
+    assert s["status"] == "done", s
+    r = client.get(f"/api/assessments/{aid}/description")
     assert r.status_code == 200
     assert r.json()["is_sufficient"] is True
 

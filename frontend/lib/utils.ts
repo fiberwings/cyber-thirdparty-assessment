@@ -192,10 +192,13 @@ export function phaseList(a: Assessment): { key: PhaseKey; info: PhaseInfo }[] {
 
 export function relativeTime(iso: string | null | undefined): string {
   if (!iso) return "";
-  const t = new Date(iso).getTime();
+  // Backend timestamps are UTC; a naive ISO string (no offset) must not be
+  // parsed as browser-local time.
+  const utc = /Z$|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z";
+  const t = new Date(utc).getTime();
   const diff = Date.now() - t;
   if (diff < 60_000) return "just now";
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} min ago`;
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} hr ago`;
-  return new Date(iso).toLocaleString();
+  return new Date(utc).toLocaleString();
 }

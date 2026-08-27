@@ -104,7 +104,9 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
     try:
-        return datetime.fromisoformat(s.rstrip("Z"))
+        # Keep the datetime timezone-aware: a naive result serializes without
+        # an offset and browsers then misread it as local time.
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         return None
 

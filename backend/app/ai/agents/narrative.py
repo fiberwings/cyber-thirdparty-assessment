@@ -68,7 +68,9 @@ async def write_for_scenario(
         messages=_build_messages(scenario, meta),
         assessment_id=assessment.id,
         model_override=(assessment.model_overrides or {}).get("narrative"),
-        max_tokens=400,
+        # Reasoning models spend completion tokens on thinking before the
+        # visible paragraph — 400 gets fully consumed before any text lands.
+        max_tokens=2048,
         client=client,
     )
     scenario.rationale = text.strip()

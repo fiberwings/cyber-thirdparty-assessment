@@ -33,7 +33,7 @@ export const api = {
   getDescription: (id: number) =>
     http<DescriptionRead | null>(`/api/assessments/${id}/description`),
   scopingTurn: (id: number, answer?: string) =>
-    http<DescriptionRead>(`/api/assessments/${id}/scoping/turn`, {
+    http<{ task_id: string }>(`/api/assessments/${id}/scoping/turn`, {
       method: "POST",
       body: JSON.stringify(answer ? { answer } : {}),
     }),

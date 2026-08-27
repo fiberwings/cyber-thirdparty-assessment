@@ -1,9 +1,10 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, pollTask } from "@/lib/api";
 import { use, useState } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
+import { TaskProgress } from "@/components/TaskProgress";
 import { useRouter } from "next/navigation";
 
 const DIMENSIONS = [
@@ -22,13 +23,24 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
     queryFn: () => api.getDescription(aid),
   });
 
+  const [text, setText] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [progress, setProgress] = useState<{ status: string; progress: number; detail: string } | null>(null);
+
   const setDescription = useMutation({
     mutationFn: (text: string) => api.setDescription(aid, text),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["description", aid] }),
   });
   const turn = useMutation({
-    mutationFn: (answer?: string) => api.scopingTurn(aid, answer),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["description", aid] }),
+    mutationFn: async (answer?: string) => {
+      const { task_id } = await api.scopingTurn(aid, answer);
+      await pollTask(task_id, setProgress, 800);
+    },
+    onSuccess: () => {
+      setAnswer("");
+      qc.invalidateQueries({ queryKey: ["description", aid] });
+    },
+    onSettled: () => setProgress(null),
   });
   const force = useMutation({
     mutationFn: () => api.forceContinue(aid),
@@ -37,9 +49,6 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
       router.push(`/assessments/${aid}/scenarios`);
     },
   });
-
-  const [text, setText] = useState("");
-  const [answer, setAnswer] = useState("");
 
   const hasDesc = !!desc && desc.text;
 
@@ -71,6 +80,9 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
               {setDescription.isPending ? "Saving…" : "Submit description"}
             </button>
           </div>
+          {setDescription.isError && (
+            <div className="mt-2 text-xs text-risk-high">{String(setDescription.error)}</div>
+          )}
         </div>
       )}
 
@@ -101,30 +113,39 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
             {!desc!.is_sufficient && (
               <div className="rounded-lg border border-ink-200 bg-white p-3">
                 <textarea
-                  className="w-full rounded border border-ink-200 px-3 py-2 text-sm min-h-[80px]"
+                  className="w-full rounded border border-ink-200 px-3 py-2 text-sm min-h-[80px] disabled:opacity-40"
                   placeholder="Answer the AI's question (or press 'Get next question' to start)…"
                   value={answer}
                   onChange={(e) => setAnswer(e.target.value)}
+                  disabled={turn.isPending}
                 />
                 <div className="mt-2 flex justify-end gap-2">
                   <button
                     onClick={() => force.mutate()}
-                    disabled={force.isPending}
-                    className="rounded border border-ink-300 text-ink-700 text-xs font-medium px-3 py-1.5 hover:bg-ink-50"
+                    disabled={force.isPending || turn.isPending}
+                    className="rounded border border-ink-300 text-ink-700 text-xs font-medium px-3 py-1.5 hover:bg-ink-50 disabled:opacity-40"
                   >
                     Force continue →
                   </button>
                   <button
-                    onClick={() => {
-                      turn.mutate(answer || undefined);
-                      setAnswer("");
-                    }}
+                    onClick={() => turn.mutate(answer || undefined)}
                     disabled={turn.isPending}
                     className="rounded bg-ink-900 text-white text-xs font-medium px-3 py-1.5 hover:bg-ink-700 disabled:opacity-40"
                   >
                     {turn.isPending ? "Asking…" : (desc!.turns.length === 0 ? "Start scoping" : "Submit answer")}
                   </button>
                 </div>
+                {turn.isPending && (
+                  <div className="mt-2">
+                    <TaskProgress label="Processing" detail={progress?.detail} />
+                  </div>
+                )}
+                {turn.isError && (
+                  <div className="mt-2 text-xs text-risk-high">{String(turn.error)}</div>
+                )}
+                {force.isError && (
+                  <div className="mt-2 text-xs text-risk-high">{String(force.error)}</div>
+                )}
               </div>
             )}
 
