@@ -4,6 +4,9 @@ const config: Config = {
   content: [
     "./app/**/*.{js,ts,jsx,tsx,mdx}",
     "./components/**/*.{js,ts,jsx,tsx,mdx}",
+    // lib/ returns class names as strings (bandColor, phaseDotColor,
+    // SEVERITY_STYLES) — unscanned, those classes never reach the bundle.
+    "./lib/**/*.{js,ts,jsx,tsx,mdx}",
   ],
   theme: {
     extend: {
