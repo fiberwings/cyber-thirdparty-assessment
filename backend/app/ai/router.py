@@ -200,6 +200,22 @@ def _strip_code_fence(content: str) -> str:
     return s.strip()
 
 
+def _looks_garbled(content: str, data: Any, schema: type[BaseModel]) -> bool:
+    """Degenerate model output, as opposed to a schema miss.
+
+    A schema miss is coherent JSON with a wrong/missing field — the stricter
+    retry (feed the bad output back with the validator error) fixes it. A
+    garbled response (`{"control_codevote": ": "}`) is the model going off
+    the rails; feeding it back keeps the model in that mode, so it must be
+    retried with fresh context instead. Garbled = not JSON-object-shaped at
+    all, or a dict whose keys barely overlap the schema's fields.
+    """
+    if not isinstance(data, dict):
+        return not content.lstrip().startswith("{")
+    expected = set(schema.model_fields)
+    return len(expected & set(data)) <= len(expected) // 3
+
+
 async def call_structured(
     db: Session,
     *,
@@ -228,6 +244,7 @@ async def call_structured(
     transport_err: OpenRouterError | None = None
 
     validation_retried = False
+    garble_retried = False
     truncation_retried = False
     tokens = max_tokens
 
@@ -270,6 +287,7 @@ async def call_structured(
                     truncated=True,
                 )
 
+            data: Any = None
             try:
                 data = json.loads(_strip_code_fence(content))
                 obj = schema.model_validate(data)
@@ -277,6 +295,19 @@ async def call_structured(
                 return obj
             except (json.JSONDecodeError, ValidationError) as e:
                 last_err = f"{type(e).__name__}: {e}"
+                if _looks_garbled(content, data, schema):
+                    if garble_retried:
+                        # Garbled twice: fail loudly. Never feed garbage into
+                        # the schema retry — it would only reproduce it.
+                        last_err = f"garbled output twice: {last_err}"
+                        break
+                    # Degenerate output: retry once with the ORIGINAL messages.
+                    garble_retried = True
+                    last_err = (
+                        "garbled output; retried with fresh context. "
+                        f"First attempt: {last_err[:300]}"
+                    )
+                    continue
                 if not validation_retried:
                     validation_retried = True
                     # Stricter retry — append the model's bad output and the validator error.

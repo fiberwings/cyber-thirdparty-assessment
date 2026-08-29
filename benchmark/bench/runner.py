@@ -162,7 +162,7 @@ def build_evidence_digest(report: dict) -> str:
     for w in report.get("weaknesses", []):
         lines.append(f"Weakness [{w.get('severity')}] (id {w.get('id')}): {w.get('description')}")
     for mi in report.get("meta_issues", []):
-        lines.append(f"Meta issue ({mi.get('kind')}): {mi.get('description', '')}")
+        lines.append(f"Meta issue ({mi.get('kind')}): {mi.get('rationale', '')}")
     return "\n".join(lines)
 
 

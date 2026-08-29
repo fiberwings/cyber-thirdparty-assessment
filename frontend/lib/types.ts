@@ -154,6 +154,17 @@ export interface WeaknessRead {
   unmatched: boolean;
   kind_signal: string;
   user_edited: boolean;
+  origin: "document" | "gap_analysis" | string;
+  evidence_refs: EvidenceRef[];
+  origin_refs: string[];
+}
+
+export interface EvidenceRef {
+  document_id: number;
+  chunk_id: number | null;
+  page: number | null;
+  section_path: string;
+  quote: string;
 }
 
 export interface MetaIssueRead {

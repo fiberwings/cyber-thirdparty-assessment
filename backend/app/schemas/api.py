@@ -197,6 +197,9 @@ class WeaknessRead(BaseModel):
     unmatched: bool = True
     kind_signal: str = ""
     user_edited: bool
+    origin: str = "document"
+    evidence_refs: list = Field(default_factory=list)
+    origin_refs: list = Field(default_factory=list)
 
     class Config:
         from_attributes = True

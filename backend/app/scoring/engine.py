@@ -48,6 +48,9 @@ _META_WEIGHTS: dict[str, float] = {
     "insufficient_info": 1.0,
     "vague_answer": 0.5,
     "missing_doc": 0.75,
+    # Legacy only: gap analysis no longer emits this flag (contradictions are
+    # scored as weaknesses instead). Kept so assessments scored before that
+    # change keep their bands until they are re-run.
     "conflicting_evidence": 1.0,
 }
 _META_UPLIFT_CAP = 2.0
@@ -99,7 +102,7 @@ class ControlInput:
 
 @dataclass
 class MetaIssueInput:
-    kind: str  # insufficient_info|vague_answer|missing_doc|conflicting_evidence
+    kind: str  # insufficient_info|vague_answer|missing_doc (+legacy conflicting_evidence)
 
 
 @dataclass

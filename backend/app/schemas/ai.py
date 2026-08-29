@@ -12,7 +12,10 @@ from pydantic import BaseModel, Field, field_validator
 
 Coverage = Literal["none", "partial", "full"]
 Effectiveness = Literal["weak", "adequate", "strong", "unknown"]
-MetaKind = Literal["insufficient_info", "vague_answer", "missing_doc", "conflicting_evidence"]
+# Meta-issues describe gaps in *our* evidence (assessment quality). A
+# contradiction between sources is a vendor *finding* and is emitted as a
+# `ContradictionOut` on the control assessment instead — never as a meta flag.
+MetaKind = Literal["insufficient_info", "vague_answer", "missing_doc"]
 
 
 # ---------- Scoping ----------
@@ -96,6 +99,30 @@ class CitationOut(BaseModel):
     quote: str = Field(min_length=2)
 
 
+class ContradictionOut(BaseModel):
+    """Two or more supplied sources disagree about this control.
+
+    This is a vendor finding (their own statements, or an auditor's test,
+    disagree) and is persisted as a scored `Weakness`; `claims` carries a
+    verbatim quote for every side of the disagreement.
+    """
+
+    severity: Literal["low", "medium", "high", "critical"]
+    description: str = Field(min_length=10)
+    claims: list[CitationOut] = Field(min_length=2)
+
+    @field_validator("claims")
+    @classmethod
+    def claims_must_span_sources(cls, v):
+        locs = {(c.document_id, c.section_path, c.page) for c in v}
+        if len(locs) < 2:
+            raise ValueError(
+                "A contradiction needs at least two distinct sources "
+                "(different documents, or different sections of one document)."
+            )
+        return v
+
+
 class ControlAssessmentOut(BaseModel):
     control_code: str
     coverage: Coverage
@@ -103,6 +130,7 @@ class ControlAssessmentOut(BaseModel):
     citations: list[CitationOut] = Field(default_factory=list)
     rationale: str
     meta_flags: list[MetaKind] = Field(default_factory=list)
+    contradictions: list[ContradictionOut] = Field(default_factory=list)
     # Alternative search queries the model proposes when the candidate
     # evidence was insufficient — drives one bounded second retrieval pass.
     proposed_queries: list[str] = Field(default_factory=list, max_length=4)
@@ -129,6 +157,7 @@ KindSignal = Literal[
     "policy_gap",
     "questionnaire_negative",
     "dpa_clause_missing",
+    "cross_doc_conflict",  # set by gap analysis, never by per-document extraction
     "other",
 ]
 

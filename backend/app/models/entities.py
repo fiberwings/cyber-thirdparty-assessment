@@ -263,6 +263,19 @@ class Weakness(Base):
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, nullable=True, server_default=func.now()
     )
+    # Which pipeline step created the row: "document" (per-document
+    # extraction) or "gap_analysis" (cross-document contradiction spotted
+    # while assessing a control).
+    origin: Mapped[str] = mapped_column(String(30), default="document")
+    # Every source location backing the finding — a contradiction has one
+    # entry per disagreeing side: {document_id, chunk_id|null, page,
+    # section_path, quote}. source_document_id / source_chunk_id mirror the
+    # first entry for single-source deep links.
+    evidence_refs: Mapped[list] = mapped_column(JSON, default=list)
+    # "SCENARIO/CONTROL" targets whose gap analysis raised this row. Used to
+    # keep re-runs idempotent (a target re-run drops its claim; a row with no
+    # remaining claimants is removed).
+    origin_refs: Mapped[list] = mapped_column(JSON, default=list)
 
     assessment: Mapped[Assessment] = relationship(back_populates="weaknesses")
     chunk: Mapped[Optional[Chunk]] = relationship()

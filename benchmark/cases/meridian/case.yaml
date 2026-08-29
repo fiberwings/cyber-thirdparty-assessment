@@ -109,6 +109,15 @@ golden:
         remain in place pending replacement.
       severity: medium
       optional: true
+    - id: MER-W11
+      description: >-
+        Recovery objectives are stated inconsistently across sources: the
+        BC/DR policy gives Tier 2 systems a 48-hour RTO and a 4-hour RPO,
+        the SIG response claims <24h RTO / <4h RPO, and the SOC 3 report
+        states a 4-hour RTO and 1-hour RPO — the actual recovery capability
+        cannot be relied on from the vendor's own statements.
+      severity: medium
+      optional: true
   exec_summary_rubric:
     must_cover:
       - id: MER-K1

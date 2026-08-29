@@ -72,15 +72,23 @@ def _format_scenarios(a: Assessment, scenario_reads) -> str:
 
 def _format_weaknesses(a: Assessment) -> str:
     parts = []
+    doc_names = {d.id: d.filename for d in a.documents}
     for w in sorted(a.weaknesses, key=lambda w: w.id):
         doc = w.document.filename if w.document is not None else "unknown document"
         scored = "unscored (unmatched)" if w.unmatched else (
             f"scored via {', '.join(w.mapped_control_codes or []) or 'no codes'}"
         )
-        parts.append(
-            f"[id={w.id} severity={w.severity} source={doc}] {scored}\n"
+        kind = f" kind={w.kind_signal}" if w.kind_signal else ""
+        entry = (
+            f"[id={w.id} severity={w.severity}{kind} source={doc}] {scored}\n"
             f"  {w.description}"
         )
+        if len(w.evidence_refs or []) > 1:
+            # Contradictions: show every side so the summary can cite both.
+            for ref in w.evidence_refs:
+                rdoc = doc_names.get(ref.get("document_id"), f"document {ref.get('document_id')}")
+                entry += f'\n  - {rdoc}: "{ref.get("quote", "")}"'
+        parts.append(entry)
     return "\n\n".join(parts) if parts else "(no weaknesses extracted)"
 
 

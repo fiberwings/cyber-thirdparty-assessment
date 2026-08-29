@@ -689,3 +689,211 @@ async def test_cross_correlation_surfaces_catalogue_only_mapping(fresh_db, fake_
             .all()
         )
         assert len(issues) == 1
+
+
+# ---------- Cross-document contradictions (gap analysis → weakness) ----------
+
+def _contradiction_fixture(db):
+    """Assessment with policy + questionnaire that disagree on key rotation,
+    and a scenario carrying two encryption controls."""
+    a = Assessment(vendor_name="OrbitClear")
+    db.add(a)
+    db.flush()
+    s = Scenario(
+        assessment_id=a.id, code="STORAGE_EXPOSURE", name="x", description="x",
+        inherent_impact=3, inherent_likelihood=3,
+    )
+    db.add(s)
+    db.flush()
+    ec_rest = ExpectedControl(scenario_id=s.id, code="ENC.REST", name="Encryption at rest")
+    ec_key = ExpectedControl(scenario_id=s.id, code="ENC.KEY", name="Key management")
+    db.add_all([ec_rest, ec_key])
+    policy = Document(assessment_id=a.id, kind="policy", filename="policy.pdf",
+                      mime="application/pdf", sha256="p", size_bytes=100)
+    sig = Document(assessment_id=a.id, kind="questionnaire", filename="sig.xlsx",
+                   mime="application/xlsx", sha256="q", size_bytes=100)
+    db.add_all([policy, sig])
+    db.flush()
+    db.add(Chunk(document_id=policy.id, page=12, section_path="7.3 Key Management", ord=1,
+                 text="Data encryption keys shall be rotated at least every 12 months."))
+    db.add(Chunk(document_id=sig.id, page=None, section_path="EN-04", ord=1,
+                 text="Q#: EN-04 | Response: Yes | Encryption keys are rotated every 3 years."))
+    db.commit()
+    for o in (a, s, ec_rest, ec_key):
+        db.refresh(o)
+    return a, s, ec_rest, ec_key, policy, sig
+
+
+def _contradiction_payload(code, *, policy_id, sig_id, severity="medium"):
+    return {
+        "control_code": code,
+        "coverage": "full",
+        "effectiveness": "adequate",
+        "citations": [
+            {"document_id": policy_id, "section_path": "7.3 Key Management",
+             "quote": "Data encryption keys shall be rotated at least every 12 months."}
+        ],
+        "rationale": "Encryption exists but rotation cadence is stated inconsistently.",
+        "meta_flags": [],
+        "contradictions": [
+            {
+                "severity": severity,
+                "description": "Policy requires annual key rotation; the SIG response states every 3 years.",
+                "claims": [
+                    {"document_id": policy_id, "section_path": "7.3 Key Management",
+                     "quote": "Data encryption keys shall be rotated at least every 12 months."},
+                    {"document_id": sig_id, "section_path": "EN-04",
+                     "quote": "Encryption keys are rotated every 3 years."},
+                ],
+            }
+        ],
+    }
+
+
+def test_conflicting_evidence_meta_flag_is_rejected():
+    """The retired meta-flag can no longer be produced: a contradiction must
+    come through `contradictions` so it is scored as a finding."""
+    from pydantic import ValidationError
+    from app.schemas.ai import ControlAssessmentOut
+
+    with pytest.raises(ValidationError):
+        ControlAssessmentOut(
+            control_code="X", coverage="none", effectiveness="unknown",
+            citations=[], rationale="r", meta_flags=["conflicting_evidence"],
+        )
+
+
+def test_contradiction_requires_two_distinct_sources():
+    from pydantic import ValidationError
+    from app.schemas.ai import ContradictionOut
+
+    with pytest.raises(ValidationError):
+        ContradictionOut(
+            severity="medium", description="same place twice",
+            claims=[
+                {"document_id": 1, "section_path": "A", "quote": "keys rotate yearly"},
+                {"document_id": 1, "section_path": "A", "quote": "keys rotate every 3 years"},
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_gap_analysis_contradiction_becomes_weakness(fresh_db, fake_client):
+    from app.models import ControlEvidence
+
+    with SessionLocal() as db:
+        a, s, ec_rest, _, policy, sig = _contradiction_fixture(db)
+        fake_client.push_json(_contradiction_payload("ENC.REST", policy_id=policy.id, sig_id=sig.id))
+        await gap_analysis.assess_control(db, a, s, ec_rest, client=fake_client)
+
+        rows = db.query(Weakness).filter(Weakness.assessment_id == a.id).all()
+        assert len(rows) == 1
+        w = rows[0]
+        assert w.kind_signal == "cross_doc_conflict"
+        assert w.origin == "gap_analysis"
+        assert w.unmatched is False
+        assert w.mapped_control_codes == ["ENC.REST"]
+        assert w.origin_refs == ["STORAGE_EXPOSURE/ENC.REST"]
+        assert w.source_document_id == policy.id and w.source_chunk_id is not None
+        # Both sides resolved to real chunks.
+        assert [r["document_id"] for r in w.evidence_refs] == [policy.id, sig.id]
+        assert all(r["chunk_id"] for r in w.evidence_refs)
+        # Both quotes are attached to the control as contradicting evidence.
+        contra = (
+            db.query(ControlEvidence)
+            .filter(ControlEvidence.polarity == "contradicts")
+            .all()
+        )
+        assert len(contra) == 2
+        # And *no* meta-issue was written for the same fact.
+        assert db.query(MetaIssue).filter(MetaIssue.assessment_id == a.id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_gap_analysis_same_contradiction_two_controls_one_row(fresh_db, fake_client):
+    from app.api.scoring import _recalculate_in_session
+
+    with SessionLocal() as db:
+        a, s, ec_rest, ec_key, policy, sig = _contradiction_fixture(db)
+        fake_client.push_json(_contradiction_payload("ENC.REST", policy_id=policy.id, sig_id=sig.id))
+        await gap_analysis.assess_control(db, a, s, ec_rest, client=fake_client)
+        fake_client.push_json(
+            _contradiction_payload("ENC.KEY", policy_id=policy.id, sig_id=sig.id, severity="high")
+        )
+        await gap_analysis.assess_control(db, a, s, ec_key, client=fake_client)
+
+        rows = db.query(Weakness).filter(Weakness.assessment_id == a.id).all()
+        assert len(rows) == 1
+        w = rows[0]
+        assert w.mapped_control_codes == ["ENC.KEY", "ENC.REST"]
+        assert sorted(w.origin_refs) == ["STORAGE_EXPOSURE/ENC.KEY", "STORAGE_EXPOSURE/ENC.REST"]
+        assert w.severity == "high"  # highest sighting wins
+
+        # Scores once in the scenario even though it maps to two of its controls.
+        db.refresh(a)
+        scores, _agg = _recalculate_in_session(db, a)
+        sc = next(x for x in scores if x.code == "STORAGE_EXPOSURE")
+        assert sc.weakness_uplift_raw == pytest.approx(0.75)
+
+
+@pytest.mark.asyncio
+async def test_gap_analysis_contradiction_rerun_is_idempotent(fresh_db, fake_client):
+    with SessionLocal() as db:
+        a, s, ec_rest, ec_key, policy, sig = _contradiction_fixture(db)
+        payload = _contradiction_payload("ENC.REST", policy_id=policy.id, sig_id=sig.id)
+        fake_client.push_json(payload)
+        await gap_analysis.assess_control(db, a, s, ec_rest, client=fake_client)
+        db.refresh(ec_rest)
+        fake_client.push_json(payload)
+        await gap_analysis.assess_control(db, a, s, ec_rest, client=fake_client)
+
+        rows = db.query(Weakness).filter(Weakness.assessment_id == a.id).all()
+        assert len(rows) == 1
+        assert rows[0].origin_refs == ["STORAGE_EXPOSURE/ENC.REST"]
+
+        # Second control also claims it, then the first control re-runs clean:
+        # the row survives on the second control's claim only.
+        fake_client.push_json(_contradiction_payload("ENC.KEY", policy_id=policy.id, sig_id=sig.id))
+        await gap_analysis.assess_control(db, a, s, ec_key, client=fake_client)
+        db.refresh(ec_rest)
+        clean = dict(payload, contradictions=[], effectiveness="strong")
+        fake_client.push_json(clean)
+        await gap_analysis.assess_control(db, a, s, ec_rest, client=fake_client)
+        rows = db.query(Weakness).filter(Weakness.assessment_id == a.id).all()
+        assert len(rows) == 1
+        assert rows[0].origin_refs == ["STORAGE_EXPOSURE/ENC.KEY"]
+        assert rows[0].mapped_control_codes == ["ENC.KEY"]
+
+        # Last claimant re-runs clean → row removed (not user-edited).
+        db.refresh(ec_key)
+        fake_client.push_json(dict(clean, control_code="ENC.KEY"))
+        await gap_analysis.assess_control(db, a, s, ec_key, client=fake_client)
+        assert db.query(Weakness).filter(Weakness.assessment_id == a.id).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_gap_analysis_skips_contradiction_already_known(fresh_db, fake_client):
+    """A contradiction where one side is already the evidence of a weakness
+    mapped to this control is that weakness restated against the vendor's
+    claim — the failure is already scored once, so no second row."""
+    with SessionLocal() as db:
+        a, s, ec_rest, _, policy, sig = _contradiction_fixture(db)
+        db.add(
+            Weakness(
+                assessment_id=a.id, source_document_id=sig.id, severity="medium",
+                description="Keys rotate only every 3 years.",
+                quote="Encryption keys are rotated every 3 years.",
+                mapped_control_codes=["ENC.REST"], unmatched=False,
+                kind_signal="questionnaire_negative", dedupe_key="k1",
+            )
+        )
+        db.commit()
+        fake_client.push_json(_contradiction_payload("ENC.REST", policy_id=policy.id, sig_id=sig.id))
+        await gap_analysis.assess_control(db, a, s, ec_rest, client=fake_client)
+        rows = db.query(Weakness).filter(Weakness.assessment_id == a.id).all()
+        assert len(rows) == 1
+        assert not any(w.kind_signal == "cross_doc_conflict" for w in rows)
+        # The known weaknesses were shown to the model.
+        sent = fake_client.calls[-1]["messages"][1]["content"]
+        assert "Known weaknesses already mapped to this control" in sent
+        assert "Keys rotate only every 3 years." in sent

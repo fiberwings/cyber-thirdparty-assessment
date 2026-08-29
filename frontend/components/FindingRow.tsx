@@ -1,6 +1,6 @@
 "use client";
 
-import { WeaknessRead } from "@/lib/types";
+import { EvidenceRef, WeaknessRead } from "@/lib/types";
 import { SeverityBadge } from "./SeverityBadge";
 import { useEvidenceDrawer } from "./EvidenceDrawer";
 
@@ -11,7 +11,7 @@ export function FindingRow({ weakness, documentId }: { weakness: WeaknessRead; d
   // for transversal sections that pass the parent doc explicitly.
   const docId = weakness.source_document_id ?? documentId ?? 0;
   const chunkId = weakness.source_chunk_id ?? 0;
-  const canOpen = chunkId > 0;
+  const canOpen = chunkId > 0 && (weakness.evidence_refs ?? []).length <= 1;
 
   const handle = () => {
     if (!canOpen) return;
@@ -25,22 +25,64 @@ export function FindingRow({ weakness, documentId }: { weakness: WeaknessRead; d
     });
   };
 
-  const kindLabel = weakness.kind_signal ? weakness.kind_signal.replace(/_/g, " ") : "";
+  const kindLabel =
+    weakness.kind_signal === "cross_doc_conflict"
+      ? "cross-document conflict"
+      : weakness.kind_signal
+        ? weakness.kind_signal.replace(/_/g, " ")
+        : "";
+  // Contradictions carry one evidence ref per disagreeing side; render each
+  // as its own clickable quote instead of the single headline quote.
+  const refs = (weakness.evidence_refs ?? []).length > 1 ? weakness.evidence_refs : null;
+
+  const openRef = (ref: EvidenceRef) => {
+    if (!ref.chunk_id) return;
+    open({
+      document_id: ref.document_id,
+      chunk_id: ref.chunk_id,
+      page: ref.page,
+      section_path: ref.section_path,
+      quote: ref.quote,
+      polarity: "contradicts",
+    });
+  };
 
   return (
     <li
       className={`group flex gap-3 px-4 py-3 border-t border-ink-100 first:border-t-0 ${
         canOpen ? "cursor-pointer hover:bg-ink-50" : ""
       }`}
-      onClick={handle}
+      onClick={refs ? undefined : handle}
     >
       <SeverityBadge severity={weakness.severity} className="mt-0.5 shrink-0 w-[68px]" />
       <div className="min-w-0 flex-1">
         <div className="text-sm text-ink-800 leading-snug">{weakness.description}</div>
-        {weakness.quote && (
-          <div className="mt-1 text-[11px] text-ink-500 italic line-clamp-2">
-            &ldquo;{weakness.quote}&rdquo;
-          </div>
+        {refs ? (
+          <ul className="mt-1 space-y-0.5">
+            {refs.map((ref, i) => (
+              <li
+                key={i}
+                className={`text-[11px] text-ink-500 italic line-clamp-2 ${
+                  ref.chunk_id ? "cursor-pointer hover:text-ink-800" : ""
+                }`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openRef(ref);
+                }}
+              >
+                <span className="not-italic text-ink-400">
+                  {ref.section_path || (ref.page != null ? `p.${ref.page}` : "source")}:
+                </span>{" "}
+                &ldquo;{ref.quote}&rdquo;
+              </li>
+            ))}
+          </ul>
+        ) : (
+          weakness.quote && (
+            <div className="mt-1 text-[11px] text-ink-500 italic line-clamp-2">
+              &ldquo;{weakness.quote}&rdquo;
+            </div>
+          )
         )}
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           {kindLabel && (

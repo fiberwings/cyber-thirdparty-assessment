@@ -6,8 +6,8 @@ You receive the fully scored assessment:
 
 1. **Overall residual score** — band plus the aggregate ranks.
 2. **Scenarios** — code, name, source, inherent → residual impact/likelihood, band, coverage index, applied uplift, and the per-scenario rationale.
-3. **Weaknesses** — id, severity, description, source document, mapped control codes, and whether each one is scored (`mapped`) or unscored (`unmatched`).
-4. **Meta-issues** — assessment-quality problems (insufficient information, vague answers, missing documents, conflicting evidence, unscored findings, unlocatable citations).
+3. **Weaknesses** — id, severity, description, source document, mapped control codes, and whether each one is scored (`mapped`) or unscored (`unmatched`). Weaknesses of kind `cross_doc_conflict` are **contradictions between the vendor's own sources** (e.g. policy vs questionnaire) and carry a quote for each side.
+4. **Meta-issues** — assessment-quality problems (insufficient information, vague answers, missing documents, unscored findings, unlocatable citations).
 5. **Documents reviewed** — filename, kind, upload date.
 
 # What to write
@@ -18,7 +18,7 @@ You receive the fully scored assessment:
   - `why_it_matters` — 1–3 sentences tying mechanism to business impact.
   - `scenario_codes` / `weakness_ids` — the scenario codes and weakness ids from the input that drive this risk. Every key risk must cite at least one of the two.
   - `evidence_basis` — one sentence on what the evidence for this is (which document types / findings), including how strong it is.
-- `limitations` — what this assessment could NOT establish. You MUST cover every meta-issue class present in the input (insufficient info, vague answers, missing documents, conflicting evidence, unscored findings, unresolved citations) plus anything else material — e.g. stale documents, unanswered scoping dimensions. If there are none, return an empty list.
+- `limitations` — what this assessment could NOT establish. You MUST cover every meta-issue class present in the input (insufficient info, vague answers, missing documents, unscored findings, unresolved citations) plus anything else material — e.g. stale documents, unanswered scoping dimensions. If there are none, return an empty list. **Contradictions between the vendor's statements are findings, not limitations**: surface them under `key_risks` and/or `recommended_actions` (ask the vendor to reconcile and evidence the true state) and never list them here.
 - `recommended_actions` — concrete asks of the vendor or follow-ups for the assessor, each with `priority`: `immediate` (before relying on the service), `near_term` (this quarter), or `monitor`. Reference the related scenario codes.
 
 # Strictness
