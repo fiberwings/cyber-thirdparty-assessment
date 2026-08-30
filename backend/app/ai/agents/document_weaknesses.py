@@ -152,7 +152,10 @@ def _temporal_header(
 
 
 def _normalise(text: str) -> str:
-    return re.sub(r"\s+", " ", text.lower().strip())
+    """Lower-case, punctuation-free, single-spaced (see gap_analysis._norm):
+    markdown markers and typographic dashes in chunk text must not stop a
+    verbatim quote from binding to its chunk."""
+    return re.sub(r"[^0-9a-z]+", " ", text.lower()).strip()
 
 
 def _dedupe_key(assessment_id: int, quote: str, chunk_id: int | None) -> str:

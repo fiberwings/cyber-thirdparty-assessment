@@ -65,17 +65,19 @@ def patched_client(monkeypatch, fresh_db):
             ]
         }
     )
-    # Gap analysis: 2 controls × 1 successful response each
-    fake.push_json({
-        "control_code": "ENC.REST", "coverage": "full", "effectiveness": "strong",
-        "citations": [{"document_id": 1, "page": 1, "section_path": "Encryption", "quote": "AES-256 at rest"}],
-        "rationale": "AES-256 documented.", "meta_flags": [],
-    })
-    fake.push_json({
-        "control_code": "IAM.MFA", "coverage": "full", "effectiveness": "adequate",
-        "citations": [{"document_id": 1, "page": 1, "section_path": "Access", "quote": "Admins must use MFA"}],
-        "rationale": "MFA mandated.", "meta_flags": [],
-    })
+    # Gap analysis (whole-bundle mode): 2 controls in ONE batched response
+    fake.push_json({"controls": [
+        {
+            "control_code": "ENC.REST", "coverage": "full", "effectiveness": "strong",
+            "citations": [{"document_id": 1, "page": 1, "section_path": "Encryption", "quote": "AES-256 at rest"}],
+            "rationale": "AES-256 documented.", "meta_flags": [],
+        },
+        {
+            "control_code": "IAM.MFA", "coverage": "full", "effectiveness": "adequate",
+            "citations": [{"document_id": 1, "page": 1, "section_path": "Access", "quote": "Admins must use MFA"}],
+            "rationale": "MFA mandated.", "meta_flags": [],
+        },
+    ]})
     # Weakness synthesize endpoint now aliases cross-correlation. With no
     # extracted weaknesses, the agent returns early without an LLM call —
     # so no fake response is needed for that step.

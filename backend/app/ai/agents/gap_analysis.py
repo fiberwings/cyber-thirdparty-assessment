@@ -1,5 +1,15 @@
-"""Per-control gap analysis — for every expected control on every scenario,
-retrieve candidate evidence, ask the reasoner to assess, persist.
+"""Gap analysis.
+
+Whole-bundle mode (R1, default when the parsed bundle fits the reasoner):
+every distinct expected-control *code* is assessed ONCE per assessment
+against the complete evidence bundle, in batches of a few related codes per
+reasoner call. The verdict is written to every scenario that expects the
+code (so verdicts are consistent by construction) and contradictions between
+any documents are detected in the same whole-context call.
+
+Per-control retrieval mode (fallback for oversized bundles): for every
+expected control on every scenario, retrieve candidate evidence with FTS,
+ask the reasoner to assess, persist — with one bounded second retrieval pass.
 
 `run_full` fans the per-control work out across an `asyncio.Semaphore` so that
 several reasoner calls are in flight at once. Each worker uses its own
@@ -12,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
@@ -32,7 +43,8 @@ from app.models import (
     Scenario,
     Weakness,
 )
-from app.schemas.ai import CitationOut, ControlAssessmentOut
+from app.models import Document
+from app.schemas.ai import CitationOut, ControlAssessmentOut, ControlBatchOut
 from app.scoring.engine import _META_WEIGHTS
 
 CONTRADICTION_KIND = "cross_doc_conflict"
@@ -40,6 +52,21 @@ GAP_ANALYSIS_ORIGIN = "gap_analysis"
 _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 SYSTEM_PROMPT = load_prompt("gap_analysis")
+BUNDLE_SYSTEM_PROMPT = load_prompt("gap_analysis_bundle")
+
+# Whole-bundle mode is used when the parsed bundle (all chunks) is at most
+# this many approximate tokens (len/4). Above it, the per-control retrieval
+# path runs instead. Every benchmark vendor is 15–25k tokens.
+WHOLE_BUNDLE_MAX_TOKENS = 100_000
+# Distinct control codes per whole-bundle call. Related families are packed
+# together; a batch never splits a family unless the family is larger.
+BUNDLE_BATCH_SIZE = 5
+BUNDLE_MAX_OUTPUT_TOKENS = 16384
+# Whole-bundle calls run with lower parallelism than the per-control path so
+# that most batches see the contradictions already reported by finished
+# batches (cross-batch duplicate suppression is done by the model, in
+# context, not by a rule).
+BUNDLE_CONCURRENCY = 2
 
 # Bounded concurrency for per-control gap-analysis calls. Mirrors the
 # phase-2 scenario generator — 4 keeps us comfortably inside typical
@@ -129,8 +156,16 @@ def _build_messages(
     ]
 
 
+_NON_WORD = re.compile(r"[^0-9a-z]+")
+
+
 def _norm(s: str) -> str:
-    return " ".join((s or "").lower().split())
+    """Lower-case, punctuation-free, single-spaced. Chunk text carries
+    markdown markers (**bold**), table line breaks and typographic dashes
+    that a verbatim quote legitimately lacks; comparing word sequences keeps
+    the match strict (same words, same order, contiguous) while ignoring
+    those artefacts."""
+    return " ".join(_NON_WORD.split((s or "").lower())).strip()
 
 
 def _quote_in_chunk(quote: str, chunk_text: str) -> bool:
@@ -143,7 +178,20 @@ def _quote_in_chunk(quote: str, chunk_text: str) -> bool:
     if len(q) < 10:
         return False  # too short to be a trustworthy anchor
     t = _norm(chunk_text)
-    return q in t or (len(q) > 60 and q[:60] in t)
+    if q in t or (len(q) > 60 and q[:60] in t):
+        return True
+    # Abbreviated quote ("A ... B ... C"): every fragment must occur, in order.
+    # Each fragment is a real occurrence, so this is still a genuine match.
+    frags = [f.strip() for f in re.split(r"\.\.\.|…", q) if f.strip()]
+    if len(frags) < 2 or any(len(f) < 10 for f in frags):
+        return False
+    pos = 0
+    for f in frags:
+        i = t.find(f, pos)
+        if i < 0:
+            return False
+        pos = i + len(f)
+    return True
 
 
 def _resolve_citation_chunk(
@@ -431,11 +479,27 @@ async def assess_control(
                 client=client,
             )
 
-    chunk_index = {c.id: c for c in chunks}
+    _persist_control_output(
+        db, assessment, scenario, control, out, {c.id: c for c in chunks}, known
+    )
+    return out
 
+
+def _persist_control_output(
+    db: Session,
+    assessment: Assessment,
+    scenario: Scenario,
+    control: ExpectedControl,
+    out: ControlAssessmentOut,
+    chunk_index: dict[int, Chunk],
+    known: list[Weakness],
+) -> None:
+    """Write one verdict to one expected control: assessment row, evidence
+    (citations bound only to chunks that contain the quote), contradictions
+    as scored weaknesses, meta-flags as meta-issues. Commits."""
     ca = control.assessment or ControlAssessment(expected_control_id=control.id)
     if ca.is_locked_by_user:
-        return out  # respect user edits
+        return  # respect user edits
     ca.coverage = out.coverage
     ca.effectiveness = out.effectiveness
     ca.rationale = out.rationale
@@ -521,7 +585,328 @@ async def assess_control(
         )
 
     db.commit()
-    return out
+
+
+# ---------------- whole-bundle mode (R1) ----------------
+
+
+def _approx_tokens(text: str) -> int:
+    return len(text) // 4
+
+
+def load_bundle(db: Session, assessment_id: int) -> tuple[list[Document], list[Chunk]]:
+    docs = (
+        db.query(Document)
+        .filter(Document.assessment_id == assessment_id)
+        .order_by(Document.id)
+        .all()
+    )
+    chunks = (
+        db.query(Chunk)
+        .join(Document, Document.id == Chunk.document_id)
+        .filter(Document.assessment_id == assessment_id)
+        .order_by(Chunk.document_id, Chunk.ord)
+        .all()
+    )
+    return docs, chunks
+
+
+def format_bundle(docs: list[Document], chunks: list[Chunk]) -> str:
+    by_doc: dict[int, list[Chunk]] = {}
+    for c in chunks:
+        by_doc.setdefault(c.document_id, []).append(c)
+    parts = [f"# Evidence bundle — {len(docs)} document(s)"]
+    parts.append(
+        "\n".join(f"- document_id={d.id} kind={d.kind} file=\"{d.filename}\"" for d in docs)
+        or "(no documents)"
+    )
+    for d in docs:
+        parts.append(f"\n## document_id={d.id} kind={d.kind} — {d.filename}")
+        parts.append(_format_chunks(by_doc.get(d.id, [])))
+    return "\n".join(parts)
+
+
+def bundle_fits(chunks: list[Chunk]) -> bool:
+    return _approx_tokens("".join(c.text for c in chunks)) <= WHOLE_BUNDLE_MAX_TOKENS
+
+
+def group_controls_by_code(assessment: Assessment) -> dict[str, list[tuple[Scenario, ExpectedControl]]]:
+    groups: dict[str, list[tuple[Scenario, ExpectedControl]]] = {}
+    for s in assessment.scenarios:
+        for ctrl in s.expected_controls:
+            groups.setdefault(ctrl.code, []).append((s, ctrl))
+    return groups
+
+
+def _family(code: str) -> str:
+    return code.split(".", 1)[0] if "." in code else code
+
+
+def batch_codes(codes: list[str], size: int = BUNDLE_BATCH_SIZE) -> list[list[str]]:
+    """Pack codes into batches of ≤ size, keeping a family together when it
+    fits in the remaining room (families larger than a batch are split)."""
+    fams: dict[str, list[str]] = {}
+    for c in sorted(codes):
+        fams.setdefault(_family(c), []).append(c)
+    batches: list[list[str]] = []
+    current: list[str] = []
+    for fam_codes in fams.values():
+        for i in range(0, len(fam_codes), size):
+            piece = fam_codes[i : i + size]
+            if current and len(current) + len(piece) > size:
+                batches.append(current)
+                current = []
+            current.extend(piece)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _format_control_group(
+    code: str, members: list[tuple[Scenario, ExpectedControl]], known: list[Weakness]
+) -> str:
+    names = sorted({ec.name for _, ec in members if ec.name})
+    descs = sorted({ec.description for _, ec in members if ec.description})
+    rats = sorted({ec.rationale for _, ec in members if ec.rationale})
+    scen = "; ".join(f"{s.code} — {s.name}" for s, _ in members)
+    lines = [f"## control_code: {code}", f"name: {' / '.join(names) or code}"]
+    if descs:
+        lines.append("description: " + " | ".join(descs))
+    if rats:
+        lines.append("why it matters here: " + " | ".join(r[:300] for r in rats))
+    lines.append(f"protects scenarios: {scen}")
+    lines.append("known weaknesses already mapped to this control:")
+    lines.append(_format_known_weaknesses(known))
+    return "\n".join(lines)
+
+
+def _format_reported(reported: list[str]) -> str:
+    if not reported:
+        return ""
+    lines = "\n".join(f"- {r}" for r in reported)
+    return (
+        "# Contradictions already reported under other controls (do NOT report these again; "
+        "you may reference them in `rationale`)\n" + lines + "\n\n"
+    )
+
+
+def _build_bundle_messages(
+    assessment: Assessment,
+    bundle_text: str,
+    groups: list[tuple[str, list[tuple[Scenario, ExpectedControl]], list[Weakness]]],
+    reported: list[str] | None = None,
+) -> list[dict]:
+    controls_block = "\n\n".join(_format_control_group(c, m, k) for c, m, k in groups)
+    codes = ", ".join(c for c, _, _ in groups)
+    user_block = (
+        f"{assessment_context_block(assessment)}\n\n"
+        f"# Vendor\n{assessment.vendor_name}\n\n"
+        f"{bundle_text}\n\n"
+        f"{_format_reported(reported or [])}"
+        f"# Controls to assess ({len(groups)}): {codes}\n\n{controls_block}\n\n"
+        "Assess every control listed above against the whole bundle. Output JSON per schema; "
+        "`controls` must contain each control_code exactly once."
+    )
+    return [
+        {"role": "system", "content": BUNDLE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_block},
+    ]
+
+
+async def assess_codes_with_bundle(
+    db: Session,
+    assessment: Assessment,
+    codes: list[str],
+    *,
+    bundle_text: str,
+    chunk_index: dict[int, Chunk],
+    groups_by_code: dict[str, list[tuple[Scenario, ExpectedControl]]],
+    client: OpenRouterClient | None = None,
+    reported: list[str] | None = None,
+) -> dict[str, ControlAssessmentOut]:
+    """One whole-bundle call for a batch of codes (+ one fill call for any code
+    the model left out). A call whose output truncates even at the enlarged
+    budget is split in half and each half retried (down to single codes).
+    Persists each verdict to EVERY scenario expecting the code. Returns the
+    verdicts by code; codes still missing after the fill call are absent (the
+    caller records them as failed). `reported` (mutable) collects one line per
+    contradiction found so later batches can avoid repeating them."""
+    model_override = (assessment.model_overrides or {}).get("gap_analysis")
+    known_by_code = {c: _known_weaknesses_for_control(db, assessment.id, c) for c in codes}
+    if reported is None:
+        reported = []
+
+    async def call(batch: list[str], purpose: str) -> dict[str, ControlAssessmentOut]:
+        groups = [(c, groups_by_code[c], known_by_code[c]) for c in batch]
+        try:
+            out: ControlBatchOut = await call_structured(
+                db,
+                purpose=purpose,
+                profile="reasoner",
+                messages=_build_bundle_messages(assessment, bundle_text, groups, list(reported)),
+                schema=ControlBatchOut,
+                assessment_id=assessment.id,
+                model_override=model_override,
+                max_tokens=BUNDLE_MAX_OUTPUT_TOKENS,
+                client=client,
+            )
+        except OpenRouterError as e:
+            if not e.truncated or len(batch) < 2:
+                raise
+            # Output too large for this batch: halve it and assess each part.
+            mid = len(batch) // 2
+            got = await call(batch[:mid], "gap_analysis_bundle_split")
+            got.update(await call(batch[mid:], "gap_analysis_bundle_split"))
+            return got
+        wanted = set(batch)
+        got: dict[str, ControlAssessmentOut] = {}
+        for c in out.controls:
+            if c.control_code in wanted and c.control_code not in got:
+                got[c.control_code] = c
+                for con in c.contradictions:
+                    reported.append(f"[{c.control_code}] {con.description[:300]}")
+        return got
+
+    verdicts = await call(codes, "gap_analysis_bundle")
+    missing = [c for c in codes if c not in verdicts]
+    if missing:
+        verdicts.update(await call(missing, "gap_analysis_bundle_fill"))
+
+    for code, out in verdicts.items():
+        for scenario, control in groups_by_code[code]:
+            _persist_control_output(
+                db, assessment, scenario, control, out, chunk_index, known_by_code[code]
+            )
+    return verdicts
+
+
+async def _bundle_batch_worker(
+    *,
+    assessment_id: int,
+    batch: list[str],
+    bundle_text: str,
+    semaphore: asyncio.Semaphore,
+    client: OpenRouterClient | None,
+    on_done,
+    reported: list[str],
+) -> list[str]:
+    """Returns the SCENARIO/CONTROL labels that failed in this batch."""
+    async with semaphore:
+        with SessionLocal() as inner:
+            assessment = inner.get(Assessment, assessment_id)
+            _, chunks = load_bundle(inner, assessment_id)
+            chunk_index = {c.id: c for c in chunks}
+            groups_by_code = group_controls_by_code(assessment)
+            labels = {
+                c: [f"{s.code}/{ec.code}" for s, ec in groups_by_code.get(c, [])] for c in batch
+            }
+            failed: list[str] = []
+            try:
+                verdicts = await assess_codes_with_bundle(
+                    inner, assessment, batch,
+                    bundle_text=bundle_text, chunk_index=chunk_index,
+                    groups_by_code=groups_by_code, client=client, reported=reported,
+                )
+            except Exception as e:
+                inner.rollback()
+                for c in batch:
+                    for _, ec in groups_by_code.get(c, []):
+                        record_control_failure(ec.id, e)
+                    failed.extend(labels[c])
+                    if on_done is not None:
+                        on_done(c)
+                return failed
+            for c in batch:
+                if c not in verdicts:
+                    err = RuntimeError(f"model returned no verdict for {c} even after a fill call")
+                    for _, ec in groups_by_code.get(c, []):
+                        record_control_failure(ec.id, err)
+                    failed.extend(labels[c])
+                if on_done is not None:
+                    on_done(c)
+    return failed
+
+
+async def run_full_bundle(
+    db: Session,
+    assessment: Assessment,
+    *,
+    client: OpenRouterClient | None = None,
+    on_progress=None,
+    only_failed: bool = False,
+) -> GapAnalysisResult:
+    docs, chunks = load_bundle(db, assessment.id)
+    bundle_text = format_bundle(docs, chunks)
+    groups_by_code = group_controls_by_code(assessment)
+    codes: list[str] = []
+    for code, members in groups_by_code.items():
+        if only_failed:
+            pending = [
+                ec for _, ec in members
+                if ec.assessment is None or ec.assessment.last_error
+            ]
+            if not pending:
+                continue
+        codes.append(code)
+    total_targets = sum(len(groups_by_code[c]) for c in codes)
+    if not codes:
+        return GapAnalysisResult(0, [])
+
+    batches = batch_codes(codes)
+    semaphore = asyncio.Semaphore(BUNDLE_CONCURRENCY)
+    reported: list[str] = []  # shared across batches (see BUNDLE_CONCURRENCY)
+    done = 0
+    n_codes = len(codes)
+
+    def report_done(code: str) -> None:
+        nonlocal done
+        done += 1
+        if on_progress:
+            on_progress(done, n_codes, f"{code} (whole-bundle, {len(groups_by_code[code])} scenario(s))")
+
+    results = await asyncio.gather(
+        *[
+            _bundle_batch_worker(
+                assessment_id=assessment.id, batch=b, bundle_text=bundle_text,
+                semaphore=semaphore, client=client, on_done=report_done, reported=reported,
+            )
+            for b in batches
+        ]
+    )
+    failed_labels = [lbl for batch_failed in results for lbl in batch_failed]
+    if failed_labels and len(failed_labels) == total_targets:
+        raise RuntimeError(
+            f"0/{total_targets} controls assessed; every whole-bundle call failed "
+            f"(see ControlAssessment.last_error)."
+        )
+    return GapAnalysisResult(
+        total_targets, [(lbl, RuntimeError("see ControlAssessment.last_error")) for lbl in failed_labels]
+    )
+
+
+async def assess_control_any_mode(
+    db: Session,
+    assessment: Assessment,
+    scenario: Scenario,
+    control: ExpectedControl,
+    *,
+    client: OpenRouterClient | None = None,
+) -> None:
+    """Per-control (re)assessment used by the API: whole-bundle mode when the
+    bundle fits (the verdict is written to every scenario expecting the code,
+    keeping verdicts consistent), otherwise the retrieval path."""
+    docs, chunks = load_bundle(db, assessment.id)
+    if not bundle_fits(chunks):
+        await assess_control(db, assessment, scenario, control, client=client)
+        return
+    groups_by_code = group_controls_by_code(assessment)
+    verdicts = await assess_codes_with_bundle(
+        db, assessment, [control.code],
+        bundle_text=format_bundle(docs, chunks), chunk_index={c.id: c for c in chunks},
+        groups_by_code=groups_by_code, client=client,
+    )
+    if control.code not in verdicts:
+        raise RuntimeError(f"model returned no verdict for {control.code}")
 
 
 async def _assess_control_worker(
@@ -623,6 +1008,13 @@ async def run_full(
     failed (ControlAssessment.last_error set) or that have never been
     assessed are (re)assessed; everything else is left untouched.
     """
+    _, all_chunks = load_bundle(db, assessment.id)
+    if bundle_fits(all_chunks):
+        return await run_full_bundle(
+            db, assessment, client=client, on_progress=on_progress, only_failed=only_failed
+        )
+
+    # ---- fallback: per-control retrieval mode (oversized bundle) ----
     # Snapshot ids from the parent session before fanning out — workers will
     # re-load the rows in their own sessions.
     targets: list[tuple[int, int, str]] = []

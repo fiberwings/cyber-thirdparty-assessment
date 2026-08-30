@@ -147,6 +147,12 @@ class ControlAssessmentOut(BaseModel):
         return v
 
 
+class ControlBatchOut(BaseModel):
+    """Whole-bundle gap analysis: one verdict per requested control code."""
+
+    controls: list[ControlAssessmentOut] = Field(default_factory=list)
+
+
 # ---------- Per-document weakness extraction ----------
 
 Severity = Literal["low", "medium", "high", "critical"]

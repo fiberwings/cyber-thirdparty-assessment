@@ -60,8 +60,14 @@ def _two_control_fixture(db, *, as_of=None, profile=None):
 
 # ---------------- R8: per-control failures are persisted, phase completes ----------------
 
+@pytest.fixture()
+def retrieval_mode(monkeypatch):
+    """Force the per-control FTS path (whole-bundle mode is Phase 2's default)."""
+    monkeypatch.setattr(gap_analysis, "WHOLE_BUNDLE_MAX_TOKENS", 0)
+
+
 @pytest.mark.asyncio
-async def test_run_full_partial_failure_is_persisted_and_resumable(fresh_db, fake_client):
+async def test_run_full_partial_failure_is_persisted_and_resumable(fresh_db, fake_client, retrieval_mode):
     # One good response only: whichever control gets it succeeds, the other
     # runs out of canned responses (AssertionError) → recorded, not raised.
     fake_client.push_json(GOOD_CONTROL)
@@ -94,7 +100,7 @@ async def test_run_full_partial_failure_is_persisted_and_resumable(fresh_db, fak
 
 
 @pytest.mark.asyncio
-async def test_run_full_all_failed_still_raises(fresh_db, fake_client):
+async def test_run_full_all_failed_still_raises(fresh_db, fake_client, retrieval_mode):
     with SessionLocal() as db:
         a, *_ = _two_control_fixture(db)
         with pytest.raises(Exception, match="0/2 controls assessed"):
@@ -306,8 +312,8 @@ def test_settings_endpoint_and_per_control_rerun(client, fake_client):
     a = client.get(f"/api/assessments/{aid}").json()
     assert a["phases"]["analysis"]["state"] == "error"
 
-    # per-control AI re-run succeeds
-    fake_client.push_json(GOOD_CONTROL)
+    # per-control AI re-run succeeds (whole-bundle mode → batched shape)
+    fake_client.push_json({"controls": [GOOD_CONTROL]})
     r = client.post(f"/api/expected-controls/{ec_id}/assess-ai")
     tid = r.json()["task_id"]
     st = client.get(f"/api/tasks/{tid}").json()

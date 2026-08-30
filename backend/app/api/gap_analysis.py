@@ -85,7 +85,7 @@ async def assess_control_ai(control_id: int, db: Session = Depends(db_session)):
             sc = inner.get(Scenario, sid)
             ctrl = inner.get(ExpectedControl, cid)
             try:
-                await gap_agent.assess_control(inner, assessment, sc, ctrl)
+                await gap_agent.assess_control_any_mode(inner, assessment, sc, ctrl)
             except Exception as e:
                 inner.rollback()
                 gap_agent.record_control_failure(cid, e)
