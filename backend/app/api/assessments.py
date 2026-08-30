@@ -9,6 +9,7 @@ from app.models import Assessment, ServiceDescription
 from app.schemas.api import (
     AssessmentCreate,
     AssessmentRead,
+    AssessmentSettingsPatch,
     DescriptionRead,
     DescriptionSet,
     ModelOverrides,
@@ -76,6 +77,27 @@ def patch_model_overrides(
     for k, v in payload.model_dump(exclude_none=True).items():
         overrides[k] = v
     a.model_overrides = overrides
+    db.commit()
+    db.refresh(a)
+    return serialize_assessment(a)
+
+
+@router.patch("/{assessment_id}/settings", response_model=AssessmentRead)
+def patch_settings(
+    assessment_id: int, payload: AssessmentSettingsPatch, db: Session = Depends(db_session)
+):
+    """Assessment-level inputs (R7): analysis date and assessor standards.
+
+    Changing either does not re-run anything; stages run afterwards use the
+    new values, and the executive summary fingerprint marks itself stale.
+    """
+    a = get_assessment(assessment_id, db)
+    if payload.clear_as_of_date:
+        a.as_of_date = None
+    elif payload.as_of_date is not None:
+        a.as_of_date = payload.as_of_date.isoformat()
+    if payload.standards_profile is not None:
+        a.standards_profile = payload.standards_profile.model_dump(exclude_none=True)
     db.commit()
     db.refresh(a)
     return serialize_assessment(a)

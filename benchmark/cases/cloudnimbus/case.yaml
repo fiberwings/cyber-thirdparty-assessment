@@ -58,6 +58,7 @@ documents:
     kind: policy
   - path: docs/BCP_DR_Policy_CloudNimbus_v4.2.docx
     kind: policy
+as_of_date: "2026-05-01"
 golden:
   expected_band: Moderate
   expected_weaknesses:

@@ -67,6 +67,91 @@ def _hash_prompt(messages: list[dict[str, Any]]) -> str:
     return hashlib.sha256(json.dumps(messages, sort_keys=True).encode()).hexdigest()
 
 
+# ---------- dev-only response cache ----------
+#
+# Keyed by everything that determines the model's answer: model id, the full
+# message list, sampling parameters and response format. Only consulted when
+# Settings.llm_dev_cache_active (never in production). A hit is recorded on
+# ModelCall with cached=True and zero tokens so cost accounting stays honest.
+
+
+def _cache_key(
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    temperature: float,
+    max_tokens: int,
+    response_format: dict[str, Any] | None,
+) -> str:
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "response_format": response_format,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _cache_get(db: Session, key: str) -> dict[str, Any] | None:
+    from app.models import LlmCacheEntry
+
+    try:
+        row = db.get(LlmCacheEntry, key)
+    except Exception:
+        return None
+    return dict(row.response_json) if row is not None else None
+
+
+def _cache_put(db: Session, key: str, model: str, prompt_sha: str, response: dict[str, Any]) -> None:
+    from app.models import LlmCacheEntry
+
+    try:
+        if db.get(LlmCacheEntry, key) is None:
+            db.add(LlmCacheEntry(key=key, model_id=model, prompt_sha=prompt_sha, response_json=response))
+            db.commit()
+    except Exception:
+        db.rollback()
+
+
+async def _chat_maybe_cached(
+    db: Session,
+    cli: "OpenRouterClient",
+    messages: list[dict[str, Any]],
+    model: str,
+    *,
+    response_format: dict[str, Any] | None,
+    temperature: float,
+    max_tokens: int,
+    prompt_sha: str,
+) -> tuple[dict[str, Any], bool]:
+    """cli.chat() behind the dev cache. Returns (response, from_cache).
+    Only complete (non-truncated), error-free responses are stored."""
+    if not settings.llm_dev_cache_active:
+        resp = await cli.chat(
+            messages, model, response_format=response_format,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+        return resp, False
+    key = _cache_key(
+        model, messages, temperature=temperature, max_tokens=max_tokens,
+        response_format=response_format,
+    )
+    hit = _cache_get(db, key)
+    if hit is not None:
+        return hit, True
+    resp = await cli.chat(
+        messages, model, response_format=response_format,
+        temperature=temperature, max_tokens=max_tokens,
+    )
+    if _finish_reason(resp) != "length":
+        _cache_put(db, key, model, prompt_sha, resp)
+    return resp, False
+
+
 class OpenRouterError(RuntimeError):
     def __init__(
         self,
@@ -247,17 +332,19 @@ async def call_structured(
     garble_retried = False
     truncation_retried = False
     tokens = max_tokens
+    cached = False
 
     try:
         while True:
             try:
-                resp = await cli.chat(
-                    messages,
-                    model,
+                resp, from_cache = await _chat_maybe_cached(
+                    db, cli, messages, model,
                     response_format=response_format,
                     temperature=temperature,
                     max_tokens=tokens,
+                    prompt_sha=prompt_sha,
                 )
+                cached = cached or from_cache
             except OpenRouterError as e:
                 last_err = str(e)
                 transport_err = e
@@ -265,9 +352,10 @@ async def call_structured(
 
             content = _extract_content(resp)
             last_content = content
-            i_tok, o_tok = _extract_usage(resp)
-            in_tok += i_tok
-            out_tok += o_tok
+            if not from_cache:  # a cache hit spent no tokens
+                i_tok, o_tok = _extract_usage(resp)
+                in_tok += i_tok
+                out_tok += o_tok
 
             if _finish_reason(resp) == "length":
                 # Output was truncated. A truncated response must never be
@@ -346,6 +434,7 @@ async def call_structured(
                     output_tokens=out_tok,
                     ok=ok,
                     error="" if ok else (last_err or "unknown")[:2000],
+                    cached=cached,
                 )
             )
             db.commit()
@@ -374,18 +463,22 @@ async def call_text(
     ok = False
     err = ""
     content = ""
+    cached = False
     try:
         try:
             tokens = max_tokens
             truncation_retried = False
             while True:
-                resp = await cli.chat(
-                    messages, model, temperature=temperature, max_tokens=tokens
+                resp, from_cache = await _chat_maybe_cached(
+                    db, cli, messages, model, response_format=None,
+                    temperature=temperature, max_tokens=tokens, prompt_sha=prompt_sha,
                 )
+                cached = cached or from_cache
                 content = _extract_content(resp)
-                i_tok, o_tok = _extract_usage(resp)
-                in_tok += i_tok
-                out_tok += o_tok
+                if not from_cache:
+                    i_tok, o_tok = _extract_usage(resp)
+                    in_tok += i_tok
+                    out_tok += o_tok
                 if _finish_reason(resp) == "length":
                     # A cut-off narrative must never be persisted silently.
                     if not truncation_retried and tokens < _TRUNCATION_TOKEN_CAP:
@@ -418,6 +511,7 @@ async def call_text(
                     output_tokens=out_tok,
                     ok=ok,
                     error=err[:2000],
+                    cached=cached,
                 )
             )
             db.commit()

@@ -38,7 +38,7 @@ async def scoping_turn(
             await scoping_agent.run_turn(inner, assessment, answer)
             await handle.update(progress=0.95, detail="Saving")
 
-    handle = registry.submit(job)
+    handle = registry.submit(job, kind="scoping_turn", assessment_id=aid)
     return TaskStatusRead(
         task_id=handle.id, status=handle.status, progress=0.0, detail=""
     )

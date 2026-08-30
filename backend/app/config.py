@@ -71,6 +71,20 @@ class Settings(BaseSettings):
     fts_topk: int = Field(default=8, alias="FTS_TOPK")
     max_upload_mb: int = Field(default=50, alias="MAX_UPLOAD_MB")
 
+    # Deployment environment: "dev" | "production". Some dev-only switches
+    # (LLM response cache) are refused outright in production.
+    app_env: str = Field(default="dev", alias="APP_ENV")
+    # Dev-only LLM response cache keyed by (model, messages, sampling params).
+    # Off by default. Serves a stored response instead of calling the model so
+    # unchanged pipeline stages cost nothing while iterating on other stages.
+    # NEVER active in production; the benchmark refuses to run against a
+    # backend that has it on (see benchmark README).
+    llm_dev_cache: bool = Field(default=False, alias="LLM_DEV_CACHE")
+
+    @property
+    def llm_dev_cache_active(self) -> bool:
+        return bool(self.llm_dev_cache) and self.app_env.lower() != "production"
+
     @property
     def reasoner_alternatives(self) -> list[str]:
         return [m.strip() for m in self.model_reasoner_alternatives.split(",") if m.strip()]

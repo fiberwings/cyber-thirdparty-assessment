@@ -62,6 +62,7 @@ documents:
     kind: policy
   - path: docs/05_TPRM_Policy_OrbitClear_v1-6.pdf
     kind: policy
+as_of_date: "2026-05-01"
 golden:
   expected_band: High
   expected_weaknesses:

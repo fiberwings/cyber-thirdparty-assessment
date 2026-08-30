@@ -27,6 +27,9 @@ description: "Stub vendor processing employee PII in AWS, SAML SSO, payroll-crit
 documents:
   - path: docs/policy.pdf
     kind: policy
+as_of_date: "2026-05-01"
+standards_profile:
+  policy_review_months: 12
 golden:
   expected_band: Moderate
   expected_weaknesses:
@@ -119,6 +122,8 @@ def _mock_backend(deleted: list, fail_gap: bool = False):
     ]))
     respx.post(f"{BACKEND}/api/assessments").mock(
         return_value=Response(201, json={"id": 1, "vendor_name": "Stub Vendor"}))
+    respx.patch(f"{BACKEND}/api/assessments/1/settings").mock(
+        return_value=Response(200, json={"id": 1}))
     respx.post(f"{BACKEND}/api/assessments/1/description").mock(
         return_value=Response(200, json={"text": "ok"}))
     respx.post(f"{BACKEND}/api/assessments/1/scoping/force-continue").mock(
@@ -185,6 +190,12 @@ def test_full_batch(fresh_db, stub_case, monkeypatch):
 
     # Ordering: scenarios/generate must precede the document upload
     paths = [str(c.request.url.path) for c in respx.calls]
+    # R7 inputs are applied before any stage runs
+    settings_calls = [c for c in respx.calls if c.request.url.path == "/api/assessments/1/settings"]
+    assert len(settings_calls) == 1
+    body = json.loads(settings_calls[0].request.content)
+    assert body == {"as_of_date": "2026-05-01", "standards_profile": {"policy_review_months": 12}}
+    assert paths.index("/api/assessments/1/settings") < paths.index("/api/assessments/1/scenarios/generate")
     assert paths.index("/api/assessments/1/scenarios/generate") < paths.index(
         "/api/assessments/1/documents"
     )
@@ -345,3 +356,13 @@ def test_grade_stored_assessment_no_pipeline(fresh_db, stub_case, monkeypatch):
     calls = session.scalars(select(JudgeCall).where(JudgeCall.case_result_id == cr.id)).all()
     assert {c.purpose for c in calls} == {"weakness_match", "finding_class", "exec_rubric"}
     session.close()
+
+
+@respx.mock
+def test_run_refuses_backend_with_dev_cache(fresh_db, stub_case, monkeypatch):
+    monkeypatch.setattr(settings, "BENCH_BACKEND_URL", BACKEND)
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", "test-key")
+    respx.get(f"{BACKEND}/api/health").mock(
+        return_value=Response(200, json={"ok": True, "llm_dev_cache": True}))
+    with pytest.raises(SystemExit, match="LLM_DEV_CACHE"):
+        run_batch([stub_case], RunConfig(judge_mode="none"))

@@ -42,6 +42,15 @@ class Assessment(Base):
     # {generated_at, model_id, fingerprint, summary: ExecutiveSummaryOut dump}.
     # `fingerprint` hashes the scored state so the API can flag staleness.
     executive_summary: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Date the assessment is performed "as of" (ISO yyyy-mm-dd). Every prompt's
+    # "Analysis date" and every freshness computation use it — never the wall
+    # clock — so a review anchored on a past date does not flag evidence as
+    # stale against the run date. NULL = today at the time of each call.
+    as_of_date: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    # Assessor (client-side) standards profile: required attestations,
+    # refresh windows, retention target, residency, MFA policy… See
+    # app.schemas.standards.StandardsProfile. {} = none supplied.
+    standards_profile: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=_now
@@ -205,6 +214,12 @@ class ControlAssessment(Base):
     # chunk of the cited document: [{document_id, page, section_path, quote}].
     # Kept verbatim instead of being bound to a wrong chunk.
     unresolved_citations: Mapped[list] = mapped_column(JSON, default=list)
+    # Last AI run outcome for this control. `last_error` is set when the
+    # structured call failed (the verdict above is then stale or absent) and
+    # cleared on the next successful run; the phase no longer fails as a
+    # whole — failed controls are resumable individually.
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=_now
     )
@@ -315,4 +330,38 @@ class ModelCall(Base):
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     error: Mapped[str] = mapped_column(Text, default="")
+    # True when the response came from the dev-only LLM cache (no tokens spent).
+    cached: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class LlmCacheEntry(Base):
+    """Dev-only response cache (see Settings.llm_dev_cache). One row per
+    (model, messages, sampling params) hash; stores the raw provider response."""
+
+    __tablename__ = "llm_cache"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model_id: Mapped[str] = mapped_column(String(120))
+    prompt_sha: Mapped[str] = mapped_column(String(64), index=True)
+    response_json: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class TaskRecord(Base):
+    """Durable mirror of the in-memory task registry so task status survives
+    a server restart (tasks that were running are marked interrupted)."""
+
+    __tablename__ = "task"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    progress: Mapped[float] = mapped_column(Float, default=0.0)
+    detail: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    kind: Mapped[str] = mapped_column(String(60), default="")
+    assessment_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=_now
+    )

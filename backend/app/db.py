@@ -63,6 +63,12 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("assessment", "phase_state", "JSON NOT NULL DEFAULT '{}'"),
     ("assessment", "executive_summary", "JSON"),
     ("control_assessment", "unresolved_citations", "JSON NOT NULL DEFAULT '[]'"),
+    # Accuracy program Phase 1 (R7/R8)
+    ("assessment", "as_of_date", "VARCHAR(10)"),
+    ("assessment", "standards_profile", "JSON NOT NULL DEFAULT '{}'"),
+    ("control_assessment", "last_error", "TEXT"),
+    ("control_assessment", "last_run_at", "DATETIME"),
+    ("model_call", "cached", "BOOLEAN NOT NULL DEFAULT 0"),
 ]
 
 _POST_MIGRATION_INDEXES: list[str] = [

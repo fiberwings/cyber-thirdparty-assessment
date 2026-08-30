@@ -154,6 +154,7 @@ assessment's original pipeline cost. Use it to re-grade after re-running a singl
 | `--cleanup none\|ok\|all` | `ok` | Delete created assessments after grading. `ok` keeps errored ones for debugging |
 | `--judge none\|match\|full` | `full` | `none`: no judge calls — deterministic metrics only (`band_error`, `n_weaknesses`). `match`: weakness matching (P/R/F1, ~5k tokens). `full`: matching + signal/noise classification of every reported weakness against the evidence chunks + exec-summary rubric |
 | `--skip-narratives` | off | Skip the narratives + executive-summary stage (~30k app tokens); the exec rubric is then not graded |
+| `--allow-dev-cache` | off | A backend whose `/api/health` reports `llm_dev_cache: true` would serve cached model responses; `bench run` refuses it unless this flag is given (plumbing runs only — never for a measurement) |
 | `--judge-model M` | `JUDGE_MODEL` | Judge model for this run (recorded on the run) |
 | `--override STAGE=MODEL` | — | Per-stage model override, repeatable. Stages: `scoping`, `scenarios`, `gap_analysis`, `weaknesses`, `narrative`, `executive_summary` |
 | `--smoke` | off | Pins all six stages **and** the judge to the app's fast-profile default — a cheap plumbing check, not an accuracy measurement. Explicit `--override`/`--judge-model` still win |

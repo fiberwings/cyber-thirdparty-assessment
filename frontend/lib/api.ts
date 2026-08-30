@@ -1,4 +1,4 @@
-import { Assessment, ScenarioRead, DescriptionRead, DocumentRead, ChunkRead, AggregateScoreRead, ScenarioScoreRead, ReportOut, ModelProfile, WeaknessRead, MetaIssueRead } from "./types";
+import { Assessment, ScenarioRead, DescriptionRead, DocumentRead, ChunkRead, AggregateScoreRead, ScenarioScoreRead, ReportOut, ModelProfile, WeaknessRead, MetaIssueRead, StandardsProfile } from "./types";
 
 async function http<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   const r = await fetch(input, {
@@ -23,6 +23,12 @@ export const api = {
     http<Assessment>(`/api/assessments`, { method: "POST", body: JSON.stringify({ vendor_name }) }),
   getAssessment: (id: number) => http<Assessment>(`/api/assessments/${id}`),
   deleteAssessment: (id: number) => http<void>(`/api/assessments/${id}`, { method: "DELETE" }),
+
+  // assessment-level inputs: analysis date + assessor standards
+  patchSettings: (
+    id: number,
+    patch: { as_of_date?: string; clear_as_of_date?: boolean; standards_profile?: StandardsProfile },
+  ) => http<Assessment>(`/api/assessments/${id}/settings`, { method: "PATCH", body: JSON.stringify(patch) }),
 
   // description / scoping
   setDescription: (id: number, text: string) =>
@@ -75,8 +81,13 @@ export const api = {
     http<void>(`/api/expected-controls/${id}`, { method: "DELETE" }),
 
   // gap analysis / weaknesses / scoring
-  runGapAnalysis: (id: number) =>
-    http<{ task_id: string }>(`/api/assessments/${id}/gap-analysis/run`, { method: "POST" }),
+  runGapAnalysis: (id: number, onlyFailed = false) =>
+    http<{ task_id: string }>(
+      `/api/assessments/${id}/gap-analysis/run${onlyFailed ? "?only_failed=true" : ""}`,
+      { method: "POST" },
+    ),
+  assessControlAI: (ecId: number) =>
+    http<{ task_id: string }>(`/api/expected-controls/${ecId}/assess-ai`, { method: "POST" }),
   synthesizeWeaknesses: (id: number) =>
     http<{ task_id: string }>(`/api/assessments/${id}/weaknesses/synthesize`, { method: "POST" }),
   recalculate: (id: number) =>

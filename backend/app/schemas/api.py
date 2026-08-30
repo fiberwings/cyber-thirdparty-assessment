@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal, Optional
 
+from app.schemas.standards import StandardsProfile
 from pydantic import BaseModel, Field
 
 
@@ -23,6 +24,19 @@ class PhaseInfo(BaseModel):
     # Live detail when state == "running" (e.g. "37% · synthesizing weaknesses").
     detail: Optional[str] = None
     progress: Optional[float] = None
+    # state == "done" with partial failures (e.g. gap analysis: N controls
+    # could not be assessed and are resumable individually).
+    warning: Optional[str] = None
+    failed_targets: list[str] = Field(default_factory=list)
+
+
+class AssessmentSettingsPatch(BaseModel):
+    """PATCH body for the assessment-level inputs (R7). Omitted fields are
+    left unchanged; `as_of_date: null` resets to "today"."""
+
+    as_of_date: Optional[date] = None
+    clear_as_of_date: bool = False
+    standards_profile: Optional[StandardsProfile] = None
 
 
 class AssessmentRead(BaseModel):
@@ -34,6 +48,11 @@ class AssessmentRead(BaseModel):
     model_overrides: dict
     created_at: datetime
     updated_at: datetime
+    # R7 inputs. as_of_date is the effective analysis date (today when unset);
+    # as_of_date_set tells the UI whether it was pinned explicitly.
+    as_of_date: date
+    as_of_date_set: bool = False
+    standards_profile: StandardsProfile = Field(default_factory=StandardsProfile)
     # UI-facing phase tracker. Keys: scoping, scenarios, evidence, analysis, score.
     phases: dict[str, PhaseInfo] = Field(default_factory=dict)
 
@@ -126,6 +145,9 @@ class ControlAssessmentRead(BaseModel):
     is_locked_by_user: bool
     citations: list[CitationRead]
     unresolved_citations: list[UnresolvedCitationRead] = Field(default_factory=list)
+    # Set when the last AI run for this control failed (verdict stale/absent).
+    last_error: Optional[str] = None
+    last_run_at: Optional[datetime] = None
 
 
 class ExpectedControlRead(BaseModel):

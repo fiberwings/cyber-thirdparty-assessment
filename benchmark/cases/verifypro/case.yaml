@@ -58,6 +58,7 @@ documents:
     kind: policy
   - path: docs/BCP_DR_Policy_VerifyPro_v1.8.docx
     kind: policy
+as_of_date: "2026-05-01"
 golden:
   expected_band: High
   expected_weaknesses:

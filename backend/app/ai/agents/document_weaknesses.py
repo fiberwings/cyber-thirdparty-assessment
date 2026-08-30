@@ -5,8 +5,15 @@ Strategy:
     most accurate when the doc fits because the model sees the whole picture.
 
     Adaptive fallback — only when the input would exceed `SINGLE_CALL_MAX_TOKENS`
-    OR the default call returned `finish_reason=length`. The fallback is a
-    two-phase, structure-aware extraction:
+    OR the default call returned `finish_reason=length`.
+
+    Questionnaires (R8) fall back to *windowed direct extraction*: the sheets /
+    domains (section_paths) are packed into windows under
+    `QUESTIONNAIRE_WINDOW_MAX_TOKENS`, each window is extracted with the
+    ordinary questionnaire prompt, and rows are dedup-guarded at the DB. Every
+    row is seen exactly once, so nothing is ever dropped by a finding cap.
+
+    Every other kind falls back to a two-phase, structure-aware extraction:
         Phase 1 — kind-aware enumeration call(s) returning weakness skeletons
                   (heading + severity + section_path + kind_signal). Output is
                   small so truncation risk is low. If even the enumeration
@@ -39,10 +46,11 @@ from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.ai.context import analysis_datetime, standards_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
 from app.db import SessionLocal
-from app.models import Chunk, Document, MetaIssue, Weakness
+from app.models import Chunk, Document, Weakness
 from app.schemas.ai import (
     DocumentWeaknessListOut,
     DocumentWeaknessOut,
@@ -60,10 +68,9 @@ SINGLE_CALL_MAX_TOKENS = 80_000
 ENUMERATE_INPUT_MAX = 150_000
 
 PHASE2_CONCURRENCY = 4
-# Hard cap on phase-2 detail calls per document. If exceeded we record a
-# MetaIssue(insufficient_info) so the score reflects the truncation rather
-# than silently dropping findings.
-PER_DOC_PHASE2_CAP = 80
+# Questionnaire windows: small enough that the per-window output (one row per
+# negative answer) stays far below the output budget even on dense sheets.
+QUESTIONNAIRE_WINDOW_MAX_TOKENS = 12_000
 
 _PROMPT_BY_KIND: dict[str, str] = {
     "pentest": "document_weaknesses_pentest",
@@ -114,17 +121,34 @@ def _approx_tokens(text: str) -> int:
     return len(text) // 4
 
 
-def _temporal_header(analysis_dt: datetime, uploaded_dt: datetime | None) -> str:
-    analysis_line = f"# Analysis date: {analysis_dt.strftime('%Y-%m-%d')} (UTC)"
+def _temporal_header(
+    analysis_dt: datetime, uploaded_dt: datetime | None, standards: str = ""
+) -> str:
+    """Analysis date (= assessment.as_of_date, R7), upload date relative to
+    it, and the assessor standards block."""
+    analysis_line = f"# Analysis date: {analysis_dt.strftime('%Y-%m-%d')}"
+    parts = [analysis_line]
     if uploaded_dt is None:
-        uploaded_line = "# Document uploaded: unknown"
+        parts.append("# Document uploaded: unknown")
     else:
-        days_ago = max(0, (analysis_dt - uploaded_dt).days)
-        uploaded_line = (
-            f"# Document uploaded: {uploaded_dt.strftime('%Y-%m-%d')} "
-            f"({days_ago} days ago)"
-        )
-    return f"{analysis_line}\n{uploaded_line}"
+        delta = (analysis_dt.date() - uploaded_dt.date()).days
+        if delta >= 0:
+            parts.append(
+                f"# Document uploaded: {uploaded_dt.strftime('%Y-%m-%d')} "
+                f"({delta} days before the analysis date)"
+            )
+        # An upload that post-dates a pinned analysis date is a run artefact,
+        # not evidence: it is withheld entirely so no freshness judgement can
+        # be anchored on it (the canary showed the model still using it when
+        # it was merely labelled). Freshness then rests on the document's own
+        # dates versus the analysis date.
+    parts.append(
+        "# Freshness rule: judge staleness ONLY against the analysis date above, "
+        "using the document's own dates (version, period end, test date)."
+    )
+    if standards:
+        parts.append(standards)
+    return "\n".join(parts)
 
 
 def _normalise(text: str) -> str:
@@ -290,28 +314,95 @@ def _kind_prompt(kind: str) -> str:
     return load_prompt(name)
 
 
-def _record_truncation_meta_issue(
-    assessment_id: int, document_id: int, dropped: int
-) -> None:
-    """When phase-2 cap fires, record a MetaIssue so the score reflects the
-    truncation rather than silently dropping findings."""
-    if dropped <= 0:
-        return
-    with SessionLocal() as inner:
-        inner.add(
-            MetaIssue(
-                assessment_id=assessment_id,
-                kind="insufficient_info",
-                target_ref=f"document:{document_id}",
-                weight=min(1.0, 0.05 * dropped),
-                rationale=(
-                    f"Per-document weakness extraction exceeded the {PER_DOC_PHASE2_CAP}-finding "
-                    f"phase-2 cap; {dropped} findings were not detailed. Re-run extraction "
-                    "with a higher cap if these findings should reach the score."
-                ),
-            )
+def _pack_section_windows(
+    sections: dict[str, list[Chunk]], cap_tokens: int
+) -> list[list[Chunk]]:
+    """Contiguous sections packed into windows of ≤ cap_tokens (sections are
+    never split; an oversized single section becomes its own window)."""
+    windows: list[list[Chunk]] = []
+    current: list[Chunk] = []
+    current_tokens = 0
+    for sec_chunks in sections.values():
+        sec_tokens = _approx_tokens(_render_chunks(sec_chunks))
+        if current and current_tokens + sec_tokens > cap_tokens:
+            windows.append(current)
+            current, current_tokens = [], 0
+        current.extend(sec_chunks)
+        current_tokens += sec_tokens
+    if current:
+        windows.append(current)
+    return windows
+
+
+async def _extract_questionnaire_windowed(
+    db: Session,
+    *,
+    doc: Document,
+    chunks: list[Chunk],
+    header: str,
+    vendor_name: str,
+    prompt_kind: str,
+    assessment_id: int,
+    model_override: str | None,
+    client: OpenRouterClient | None,
+    on_progress: ProgressCb | None,
+) -> int:
+    """Windowed direct extraction for long questionnaires (R8): one ordinary
+    extraction call per window of sheets/domains; no enumeration, no cap."""
+    windows = _pack_section_windows(_group_by_section(chunks), QUESTIONNAIRE_WINDOW_MAX_TOKENS)
+    n = len(windows)
+    inserted = 0
+    failures: list[BaseException] = []
+    for i, win in enumerate(windows):
+        first_sec = win[0].section_path or "(root)"
+        last_sec = win[-1].section_path or "(root)"
+        user_block = (
+            f"{header}\n"
+            f"# Vendor service: {vendor_name}\n"
+            f"# Document: {doc.filename} (kind: {doc.kind})\n"
+            f"# Window {i + 1} of {n}: sections \"{first_sec}\" … \"{last_sec}\" "
+            "(other windows are extracted separately — report only what is in this window)\n\n"
+            f"{_render_chunks(win)}"
         )
-        inner.commit()
+        try:
+            out: DocumentWeaknessListOut = await call_structured(
+                db,
+                purpose="document_weakness_extract_window",
+                profile="reasoner",
+                messages=[
+                    {"role": "system", "content": prompt_kind},
+                    {"role": "user", "content": user_block},
+                ],
+                schema=DocumentWeaknessListOut,
+                assessment_id=assessment_id,
+                model_override=model_override,
+                max_tokens=8192,
+                client=client,
+            )
+        except OpenRouterError as e:
+            failures.append(e)
+            continue
+        rows = [
+            _build_weakness_row(
+                w=w, assessment_id=assessment_id, document_id=doc.id, chunks=chunks
+            )
+            for w in out.weaknesses
+        ]
+        inserted += _persist_rows(rows)
+        if on_progress:
+            await on_progress(
+                0.15 + 0.85 * (i + 1) / n,
+                f"Extracted {inserted} weaknesses ({i + 1}/{n} windows)",
+            )
+    if failures:
+        first = failures[0]
+        raise OpenRouterError(
+            f"{n - len(failures)}/{n} questionnaire windows extracted; "
+            f"{len(failures)} failed. First failure: {first}",
+            transient=getattr(first, "transient", False),
+            upstream_code=getattr(first, "upstream_code", None),
+        )
+    return inserted
 
 
 async def extract(
@@ -346,8 +437,11 @@ async def extract(
     kind = doc.kind if doc.kind in _PROMPT_BY_KIND else "other"
     prompt_kind = _kind_prompt(kind)
 
-    analysis_dt = datetime.utcnow()
-    temporal_header = _temporal_header(analysis_dt, doc.created_at)
+    # Analysis date = assessment.as_of_date (R7), never the wall clock.
+    analysis_dt = analysis_datetime(doc.assessment)
+    temporal_header = _temporal_header(
+        analysis_dt, doc.created_at, standards_block(doc.assessment)
+    )
 
     full_text = _render_chunks(chunks)
     full_input = (
@@ -402,7 +496,27 @@ async def extract(
                     f"Output truncated; falling back to two-phase extraction...",
                 )
 
-    # ---- Two-phase fallback ----
+    # ---- Questionnaire fallback: windowed direct extraction, no cap ----
+    if kind == "questionnaire":
+        inserted = await _extract_questionnaire_windowed(
+            db,
+            doc=doc,
+            chunks=chunks,
+            header=temporal_header,
+            vendor_name=vendor_name,
+            prompt_kind=prompt_kind,
+            assessment_id=assessment_id,
+            model_override=model_override,
+            client=client,
+            on_progress=on_progress,
+        )
+        doc.weakness_extracted_at = datetime.utcnow()
+        db.commit()
+        if on_progress:
+            await on_progress(1.0, f"Extracted {inserted} weaknesses (windowed)")
+        return inserted
+
+    # ---- Two-phase fallback (all other kinds) ----
     sections = _group_by_section(chunks)
     preamble = _build_preamble(chunks)
     enum_prompt = _enumerate_prompt(kind)
@@ -444,17 +558,12 @@ async def extract(
         if key not in deduped:
             deduped[key] = sk
     skeletons = list(deduped.values())
-
-    dropped = 0
-    if len(skeletons) > PER_DOC_PHASE2_CAP:
-        dropped = len(skeletons) - PER_DOC_PHASE2_CAP
-        skeletons = skeletons[:PER_DOC_PHASE2_CAP]
+    # No finding cap (R8): every skeleton is detailed. Concurrency bounds the
+    # load; nothing is silently dropped.
 
     if not skeletons:
         doc.weakness_extracted_at = datetime.utcnow()
         db.commit()
-        if dropped:
-            _record_truncation_meta_issue(assessment_id, document_id, dropped)
         if on_progress:
             await on_progress(1.0, "No findings.")
         return 0
@@ -534,9 +643,6 @@ async def extract(
 
     doc.weakness_extracted_at = datetime.utcnow()
     db.commit()
-
-    if dropped:
-        _record_truncation_meta_issue(assessment_id, document_id, dropped)
 
     if failures:
         first_err = failures[0]

@@ -81,3 +81,8 @@ data/      — SQLite DB (gitignored)
 ## Environment
 
 See `.env.example`. Required: `OPENROUTER_API_KEY`. Everything else has sensible defaults for local use.
+
+Assessment-level inputs (set per assessment in the UI on the scoping page, or via `PATCH /api/assessments/{id}/settings`):
+the **analysis date** (`as_of_date`, default today — every prompt's "Analysis date" and every freshness judgement use it)
+and the **assessor standards profile** (required attestations, refresh windows, retention target, residency, MFA policy,
+vulnerability SLA). `LLM_DEV_CACHE=1` (dev only, see `.env.example`) caches model responses for cheap re-runs of unchanged stages.

@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, pollTask } from "@/lib/api";
 import { use, useState } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
+import { AssessmentSettings } from "@/components/AssessmentSettings";
 import { TaskProgress } from "@/components/TaskProgress";
 import { useRouter } from "next/navigation";
 
@@ -59,6 +60,8 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
         Describe what the vendor will provide. The AI will ask follow-up questions until enough is known to identify
         inherent risks — or you can force-continue at any time.
       </p>
+
+      <AssessmentSettings assessmentId={aid} />
 
       {!hasDesc && (
         <div className="rounded-lg border border-ink-200 bg-white p-5 max-w-3xl">

@@ -37,6 +37,7 @@ import json
 
 from sqlalchemy.orm import Session
 
+from app.ai.context import analysis_datetime, standards_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
 from app.db import SessionLocal
@@ -107,10 +108,14 @@ def _format_weaknesses(batch: list[Weakness], analysis_dt: datetime) -> str:
 
 
 def _build_messages(
-    scenarios: list[Scenario], batch: list[Weakness], analysis_dt: datetime
+    scenarios: list[Scenario],
+    batch: list[Weakness],
+    analysis_dt: datetime,
+    standards: str = "",
 ) -> list[dict]:
     user = (
-        f"# Analysis date: {analysis_dt.strftime('%Y-%m-%d')} (UTC)\n"
+        f"# Analysis date: {analysis_dt.strftime('%Y-%m-%d')}\n"
+        f"{standards}\n"
         "# Existing scenarios with their expected controls\n"
         f"{_format_existing_scenarios(scenarios)}\n\n"
         "# Control catalogue (additional codes you may use when proposing emergent scenarios)\n"
@@ -361,9 +366,11 @@ async def run(
         for i in range(0, len(ws), _BATCH_SIZE):
             batches.append(ws[i : i + _BATCH_SIZE])
 
-    # Single analysis timestamp shared across all cluster calls so the model
-    # sees a consistent "now" when reasoning about source-document age.
-    analysis_dt = datetime.utcnow()
+    # Single analysis date shared across all cluster calls so the model sees
+    # a consistent "now" when reasoning about source-document age. It is the
+    # assessment's as_of_date (R7), never the wall clock.
+    analysis_dt = analysis_datetime(a)
+    standards = standards_block(a)
 
     semaphore = asyncio.Semaphore(_PHASE_CONCURRENCY)
     n = len(batches)
@@ -377,7 +384,7 @@ async def run(
             inner,
             purpose="cross_correlation",
             profile="reasoner",
-            messages=_build_messages(scenarios, batch, analysis_dt),
+            messages=_build_messages(scenarios, batch, analysis_dt, standards),
             schema=WeaknessClusterMappingOut,
             assessment_id=assessment_id,
             model_override=model_override,

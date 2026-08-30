@@ -49,8 +49,8 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
   };
 
   const runGap = useMutation({
-    mutationFn: async () => {
-      const { task_id } = await api.runGapAnalysis(aid);
+    mutationFn: async (onlyFailed: boolean = false) => {
+      const { task_id } = await api.runGapAnalysis(aid, onlyFailed);
       qc.invalidateQueries({ queryKey: ["assessment", aid] });
       await pollTask(task_id, undefined, 800);
       await api.recalculate(aid);
@@ -121,7 +121,10 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
           desc="Reasoner walks every scenario × expected control and pulls evidence from your uploaded documents."
           info={gapInfo}
           submitting={runGap.isPending}
-          onRun={() => runGap.mutate()}
+          onRun={() => runGap.mutate(false)}
+          warning={gapInfo?.warning || undefined}
+          failedTargets={gapInfo?.failed_targets}
+          onRunFailed={() => runGap.mutate(true)}
         />
         <div className="border-t border-ink-100" />
         <Step
@@ -212,16 +215,20 @@ function buttonLabel(info: PhaseInfo | undefined, submitting: boolean): string {
 }
 
 function Step({
-  title, desc, info, submitting, onRun,
+  title, desc, info, submitting, onRun, warning, failedTargets, onRunFailed,
 }: {
   title: string;
   desc: string;
   info: PhaseInfo | undefined;
   submitting: boolean;
   onRun: () => void;
+  warning?: string;
+  failedTargets?: string[];
+  onRunFailed?: () => void;
 }) {
   const status = statusLine(info);
   const isRunning = submitting || info?.state === "running";
+  const failed = failedTargets || [];
   return (
     <div className="flex items-start gap-3">
       <div className="pt-0.5">
@@ -231,6 +238,20 @@ function Step({
         <div className="text-sm font-semibold text-ink-900">{title}</div>
         <div className="text-xs text-ink-600 mt-0.5">{desc}</div>
         <div className={`text-xs mt-1 ${status.cls}`}>{status.text}</div>
+        {info?.state === "done" && warning && (
+          <div className="mt-1.5 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800">
+            <div>{warning}</div>
+            {failed.length > 0 && onRunFailed && (
+              <button
+                onClick={onRunFailed}
+                disabled={isRunning}
+                className="mt-1 rounded border border-amber-300 bg-white text-amber-900 text-[11px] font-medium px-2 py-0.5 hover:bg-amber-100 disabled:opacity-40"
+              >
+                Re-run the {failed.length} failed control{failed.length === 1 ? "" : "s"} only
+              </button>
+            )}
+          </div>
+        )}
       </div>
       <button
         onClick={onRun}

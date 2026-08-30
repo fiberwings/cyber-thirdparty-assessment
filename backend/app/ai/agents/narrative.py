@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from app.ai.context import analysis_date_line
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, call_text
 from app.models import Assessment, MetaIssue, Scenario
@@ -37,6 +38,7 @@ def _build_messages(scenario: Scenario, meta_issues: list[MetaIssue]) -> list[di
     ) or "(none)"
 
     user_block = (
+        f"{analysis_date_line(scenario.assessment)}\n\n"
         f"# Scenario\n{scenario.code} — {scenario.name}\n{scenario.description}\n\n"
         f"# Inherent\nimpact={level_to_name(scenario.inherent_impact)}, "
         f"likelihood={level_to_name(scenario.inherent_likelihood)}\n\n"

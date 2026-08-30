@@ -84,6 +84,28 @@ class AppClient:
         )
         r.raise_for_status()
 
+    def set_settings(
+        self, assessment_id: int, as_of_date: str | None, standards_profile: dict | None
+    ) -> None:
+        body: dict = {}
+        if as_of_date:
+            body["as_of_date"] = as_of_date
+        if standards_profile:
+            body["standards_profile"] = standards_profile
+        if not body:
+            return
+        r = self.http.patch(f"/api/assessments/{assessment_id}/settings", json=body)
+        r.raise_for_status()
+
+    def dev_cache_active(self) -> bool:
+        """True when the backend would serve cached model responses (dev-only
+        switch). A real benchmark run must refuse to measure against it."""
+        try:
+            r = self.http.get("/api/health")
+            return bool(r.json().get("llm_dev_cache")) if r.status_code == 200 else False
+        except (httpx.HTTPError, ValueError):
+            return False
+
     def set_description(self, assessment_id: int, text: str) -> None:
         r = self.http.post(
             f"/api/assessments/{assessment_id}/description", json={"text": text}

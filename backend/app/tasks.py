@@ -1,7 +1,11 @@
-"""In-memory task registry for long-running pipeline runs.
+"""Task registry for long-running pipeline runs.
 
-Single-process, single-user deployment — so a dict + asyncio is enough.
-Each task can emit events that SSE clients subscribe to.
+Single-process, single-user deployment — a dict + asyncio drives the live
+side (progress events, SSE). Every status change is also written through to
+the `task` table so `GET /api/tasks/{id}` keeps answering after a server
+restart: tasks that were pending/running when the process died are marked
+`error` ("interrupted by server restart") at startup, and the phase that
+owned them is marked failed so the UI offers a re-run instead of hanging.
 """
 
 from __future__ import annotations
@@ -31,8 +35,30 @@ class TaskHandle:
     detail: str = ""
     error: str = ""
     result: Any = None
+    kind: str = ""
+    assessment_id: int | None = None
     events: list[TaskEvent] = field(default_factory=list)
     _cv: asyncio.Condition = field(default_factory=asyncio.Condition)
+
+    def _persist(self) -> None:
+        """Write-through of the durable fields. Best effort: a DB hiccup must
+        never break the running job."""
+        try:
+            from app.db import SessionLocal
+            from app.models import TaskRecord
+
+            with SessionLocal() as db:
+                row = db.get(TaskRecord, self.id)
+                if row is None:
+                    row = TaskRecord(id=self.id, kind=self.kind, assessment_id=self.assessment_id)
+                    db.add(row)
+                row.status = self.status
+                row.progress = float(self.progress or 0.0)
+                row.detail = (self.detail or "")[:2000]
+                row.error = (self.error or "")[:2000]
+                db.commit()
+        except Exception:
+            pass
 
     def set(self, *, status: str | None = None, progress: float | None = None,
             detail: str | None = None, event: str = "progress",
@@ -50,6 +76,7 @@ class TaskHandle:
             data={"status": self.status, "progress": self.progress, "detail": self.detail, **(data or {})},
         )
         self.events.append(ev)
+        self._persist()
 
     async def update(self, *, status: str | None = None, progress: float | None = None,
                      detail: str | None = None, event: str = "progress",
@@ -65,11 +92,36 @@ class TaskRegistry:
         self._tasks: dict[str, TaskHandle] = {}
 
     def get(self, task_id: str) -> TaskHandle | None:
-        return self._tasks.get(task_id)
+        """Live handle when the task belongs to this process; otherwise a
+        detached snapshot from the `task` table (status/progress/detail/error
+        only — no events, no result)."""
+        live = self._tasks.get(task_id)
+        if live is not None:
+            return live
+        try:
+            from app.db import SessionLocal
+            from app.models import TaskRecord
 
-    def submit(self, fn: JobFn) -> TaskHandle:
-        task = TaskHandle(id=str(uuid.uuid4()))
+            with SessionLocal() as db:
+                row = db.get(TaskRecord, task_id)
+                if row is None:
+                    return None
+                return TaskHandle(
+                    id=row.id,
+                    status=row.status,
+                    progress=row.progress,
+                    detail=row.detail,
+                    error=row.error,
+                    kind=row.kind,
+                    assessment_id=row.assessment_id,
+                )
+        except Exception:
+            return None
+
+    def submit(self, fn: JobFn, *, kind: str = "", assessment_id: int | None = None) -> TaskHandle:
+        task = TaskHandle(id=str(uuid.uuid4()), kind=kind, assessment_id=assessment_id)
         self._tasks[task.id] = task
+        task._persist()
 
         async def _wrap():
             await task.update(status="running", event="start")
@@ -106,6 +158,45 @@ class TaskRegistry:
 registry = TaskRegistry()
 
 
+def reconcile_interrupted_tasks() -> int:
+    """Startup: any task still pending/running in the table belonged to a
+    previous process and can never finish. Mark it errored and fail the
+    phase that owns it so the UI offers a re-run. Returns the count."""
+    from app.db import SessionLocal
+    from app.models import Assessment, TaskRecord
+
+    n = 0
+    with SessionLocal() as db:
+        rows = (
+            db.query(TaskRecord)
+            .filter(TaskRecord.status.in_(["pending", "running"]))
+            .all()
+        )
+        for row in rows:
+            row.status = "error"
+            row.error = "interrupted by server restart — re-run the step"
+            row.detail = row.error
+            n += 1
+            if row.assessment_id is None:
+                continue
+            a = db.get(Assessment, row.assessment_id)
+            if a is None:
+                continue
+            state = dict(a.phase_state or {})
+            changed = False
+            for phase, entry in state.items():
+                if isinstance(entry, dict) and entry.get("task_id") == row.id:
+                    entry = dict(entry)
+                    entry["task_id"] = None
+                    entry["error"] = row.error
+                    state[phase] = entry
+                    changed = True
+            if changed:
+                a.phase_state = state
+        db.commit()
+    return n
+
+
 # ---------- Phase-state helpers ----------
 #
 # Persistent per-phase markers on Assessment.phase_state. Each long-running
@@ -138,7 +229,16 @@ def mark_phase_started(assessment_id: int, phase: str, task_id: str) -> None:
         db.commit()
 
 
-def mark_phase_done(assessment_id: int, phase: str) -> None:
+def mark_phase_done(
+    assessment_id: int,
+    phase: str,
+    *,
+    warning: str | None = None,
+    failed_targets: list[str] | None = None,
+) -> None:
+    """Phase completed. `warning` / `failed_targets` record a partial success
+    (e.g. gap analysis with N controls that could not be assessed) without
+    turning the whole phase into an error."""
     from app.db import SessionLocal
     from app.models import Assessment
 
@@ -151,6 +251,8 @@ def mark_phase_done(assessment_id: int, phase: str) -> None:
         existing["completed_at"] = _now_iso()
         existing["task_id"] = None
         existing["error"] = None
+        existing["warning"] = (warning or "")[:500] or None
+        existing["failed_targets"] = list(failed_targets or [])
         existing.setdefault("started_at", existing["completed_at"])
         state[phase] = existing
         a.phase_state = state

@@ -26,6 +26,7 @@ from app.schemas.api import (
     ScenarioRead,
     TurnRead,
 )
+from app.ai.context import analysis_date, standards_profile
 from app.tasks import registry
 
 
@@ -52,6 +53,8 @@ def serialize_control_assessment(ca: ControlAssessment | None) -> ControlAssessm
         is_locked_by_user=ca.is_locked_by_user,
         citations=[serialize_evidence(e) for e in ca.evidence],
         unresolved_citations=list(ca.unresolved_citations or []),
+        last_error=ca.last_error,
+        last_run_at=ca.last_run_at,
     )
 
 
@@ -145,6 +148,8 @@ def compute_phase_status(a: Assessment) -> dict[str, PhaseInfo]:
                 started_at=started_at,
                 completed_at=completed_at,
                 error=None,
+                warning=entry.get("warning") or None,
+                failed_targets=list(entry.get("failed_targets") or []),
             )
         if task_id:
             handle = registry.get(task_id)
@@ -252,6 +257,9 @@ def serialize_assessment(a: Assessment) -> AssessmentRead:
         model_overrides=a.model_overrides or {},
         created_at=a.created_at,
         updated_at=a.updated_at,
+        as_of_date=analysis_date(a),
+        as_of_date_set=bool(a.as_of_date),
+        standards_profile=standards_profile(a),
         phases=compute_phase_status(a),
     )
 

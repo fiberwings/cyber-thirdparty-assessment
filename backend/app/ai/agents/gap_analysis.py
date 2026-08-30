@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.ai import retrieval
+from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
 from app.db import SessionLocal
@@ -100,6 +102,7 @@ def _build_messages(
     *,
     known_weaknesses: list[Weakness] | None = None,
     second_pass: bool = False,
+    context: str = "",
 ) -> list[dict]:
     note = (
         "This is the SECOND retrieval pass — the candidate evidence now includes "
@@ -110,6 +113,7 @@ def _build_messages(
     )
     user_block = (
         f"{note}"
+        f"{context}\n\n"
         f"# Scenario\n{scenario.code} — {scenario.name}\n{scenario.description}\n\n"
         f"# Control under assessment\n"
         f"code: {control.code}\nname: {control.name}\n"
@@ -386,12 +390,15 @@ async def assess_control(
     chunks = _retrieve_for_control(db, assessment.id, control, scenario)
     known = _known_weaknesses_for_control(db, assessment.id, control.code)
     model_override = (assessment.model_overrides or {}).get("gap_analysis")
+    context = assessment_context_block(assessment)
 
     out: ControlAssessmentOut = await call_structured(
         db,
         purpose="gap_analysis_control",
         profile="reasoner",
-        messages=_build_messages(scenario, control, chunks, known_weaknesses=known),
+        messages=_build_messages(
+            scenario, control, chunks, known_weaknesses=known, context=context
+        ),
         schema=ControlAssessmentOut,
         assessment_id=assessment.id,
         model_override=model_override,
@@ -414,7 +421,8 @@ async def assess_control(
                 purpose="gap_analysis_control_r2",
                 profile="reasoner",
                 messages=_build_messages(
-                    scenario, control, chunks, known_weaknesses=known, second_pass=True
+                    scenario, control, chunks, known_weaknesses=known,
+                    second_pass=True, context=context,
                 ),
                 schema=ControlAssessmentOut,
                 assessment_id=assessment.id,
@@ -431,6 +439,8 @@ async def assess_control(
     ca.coverage = out.coverage
     ca.effectiveness = out.effectiveness
     ca.rationale = out.rationale
+    ca.last_error = None
+    ca.last_run_at = datetime.utcnow()
     if not ca.id:
         db.add(ca)
         db.flush()
@@ -532,9 +542,71 @@ async def _assess_control_worker(
             assessment = inner.get(Assessment, assessment_id)
             scenario = inner.get(Scenario, scenario_id)
             control = inner.get(ExpectedControl, control_id)
-            await assess_control(inner, assessment, scenario, control, client=client)
+            try:
+                await assess_control(inner, assessment, scenario, control, client=client)
+            except Exception as e:
+                inner.rollback()
+                record_control_failure(control_id, e)
+                raise
     if on_done is not None:
         on_done(label)
+
+
+def record_control_failure(control_id: int, err: BaseException) -> None:
+    """Persist a failed AI run on the control (R8). The previous verdict, if
+    any, is left in place but flagged stale via `last_error`; a control that
+    was never assessed gets a row with coverage=none / effectiveness=unknown —
+    exactly how the scoring API already treats a missing assessment — so the
+    failure changes no score on its own but is visible and resumable."""
+    with SessionLocal() as db:
+        control = db.get(ExpectedControl, control_id)
+        if control is None:
+            return
+        ca = control.assessment
+        if ca is None:
+            ca = ControlAssessment(expected_control_id=control.id)
+            db.add(ca)
+        ca.last_error = f"{type(err).__name__}: {err}"[:2000]
+        ca.last_run_at = datetime.utcnow()
+        db.commit()
+
+
+def failed_targets(assessment: Assessment) -> list[str]:
+    """SCENARIO/CONTROL labels whose last AI run failed."""
+    out: list[str] = []
+    for s in assessment.scenarios:
+        for ctrl in s.expected_controls:
+            ca = ctrl.assessment
+            if ca is not None and ca.last_error:
+                out.append(f"{s.code}/{ctrl.code}")
+    return out
+
+
+class GapAnalysisResult:
+    """Outcome of run_full: which targets failed (persisted per control) and
+    a human summary. A partial failure is NOT an exception any more — the
+    phase completes, the failed controls are visible on the UI and can be
+    re-run individually or all at once with only_failed=True."""
+
+    def __init__(self, total: int, failed: list[tuple[str, BaseException]]):
+        self.total = total
+        self.failed = failed
+
+    @property
+    def failed_labels(self) -> list[str]:
+        return [lbl for lbl, _ in self.failed]
+
+    @property
+    def warning(self) -> str | None:
+        if not self.failed:
+            return None
+        first_label, first_err = self.failed[0]
+        return (
+            f"{self.total - len(self.failed)}/{self.total} controls assessed; "
+            f"{len(self.failed)} failed and can be re-run "
+            f"({', '.join(self.failed_labels[:6])}{'…' if len(self.failed) > 6 else ''}). "
+            f"First failure on '{first_label}': {str(first_err)[:200]}"
+        )
 
 
 async def run_full(
@@ -543,17 +615,27 @@ async def run_full(
     *,
     client: OpenRouterClient | None = None,
     on_progress=None,
-):
-    """Iterate every scenario × control and run gap analysis (parallel, bounded)."""
+    only_failed: bool = False,
+) -> GapAnalysisResult:
+    """Iterate every scenario × control and run gap analysis (parallel, bounded).
+
+    only_failed=True resumes a previous run: only controls whose last AI run
+    failed (ControlAssessment.last_error set) or that have never been
+    assessed are (re)assessed; everything else is left untouched.
+    """
     # Snapshot ids from the parent session before fanning out — workers will
     # re-load the rows in their own sessions.
     targets: list[tuple[int, int, str]] = []
     for s in assessment.scenarios:
         for ctrl in s.expected_controls:
+            if only_failed:
+                ca = ctrl.assessment
+                if ca is not None and not ca.last_error:
+                    continue
             targets.append((s.id, ctrl.id, f"{s.code}/{ctrl.code}"))
     total = len(targets)
     if total == 0:
-        return
+        return GapAnalysisResult(0, [])
 
     semaphore = asyncio.Semaphore(MAX_GAP_ANALYSIS_CONCURRENCY)
     done = 0
@@ -582,17 +664,17 @@ async def run_full(
         (label, r) for (_, _, label), r in zip(targets, results, strict=True)
         if isinstance(r, BaseException)
     ]
-    if failed:
+    if failed and len(failed) == total:
+        # Nothing succeeded: that is a run-level failure (bad key, model
+        # down…), not a per-control one — fail loudly as before.
         first_label, first_err = failed[0]
-        labels = ", ".join(lbl for lbl, _ in failed)
         msg = (
-            f"{total - len(failed)}/{total} controls assessed; "
-            f"{len(failed)} failed ({labels}). First failure on '{first_label}': {first_err}"
+            f"0/{total} controls assessed; every call failed. "
+            f"First failure on '{first_label}': {first_err}"
         )
         if isinstance(first_err, OpenRouterError):
             raise OpenRouterError(
-                msg,
-                transient=first_err.transient,
-                upstream_code=first_err.upstream_code,
+                msg, transient=first_err.transient, upstream_code=first_err.upstream_code
             )
         raise RuntimeError(msg)
+    return GapAnalysisResult(total, failed)

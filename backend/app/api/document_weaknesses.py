@@ -43,7 +43,7 @@ async def extract_weaknesses(
                 inner, document_id, on_progress=on_progress
             )
 
-    handle = registry.submit(job)
+    handle = registry.submit(job, kind="document_extraction", assessment_id=d.assessment_id)
     return TaskStatusRead(
         task_id=handle.id, status=handle.status, progress=0.0, detail=""
     )
@@ -88,7 +88,7 @@ async def cross_correlate(
                 inner, a.id, on_progress=on_progress
             )
 
-    handle = registry.submit(job)
+    handle = registry.submit(job, kind="cross_correlation", assessment_id=a.id)
     return TaskStatusRead(
         task_id=handle.id, status=handle.status, progress=0.0, detail=""
     )

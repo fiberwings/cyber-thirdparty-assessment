@@ -134,7 +134,7 @@ async def upload_document(
                 mark_phase_error(assessment_id, "cross_correlation", str(e))
                 raise
 
-    handle = registry.submit(job)
+    handle = registry.submit(job, kind="cross_correlation", assessment_id=assessment_id)
     # Attach the task id to the response so the frontend can poll
     # /api/tasks/{id} for extraction progress.
     doc.weakness_task_id = handle.id  # transient field on ORM instance

@@ -22,11 +22,13 @@ from app.api import (
 )
 from app.config import settings
 from app.db import init_db
+from app.tasks import reconcile_interrupted_tasks
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    reconcile_interrupted_tasks()
     yield
 
 
@@ -60,7 +62,13 @@ async def _openrouter_error_handler(_: Request, exc: OpenRouterError) -> JSONRes
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    # llm_dev_cache is exposed so a benchmark can refuse to measure against a
+    # backend that would serve cached model responses.
+    return {
+        "ok": True,
+        "app_env": settings.app_env,
+        "llm_dev_cache": settings.llm_dev_cache_active,
+    }
 
 
 for router in (

@@ -2,7 +2,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ExpectedControlRead, Coverage, Effectiveness } from "@/lib/types";
-import { api } from "@/lib/api";
+import { api, pollTask } from "@/lib/api";
 import { CitationChip } from "./CitationChip";
 import { useState, useEffect } from "react";
 
@@ -47,6 +47,19 @@ export function ControlEditor({
     },
   });
 
+  const rerunAI = useMutation({
+    mutationFn: async () => {
+      const { task_id } = await api.assessControlAI(control.id);
+      await pollTask(task_id, undefined, 800);
+      await api.recalculate(assessmentId);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["scenarios", assessmentId] });
+      qc.invalidateQueries({ queryKey: ["assessment", assessmentId] });
+      qc.invalidateQueries({ queryKey: ["report", assessmentId] });
+    },
+  });
+
   const remove = useMutation({
     mutationFn: () => api.deleteExpectedControl(control.id),
     onSuccess: async () => {
@@ -79,15 +92,32 @@ export function ControlEditor({
               </span>
             )}
             <button
+              onClick={() => rerunAI.mutate()}
+              disabled={rerunAI.isPending || !!ca?.is_locked_by_user}
+              title={ca?.is_locked_by_user ? "Unlock the user edit to let the AI re-assess" : "Re-run the AI gap analysis for this control"}
+              className="ml-auto rounded border border-ink-300 text-ink-700 text-[10px] font-medium px-2 py-0.5 hover:bg-ink-50 disabled:opacity-40"
+            >
+              {rerunAI.isPending ? "Assessing…" : "Re-run AI"}
+            </button>
+            <button
               onClick={onDelete}
               disabled={remove.isPending}
               title="Remove control from scenario"
-              className="ml-auto text-ink-400 hover:text-rose-600 disabled:opacity-40 text-xs leading-none"
+              className="text-ink-400 hover:text-rose-600 disabled:opacity-40 text-xs leading-none"
             >
               {remove.isPending ? "…" : "🗑"}
             </button>
           </div>
           <div className="text-sm font-medium text-ink-900">{control.name}</div>
+          {ca?.last_error && (
+            <div className="mt-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
+              Last AI run failed — verdict below is {ca.last_run_at ? "stale or absent" : "absent"}. Re-run AI to
+              retry. <span className="text-amber-700/80 break-words">{ca.last_error.slice(0, 200)}</span>
+            </div>
+          )}
+          {rerunAI.isError && (
+            <div className="mt-1 text-[11px] text-risk-high">{String(rerunAI.error)}</div>
+          )}
           {control.description && (
             <div className="text-[11px] text-ink-500 mt-0.5">{control.description}</div>
           )}

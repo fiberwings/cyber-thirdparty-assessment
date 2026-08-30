@@ -56,7 +56,7 @@ async def generate_scenarios(assessment_id: int, db: Session = Depends(db_sessio
             mark_phase_error(aid, "scenarios_generation", str(e))
             raise
 
-    handle = registry.submit(job)
+    handle = registry.submit(job, kind="scenarios_generation", assessment_id=aid)
     mark_phase_started(aid, "scenarios_generation", handle.id)
     return TaskStatusRead(
         task_id=handle.id, status=handle.status, progress=handle.progress, detail=""

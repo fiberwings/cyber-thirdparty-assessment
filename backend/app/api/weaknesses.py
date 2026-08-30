@@ -47,7 +47,7 @@ async def synthesize(assessment_id: int, db: Session = Depends(db_session)):
             mark_phase_error(aid, "cross_correlation", str(e))
             raise
 
-    handle = registry.submit(job)
+    handle = registry.submit(job, kind="cross_correlation", assessment_id=aid)
     mark_phase_started(aid, "cross_correlation", handle.id)
     return TaskStatusRead(
         task_id=handle.id, status=handle.status, progress=0.0, detail=""

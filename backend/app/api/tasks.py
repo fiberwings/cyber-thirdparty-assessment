@@ -19,6 +19,7 @@ def task_status(task_id: str):
     return TaskStatusRead(
         task_id=t.id, status=t.status, progress=t.progress, detail=t.detail or t.error
     )
+    # (handles for tasks of a previous process come back as detached snapshots)
 
 
 @router.get("/{task_id}/events")

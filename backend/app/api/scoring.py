@@ -154,7 +154,7 @@ async def run_narratives(assessment_id: int, db: Session = Depends(db_session)):
             mark_phase_error(aid, "narratives", str(e))
             raise
 
-    handle = registry.submit(job)
+    handle = registry.submit(job, kind="narratives", assessment_id=aid)
     mark_phase_started(aid, "narratives", handle.id)
     return TaskStatusRead(task_id=handle.id, status=handle.status, progress=0.0, detail="")
 
@@ -172,5 +172,5 @@ async def run_executive_summary(assessment_id: int, db: Session = Depends(db_ses
             await summary_agent.write(inner, aid)
         await handle.update(progress=1.0, detail="Executive summary updated")
 
-    handle = registry.submit(job)
+    handle = registry.submit(job, kind="executive_summary", assessment_id=aid)
     return TaskStatusRead(task_id=handle.id, status=handle.status, progress=0.0, detail="")

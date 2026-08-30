@@ -84,6 +84,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         judge_model=judge_model,
         judge_mode=args.judge,
         skip_narratives=args.skip_narratives,
+        allow_dev_cache=args.allow_dev_cache,
         notes=args.notes or ("smoke" if args.smoke else ""),
     )
     run_id, status = run_batch(cases, config)
@@ -157,6 +158,8 @@ def main() -> None:
     p_run.add_argument("--skip-narratives", action="store_true",
                        help="skip the narratives + executive-summary stage (~30k tokens); "
                             "the exec rubric is then not graded")
+    p_run.add_argument("--allow-dev-cache", action="store_true",
+                       help="do not refuse a backend whose dev LLM cache is on (plumbing runs only)")
     p_run.add_argument("--judge-model", help=f"judge model (default {settings.JUDGE_MODEL})")
     p_run.add_argument("--override", action="append", metavar="STAGE=MODEL",
                        help="per-stage model override (repeatable)")

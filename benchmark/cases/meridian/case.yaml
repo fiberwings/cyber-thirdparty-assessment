@@ -49,6 +49,7 @@ documents:
     kind: policy
   - path: docs/Meridian_BC_DR_Policy.docx
     kind: policy
+as_of_date: "2026-05-01"
 golden:
   expected_band: Moderate
   expected_weaknesses:

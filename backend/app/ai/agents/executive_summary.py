@@ -22,6 +22,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, _resolve_model, call_structured
 from app.models import Assessment
@@ -39,6 +40,8 @@ def compute_fingerprint(a: Assessment) -> str:
     pure function of the scenarios, so it doesn't need to be included.
     """
     payload = {
+        "as_of_date": a.as_of_date,
+        "standards_profile": a.standards_profile or {},
         "scenarios": sorted(
             (s.code, s.score_band, s.residual_impact, s.residual_likelihood)
             for s in a.scenarios
@@ -122,6 +125,7 @@ def _format_documents(a: Assessment) -> str:
 
 def _build_messages(a: Assessment, scenario_reads, aggregate) -> list[dict]:
     user = (
+        f"{assessment_context_block(a)}\n\n"
         f"# Vendor\n{a.vendor_name}\n\n"
         f"# Overall residual score\nband={aggregate.band} "
         f"(top-2 mean rank {aggregate.top2_mean_rank}, "

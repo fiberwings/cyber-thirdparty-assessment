@@ -48,6 +48,7 @@ documents:
     kind: policy
   - path: docs/PenTest_Attestation_GlobalTalent.pdf
     kind: pentest
+as_of_date: "2026-05-01"
 golden:
   expected_band: VeryHigh
   expected_weaknesses:

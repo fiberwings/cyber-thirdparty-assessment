@@ -6,10 +6,12 @@ from app.models.entities import (
     DescriptionTurn,
     Document,
     ExpectedControl,
+    LlmCacheEntry,
     MetaIssue,
     ModelCall,
     Scenario,
     ServiceDescription,
+    TaskRecord,
     Weakness,
 )
 
@@ -21,9 +23,11 @@ __all__ = [
     "DescriptionTurn",
     "Document",
     "ExpectedControl",
+    "LlmCacheEntry",
     "MetaIssue",
     "ModelCall",
     "Scenario",
     "ServiceDescription",
+    "TaskRecord",
     "Weakness",
 ]

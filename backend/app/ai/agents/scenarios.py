@@ -26,6 +26,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
 from app.db import SessionLocal
@@ -54,8 +55,11 @@ def _catalog_lines() -> str:
     return "\n".join(f"- {c['code']} — {c['name']} ({c['family']})" for c in data["controls"])
 
 
-def _phase1_messages(description_summary: str, vendor_name: str) -> list[dict]:
+def _phase1_messages(
+    description_summary: str, vendor_name: str, context: str = ""
+) -> list[dict]:
     user_block = (
+        f"{context}\n\n"
         f"# Vendor\n{vendor_name}\n\n"
         f"# Service description (final)\n{description_summary}\n\n"
         "Generate scenario skeletons per the schema."
@@ -67,9 +71,13 @@ def _phase1_messages(description_summary: str, vendor_name: str) -> list[dict]:
 
 
 def _phase2_messages(
-    description_summary: str, vendor_name: str, scenario: ScenarioSkeletonOut
+    description_summary: str,
+    vendor_name: str,
+    scenario: ScenarioSkeletonOut,
+    context: str = "",
 ) -> list[dict]:
     user_block = (
+        f"{context}\n\n"
         f"# Vendor\n{vendor_name}\n\n"
         f"# Service description\n{description_summary}\n\n"
         f"# Scenario\n"
@@ -98,6 +106,7 @@ async def _phase2_worker(
     semaphore: asyncio.Semaphore,
     client: OpenRouterClient | None,
     on_done: Callable[[], Awaitable[None]] | None,
+    context: str = "",
 ) -> ExpectedControlListOut:
     async with semaphore:
         # Each worker uses its own Session so concurrent commits (the controls
@@ -108,7 +117,7 @@ async def _phase2_worker(
                 inner,
                 purpose="scenario_controls",
                 profile="reasoner",
-                messages=_phase2_messages(description_summary, vendor_name, sk),
+                messages=_phase2_messages(description_summary, vendor_name, sk, context),
                 schema=ExpectedControlListOut,
                 assessment_id=assessment_id,
                 model_override=model_override,
@@ -141,13 +150,14 @@ async def generate(
     client: OpenRouterClient | None = None,
 ) -> ScenarioListOut:
     model_override = (assessment.model_overrides or {}).get("scenarios")
+    context = assessment_context_block(assessment)
 
     # ---- Phase 1: skeletons ----
     skeletons_out: ScenarioSkeletonListOut = await call_structured(
         db,
         purpose="scenario_skeletons",
         profile="reasoner",
-        messages=_phase1_messages(description_summary, assessment.vendor_name),
+        messages=_phase1_messages(description_summary, assessment.vendor_name, context),
         schema=ScenarioSkeletonListOut,
         assessment_id=assessment.id,
         model_override=model_override,
@@ -204,6 +214,7 @@ async def generate(
 
     tasks = [
         _phase2_worker(
+            context=context,
             scenario_id=sid,
             sk=sk,
             description_summary=description_summary,

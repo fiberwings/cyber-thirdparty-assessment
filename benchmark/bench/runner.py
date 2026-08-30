@@ -39,6 +39,9 @@ class RunConfig:
     concurrency: int = 1
     cleanup: str = "none"  # none | ok | all
     model_overrides: dict[str, str] = field(default_factory=dict)
+    # A backend with the dev LLM cache on would serve stored responses; a
+    # measurement run refuses it unless explicitly allowed (plumbing tests).
+    allow_dev_cache: bool = False
     judge_model: str | None = None
     # none  = no judge calls (deterministic metrics only: band_error, n_weaknesses)
     # match = weakness matching only (P/R/F1)
@@ -60,6 +63,7 @@ class RunConfig:
                 "model_overrides": self.model_overrides,
                 "judge_model": self.judge_model,
                 "mode": self.mode,
+                "allow_dev_cache": self.allow_dev_cache,
                 "judge_mode": self.judge_mode,
                 "skip_narratives": self.skip_narratives,
                 "judge_classify_chunk_budget_chars": settings.JUDGE_CLASSIFY_CHUNK_BUDGET_CHARS,
@@ -106,6 +110,8 @@ def run_pipeline(
     try:
         if overrides:
             client.set_model_overrides(assessment_id, overrides)
+        with timed("settings"):
+            client.set_settings(assessment_id, case.as_of_date, case.standards_profile)
 
         with timed("description"):
             client.set_description(assessment_id, case.description)
@@ -657,6 +663,13 @@ def run_batch(cases: list[Case], config: RunConfig) -> tuple[int, str]:
     if not client.health():
         client.close()
         raise SystemExit(f"backend at {backend_url} is not healthy — start it first")
+    if client.dev_cache_active() and not config.allow_dev_cache:
+        client.close()
+        raise SystemExit(
+            f"backend at {backend_url} has LLM_DEV_CACHE on — it would serve cached "
+            "model responses. Restart it without the cache, or pass --allow-dev-cache "
+            "for a plumbing-only run (never for a measurement)."
+        )
 
     run_id = _new_run(client, config, backend_url)
     client.close()

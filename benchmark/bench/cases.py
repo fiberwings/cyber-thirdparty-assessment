@@ -74,6 +74,11 @@ class Case(BaseModel):
     description: str
     documents: list[CaseDocument]
     golden: GoldenExpectations
+    # R7 inputs applied to the assessment before any stage runs. as_of_date
+    # anchors every "Analysis date" (the test set is authored against a fixed
+    # date, so freshness findings must not drift with the run date).
+    as_of_date: Optional[str] = None  # yyyy-mm-dd
+    standards_profile: dict = Field(default_factory=dict)
     # populated by the loader; not part of the YAML
     case_dir: Optional[Path] = None
 
