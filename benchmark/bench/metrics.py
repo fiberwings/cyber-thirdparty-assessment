@@ -10,6 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+BAND_RANK = {"Low": 1, "Moderate": 2, "High": 3, "VeryHigh": 4}
+
+# Finding-classification categories that count as signal (a real, distinct,
+# evidence-backed deficiency) vs noise. JUDGE_FN is a real golden hit the
+# matcher missed; JUDGE_FP_MATCH is a matcher error and counts as noise.
+SIGNAL_CATEGORIES = ("TP", "TP_OPTIONAL", "LEGIT_UNKEYED", "JUDGE_FN")
+PRIMARY_HIT_CATEGORIES = ("TP", "TP_OPTIONAL", "JUDGE_FN")
 
 # Exec-summary aggregation weights (recorded in run.config_json for provenance)
 EXEC_WEIGHTS = {"coverage": 0.5, "faithfulness": 0.3, "violation": 0.2}
@@ -134,3 +141,49 @@ def score_exec_rubric(
         violation=round(violation, 4),
         overall=round(overall, 2),
     )
+
+
+@dataclass
+class ClassificationScores:
+    counts: dict[str, int]
+    n: int
+    signal_share: float | None  # signal / n reported weaknesses
+    dup_per_golden: float | None  # DUP_OF_TP / distinct goldens hit
+    judge_fn: int
+    judge_fp_match: int
+
+
+def score_classification(classification: list[dict]) -> ClassificationScores:
+    """Aggregate the judge's per-finding categories.
+
+    signal_share   = (TP + TP_OPTIONAL + LEGIT_UNKEYED + JUDGE_FN) / n
+    dup_per_golden = DUP_OF_TP / number of distinct goldens with a primary hit
+                     (TP / TP_OPTIONAL / JUDGE_FN); None when no golden was hit.
+    Matches the manual baseline tabulation in testdata/_results/raw/fpclass_aggregate.txt.
+    """
+    counts: dict[str, int] = {}
+    goldens_hit: set[str] = set()
+    for c in classification:
+        cat = c["category"]
+        counts[cat] = counts.get(cat, 0) + 1
+        if cat in PRIMARY_HIT_CATEGORIES and c.get("golden"):
+            goldens_hit.add(c["golden"])
+    n = len(classification)
+    signal = sum(counts.get(k, 0) for k in SIGNAL_CATEGORIES)
+    dups = counts.get("DUP_OF_TP", 0)
+    return ClassificationScores(
+        counts=counts,
+        n=n,
+        signal_share=round(signal / n, 4) if n else None,
+        dup_per_golden=round(dups / len(goldens_hit), 4) if goldens_hit else None,
+        judge_fn=counts.get("JUDGE_FN", 0),
+        judge_fp_match=counts.get("JUDGE_FP_MATCH", 0),
+    )
+
+
+def band_error(app_band: str | None, expected_band: str | None) -> int | None:
+    """Signed band distance: app rank − expected rank (+ = app harsher).
+    None when either band is missing/unknown."""
+    if app_band not in BAND_RANK or expected_band not in BAND_RANK:
+        return None
+    return BAND_RANK[app_band] - BAND_RANK[expected_band]

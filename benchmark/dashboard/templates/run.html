@@ -43,6 +43,10 @@
         <th>Case</th><th>Rep</th><th>Status</th><th>Band</th>
         <th class="num">P</th><th class="num">R</th><th class="num">F1</th>
         <th class="num">Sev =</th><th class="num">Sev MAE</th>
+        <th class="num" title="reported weaknesses">n</th>
+        <th class="num" title="(TP+TP_OPT+LEGIT_UNKEYED+JUDGE_FN)/n">Signal</th>
+        <th class="num" title="DUP_OF_TP per golden hit">Dup/G</th>
+        <th class="num" title="app band rank − expected band rank">ΔBand</th>
         <th class="num">Cov</th><th class="num">Faith</th><th class="num">Viol</th><th class="num">Exec</th>
         <th class="num">Time (s)</th><th class="num">Cost ($)</th><th></th>
       </tr>
@@ -61,6 +65,10 @@
         <td class="num">{{ '%.2f' % r.f1 if r.f1 is not none else '—' }}</td>
         <td class="num">{{ '%.2f' % r.severity_exact if r.severity_exact is not none else '—' }}</td>
         <td class="num">{{ '%.2f' % r.severity_mae if r.severity_mae is not none else '—' }}</td>
+        <td class="num">{{ r.n_weaknesses if r.n_weaknesses is not none else '—' }}</td>
+        <td class="num">{{ '%.0f%%' % (100 * r.signal_share) if r.signal_share is not none else '—' }}</td>
+        <td class="num">{{ '%.2f' % r.dup_per_golden if r.dup_per_golden is not none else '—' }}</td>
+        <td class="num {% if r.band_error %}delta-neg{% endif %}">{{ '%+d' % r.band_error if r.band_error is not none else '—' }}</td>
         <td class="num">{{ '%.2f' % r.exec_coverage if r.exec_coverage is not none else '—' }}</td>
         <td class="num">{{ '%.2f' % r.exec_faithfulness if r.exec_faithfulness is not none else '—' }}</td>
         <td class="num">{{ '%.2f' % r.exec_violation if r.exec_violation is not none else '—' }}</td>

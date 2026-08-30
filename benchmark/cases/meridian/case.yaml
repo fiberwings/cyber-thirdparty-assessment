@@ -50,6 +50,7 @@ documents:
   - path: docs/Meridian_BC_DR_Policy.docx
     kind: policy
 golden:
+  expected_band: Moderate
   expected_weaknesses:
     - id: MER-W1
       description: >-

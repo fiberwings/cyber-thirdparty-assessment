@@ -24,6 +24,8 @@ from .db import get_session
 from .judge import Judge, JudgeError
 from .metrics import (
     EXEC_WEIGHTS,
+    band_error,
+    score_classification,
     score_exec_rubric,
     score_weakness_matching,
 )
@@ -38,6 +40,13 @@ class RunConfig:
     cleanup: str = "none"  # none | ok | all
     model_overrides: dict[str, str] = field(default_factory=dict)
     judge_model: str | None = None
+    # none  = no judge calls (deterministic metrics only: band_error, n_weaknesses)
+    # match = weakness matching only (P/R/F1)
+    # full  = matching + signal/noise classification + exec-summary rubric
+    judge_mode: str = "full"
+    skip_narratives: bool = False
+    # "run" = drive the pipeline then grade; "grade" = grade a stored assessment
+    mode: str = "run"
     match_confidence_threshold: tuple[str, ...] = settings.MATCH_CONFIDENCE_THRESHOLD
     notes: str = ""
 
@@ -50,6 +59,10 @@ class RunConfig:
                 "cleanup": self.cleanup,
                 "model_overrides": self.model_overrides,
                 "judge_model": self.judge_model,
+                "mode": self.mode,
+                "judge_mode": self.judge_mode,
+                "skip_narratives": self.skip_narratives,
+                "judge_classify_chunk_budget_chars": settings.JUDGE_CLASSIFY_CHUNK_BUDGET_CHARS,
                 "match_confidence_threshold": list(self.match_confidence_threshold),
                 "exec_weights": EXEC_WEIGHTS,
                 "notes": self.notes,
@@ -60,8 +73,17 @@ class RunConfig:
 # ---------------- pipeline ----------------
 
 
-def run_pipeline(client: AppClient, case: Case, overrides: dict[str, str]) -> tuple[int, dict, dict]:
+def run_pipeline(
+    client: AppClient,
+    case: Case,
+    overrides: dict[str, str],
+    skip_narratives: bool = False,
+) -> tuple[int, dict, dict]:
     """Execute the full assessment pipeline for one case.
+
+    skip_narratives leaves out the narratives + executive-summary stage
+    (~30k tokens); the report then carries no executive_summary and the
+    exec rubric is not graded.
 
     Returns (assessment_id, report, stage timings in seconds).
     Raises StageError with the failing stage on any error.
@@ -116,9 +138,10 @@ def run_pipeline(client: AppClient, case: Case, overrides: dict[str, str]) -> tu
         with timed("recalculate"):
             client.recalculate(assessment_id)
 
-        with timed("narratives"):
-            task_id = client.run_narratives(assessment_id)
-            client.wait_task(task_id, "narratives", settings.TIMEOUT_NARRATIVES, assessment_id)
+        if not skip_narratives:
+            with timed("narratives"):
+                task_id = client.run_narratives(assessment_id)
+                client.wait_task(task_id, "narratives", settings.TIMEOUT_NARRATIVES, assessment_id)
 
         with timed("report"):
             report = client.get_report(assessment_id)
@@ -166,10 +189,57 @@ def build_evidence_digest(report: dict) -> str:
     return "\n".join(lines)
 
 
+def deterministic_metrics(case: Case, report: dict) -> dict:
+    """Metrics that need no judge: reported-weakness count and band error."""
+    agg = report.get("aggregate", {})
+    return {
+        "n_weaknesses": len(report.get("weaknesses", [])),
+        "band_error": band_error(agg.get("band"), case.golden.expected_band),
+    }
+
+
+def select_chunks_for_classification(
+    report: dict, all_chunks: list[dict], budget_chars: int
+) -> tuple[list[dict], str]:
+    """Whole bundle when it fits the budget, else only the chunks the
+    weaknesses cite (source_chunk_id + evidence_refs). Returns (chunks, scope)."""
+    slim = [
+        {
+            "chunk_id": c["id"],
+            "document_id": c["document_id"],
+            "page": c.get("page"),
+            "section_path": c.get("section_path", ""),
+            "text": c.get("text", ""),
+        }
+        for c in all_chunks
+    ]
+    total = sum(len(c["text"]) for c in slim)
+    if total <= budget_chars:
+        return slim, "full"
+    cited: set[int] = set()
+    for w in report.get("weaknesses", []):
+        if w.get("source_chunk_id"):
+            cited.add(w["source_chunk_id"])
+        for ref in w.get("evidence_refs") or []:
+            if isinstance(ref, dict) and ref.get("chunk_id"):
+                cited.add(ref["chunk_id"])
+    return [c for c in slim if c["chunk_id"] in cited], "cited"
+
+
 def grade_case(
-    judge: Judge, case: Case, report: dict, confidence_threshold: tuple[str, ...]
+    judge: Judge,
+    case: Case,
+    report: dict,
+    confidence_threshold: tuple[str, ...],
+    judge_mode: str = "full",
+    chunks: list[dict] | None = None,
 ) -> tuple[dict, list, list]:
-    """Grade one report. Returns (metrics dict, finding-match rows, judge records)."""
+    """Grade one report. Returns (metrics dict, finding-match rows, judge records).
+
+    judge_mode "match" runs the weakness matching only; "full" adds the
+    signal/noise classification (needs the evidence chunks) and the
+    exec-summary rubric when the report carries a summary.
+    """
     expected = [
         {
             "id": w.id,
@@ -192,6 +262,22 @@ def grade_case(
             "mapped_control_codes": w.get("mapped_control_codes", []),
         }
         for w in report.get("weaknesses", [])
+    ]
+    # Richer view for the classifier: where each finding came from.
+    actual_for_class = [
+        {
+            **a,
+            "kind_signal": w.get("kind_signal", ""),
+            "origin": w.get("origin", ""),
+            "source_document_id": w.get("source_document_id"),
+            "source_chunk_id": w.get("source_chunk_id"),
+            "evidence_refs": [
+                {k: r.get(k) for k in ("document_id", "chunk_id", "section_path", "quote")}
+                for r in (w.get("evidence_refs") or [])
+                if isinstance(r, dict)
+            ],
+        }
+        for a, w in zip(actual, report.get("weaknesses", []))
     ]
     actual_by_id = {a["id"]: a for a in actual}
     actual_severity_by_id = {a["id"]: a.get("severity") for a in actual}
@@ -268,11 +354,48 @@ def grade_case(
         "f1": round(scores.f1, 4),
         "severity_exact": scores.severity_exact,
         "severity_mae": scores.severity_mae,
+        "signal_share": None,
+        "dup_per_golden": None,
+        "judge_fn": None,
+        "classification_json": None,
         "exec_coverage": None,
         "exec_faithfulness": None,
         "exec_violation": None,
         "exec_overall": None,
     }
+    if judge_mode != "full":
+        return metrics, match_rows, judge_records
+
+    # Signal/noise classification of every reported weakness against the chunks
+    if actual:
+        sel_chunks, scope = select_chunks_for_classification(
+            report, chunks or [], settings.JUDGE_CLASSIFY_CHUNK_BUDGET_CHARS
+        )
+        class_out, recs = judge.classify_findings(
+            expected=[{**e, "optional": expected_by_id[e["id"]]["optional"]} for e in expected],
+            actual=actual_for_class,
+            match_out=match_out.model_dump(),
+            chunks=sel_chunks,
+            chunk_scope=scope,
+        )
+        judge_records.extend(recs)
+        cls_rows = [c.model_dump() for c in class_out.classification]
+        cls = score_classification(cls_rows)
+        metrics.update(
+            signal_share=cls.signal_share,
+            dup_per_golden=cls.dup_per_golden,
+            judge_fn=cls.judge_fn,
+            classification_json=json.dumps(
+                {
+                    "chunk_scope": scope,
+                    "n_chunks_sent": len(sel_chunks),
+                    "counts": cls.counts,
+                    "judge_fp_match": cls.judge_fp_match,
+                    "classification": cls_rows,
+                    "missed_goldens": [m.model_dump() for m in class_out.missed_goldens],
+                }
+            ),
+        )
 
     # Exec summary rubric (only when the app produced one and a rubric exists)
     rubric = case.golden.exec_summary_rubric
@@ -326,6 +449,145 @@ def _persist_judge_records(session, case_result_id: int, records: list) -> None:
         )
 
 
+def _summary_line(cr: CaseResult) -> str:
+    def f(v, fmt="{:.2f}"):
+        return "—" if v is None else fmt.format(v)
+
+    return (
+        f"band={cr.aggregate_band or '—'} band_err={f(cr.band_error, '{:+d}')} "
+        f"n={cr.n_weaknesses} tp/fp/fn={cr.tp}/{cr.fp}/{cr.fn} "
+        f"recall={f(cr.recall)} signal={f(cr.signal_share)} "
+        f"dup/golden={f(cr.dup_per_golden)} judge_fn={cr.judge_fn} "
+        f"exec={f(cr.exec_overall, '{:.0f}')}"
+    )
+
+
+def _grade_and_persist(session, cr: CaseResult, client: AppClient, case: Case, report: dict, config: RunConfig) -> str:
+    """Token collection + judge grading for a report already on `cr`.
+    Returns the case status (ok | judge_error). Shared by run_one and grade_stored."""
+    tokens = collect.collect_model_calls(cr.assessment_id)
+    if tokens:
+        cr.tokens_json = json.dumps(tokens)
+
+    if config.judge_mode == "none":
+        print(f"[case {case.id} rep {cr.repetition}] {_summary_line(cr)}")
+        return "ok"
+
+    try:
+        chunks: list[dict] = []
+        if config.judge_mode == "full":
+            for doc in report.get("documents", []):
+                chunks.extend(client.get_chunks(doc["id"]))
+        judge = Judge(model=config.judge_model)
+        try:
+            metrics, match_rows, judge_records = grade_case(
+                judge, case, report, config.match_confidence_threshold,
+                judge_mode=config.judge_mode, chunks=chunks,
+            )
+        finally:
+            judge.close()
+        for k, v in metrics.items():
+            setattr(cr, k, v)
+        for row in match_rows:
+            session.add(FindingMatch(case_result_id=cr.id, **row))
+        _persist_judge_records(session, cr.id, judge_records)
+        print(f"[case {case.id} rep {cr.repetition}] {_summary_line(cr)}")
+        return "ok"
+    except JudgeError as e:
+        cr.error_stage = "judge"
+        cr.error_detail = str(e)
+        _persist_judge_records(session, cr.id, e.records)
+        return "judge_error"
+
+
+def _new_run(client: AppClient, config: RunConfig, backend_url: str) -> int:
+    sha, dirty = versioning.git_sha()
+    session = get_session()
+    run = Run(
+        backend_url=backend_url,
+        app_git_sha=sha,
+        app_git_dirty=dirty,
+        app_version=versioning.app_version(),
+        models_json=json.dumps(versioning.models_snapshot(client, config.model_overrides)),
+        judge_model=config.judge_model or settings.JUDGE_MODEL,
+        judge_prompt_versions_json=json.dumps(
+            {
+                "weakness_match": prompts.WEAKNESS_MATCH_VERSION,
+                "finding_class": prompts.FINDING_CLASS_VERSION,
+                "exec_rubric": prompts.EXEC_RUBRIC_VERSION,
+            }
+        ),
+        config_json=config.to_json(),
+        notes=config.notes,
+    )
+    session.add(run)
+    session.commit()
+    run_id = run.id
+    session.close()
+    return run_id
+
+
+def _finish_run(run_id: int, statuses: list[str]) -> str:
+    ok = sum(1 for s in statuses if s == "ok")
+    run_status = "done" if ok == len(statuses) else ("failed" if ok == 0 else "partial")
+    session = get_session()
+    run = session.get(Run, run_id)
+    run.status = run_status
+    run.finished_at = utcnow()
+    session.add(run)
+    session.commit()
+    session.close()
+    return run_status
+
+
+def grade_stored(case: Case, assessment_id: int, config: RunConfig) -> tuple[int, str]:
+    """Grade an assessment that already exists on the backend — no pipeline
+    stages, no app LLM cost. Records a run (mode=grade) with one case_result
+    whose timings are empty; tokens_json reflects the stored assessment's
+    original pipeline cost. Used to iterate on a single re-run stage
+    (TESTING.md §2) and to grade the baseline canary without re-running it."""
+    backend_url = settings.BENCH_BACKEND_URL
+    client = AppClient(backend_url)
+    if not client.health():
+        client.close()
+        raise SystemExit(f"backend at {backend_url} is not healthy — start it first")
+    config.mode = "grade"
+    run_id = _new_run(client, config, backend_url)
+
+    session = get_session()
+    cr = CaseResult(run_id=run_id, case_id=case.id, repetition=1, assessment_id=assessment_id)
+    session.add(cr)
+    session.commit()
+    status = "ok"
+    try:
+        try:
+            report = client.get_report(assessment_id)
+        except Exception as e:
+            cr.error_stage = "report"
+            cr.error_detail = str(e)
+            raise
+        cr.timings_json = "{}"
+        cr.report_json = json.dumps(report)
+        agg = report.get("aggregate", {})
+        cr.aggregate_band = agg.get("band", "")
+        cr.aggregate_rank = agg.get("rank")
+        for k, v in deterministic_metrics(case, report).items():
+            setattr(cr, k, v)
+        status = _grade_and_persist(session, cr, client, case, report, config)
+    except Exception as e:
+        status = "error"
+        cr.error_stage = cr.error_stage or "unexpected"
+        cr.error_detail = cr.error_detail or repr(e)
+    finally:
+        cr.status = status
+        cr.finished_at = utcnow()
+        session.commit()
+        session.close()
+        client.close()
+    print(f"[case {case.id} grade of assessment {assessment_id}] {status}")
+    return run_id, _finish_run(run_id, [status])
+
+
 def run_one(
     run_id: int,
     case: Case,
@@ -345,7 +607,7 @@ def run_one(
     try:
         try:
             assessment_id, report, timings = run_pipeline(
-                client, case, config.model_overrides
+                client, case, config.model_overrides, config.skip_narratives
             )
             cr.assessment_id = assessment_id
             cr.timings_json = json.dumps(timings)
@@ -353,34 +615,15 @@ def run_one(
             agg = report.get("aggregate", {})
             cr.aggregate_band = agg.get("band", "")
             cr.aggregate_rank = agg.get("rank")
+            for k, v in deterministic_metrics(case, report).items():
+                setattr(cr, k, v)
         except StageError as e:
             status = "error"
             cr.error_stage = e.stage
             cr.error_detail = e.detail
             raise
 
-        tokens = collect.collect_model_calls(assessment_id)
-        if tokens:
-            cr.tokens_json = json.dumps(tokens)
-
-        try:
-            judge = Judge(model=config.judge_model)
-            try:
-                metrics, match_rows, judge_records = grade_case(
-                    judge, case, report, config.match_confidence_threshold
-                )
-            finally:
-                judge.close()
-            for k, v in metrics.items():
-                setattr(cr, k, v)
-            for row in match_rows:
-                session.add(FindingMatch(case_result_id=cr.id, **row))
-            _persist_judge_records(session, cr.id, judge_records)
-        except JudgeError as e:
-            status = "judge_error"
-            cr.error_stage = "judge"
-            cr.error_detail = str(e)
-            _persist_judge_records(session, cr.id, e.records)
+        status = _grade_and_persist(session, cr, client, case, report, config)
     except StageError:
         pass  # already recorded
     except Exception as e:  # never let one case kill the batch
@@ -415,27 +658,7 @@ def run_batch(cases: list[Case], config: RunConfig) -> tuple[int, str]:
         client.close()
         raise SystemExit(f"backend at {backend_url} is not healthy — start it first")
 
-    sha, dirty = versioning.git_sha()
-    session = get_session()
-    run = Run(
-        backend_url=backend_url,
-        app_git_sha=sha,
-        app_git_dirty=dirty,
-        app_version=versioning.app_version(),
-        models_json=json.dumps(versioning.models_snapshot(client, config.model_overrides)),
-        judge_model=config.judge_model or settings.JUDGE_MODEL,
-        judge_prompt_versions_json=json.dumps(
-            {
-                "weakness_match": prompts.WEAKNESS_MATCH_VERSION,
-                "exec_rubric": prompts.EXEC_RUBRIC_VERSION,
-            }
-        ),
-        config_json=config.to_json(),
-        notes=config.notes,
-    )
-    session.add(run)
-    session.commit()
-    run_id = run.id
+    run_id = _new_run(client, config, backend_url)
     client.close()
 
     jobs = [(case, rep) for case in cases for rep in range(1, config.repetitions + 1)]
@@ -457,17 +680,4 @@ def run_batch(cases: list[Case], config: RunConfig) -> tuple[int, str]:
                 print(f"[case {case.id} rep {rep}] {st}")
                 statuses.append(st)
 
-    ok = sum(1 for s in statuses if s == "ok")
-    if ok == len(statuses):
-        run_status = "done"
-    elif ok == 0:
-        run_status = "failed"
-    else:
-        run_status = "partial"
-
-    run.status = run_status
-    run.finished_at = utcnow()
-    session.add(run)
-    session.commit()
-    session.close()
-    return run_id, run_status
+    return run_id, _finish_run(run_id, statuses)

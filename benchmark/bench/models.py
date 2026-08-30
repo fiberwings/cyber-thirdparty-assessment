@@ -75,6 +75,15 @@ class CaseResult(Base):
     exec_violation: Mapped[float | None] = mapped_column(Float, nullable=True)
     exec_overall: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # Signal/noise classification (judge=full) — see metrics.score_classification
+    signal_share: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dup_per_golden: Mapped[float | None] = mapped_column(Float, nullable=True)
+    judge_fn: Mapped[int | None] = mapped_column(nullable=True)
+    classification_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Deterministic: app aggregate band rank − expected band rank (+ = harsher)
+    band_error: Mapped[int | None] = mapped_column(nullable=True)
+    n_weaknesses: Mapped[int | None] = mapped_column(nullable=True)
+
     tokens_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     report_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -117,7 +126,7 @@ class JudgeCall(Base):
     case_result_id: Mapped[int] = mapped_column(
         ForeignKey("case_result.id", ondelete="CASCADE")
     )
-    purpose: Mapped[str] = mapped_column(String(32))  # weakness_match | exec_rubric
+    purpose: Mapped[str] = mapped_column(String(32))  # weakness_match | finding_class | exec_rubric
     model_id: Mapped[str] = mapped_column(String(128))
     prompt_version: Mapped[str] = mapped_column(String(16))
     latency_ms: Mapped[int | None] = mapped_column(nullable=True)

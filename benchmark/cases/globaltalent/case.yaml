@@ -49,6 +49,7 @@ documents:
   - path: docs/PenTest_Attestation_GlobalTalent.pdf
     kind: pentest
 golden:
+  expected_band: VeryHigh
   expected_weaknesses:
     - id: GT-W1
       description: >-

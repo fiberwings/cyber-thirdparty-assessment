@@ -63,6 +63,7 @@ documents:
   - path: docs/05_TPRM_Policy_OrbitClear_v1-6.pdf
     kind: policy
 golden:
+  expected_band: High
   expected_weaknesses:
     - id: ORB-G1
       description: >-

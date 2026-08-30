@@ -141,6 +141,11 @@ def run_view(request: Request, run_id: int):
                     "f1": cr.f1,
                     "severity_exact": cr.severity_exact,
                     "severity_mae": cr.severity_mae,
+                    "signal_share": cr.signal_share,
+                    "dup_per_golden": cr.dup_per_golden,
+                    "judge_fn": cr.judge_fn,
+                    "band_error": cr.band_error,
+                    "n_weaknesses": cr.n_weaknesses,
                     "exec_coverage": cr.exec_coverage,
                     "exec_faithfulness": cr.exec_faithfulness,
                     "exec_violation": cr.exec_violation,
@@ -199,6 +204,10 @@ def case_view(request: Request, run_id: int, case_result_id: int):
 
         report = json.loads(cr.report_json) if cr.report_json else {}
         exec_summary = report.get("executive_summary")
+        classification = json.loads(cr.classification_json) if cr.classification_json else None
+        category_by_id = {
+            c["id"]: c for c in (classification or {}).get("classification", [])
+        }
         timings = json.loads(cr.timings_json or "{}")
         tokens = json.loads(cr.tokens_json) if cr.tokens_json else None
 
@@ -222,6 +231,8 @@ def case_view(request: Request, run_id: int, case_result_id: int):
                 "extra": [m for m in matches if m.match_type == "extra"],
                 "judge_calls": judge_calls,
                 "rubric": rubric,
+                "classification": classification,
+                "category_by_id": category_by_id,
                 "exec_summary": exec_summary,
                 "timings": timings,
                 "tokens": tokens,

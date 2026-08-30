@@ -109,3 +109,63 @@ def test_exec_rubric_happy_path(judge):
     )
     assert out.faithfulness.score == 4
     assert records[0].purpose == "exec_rubric"
+
+
+# ---- finding classification (Phase 0) ----
+
+MATCH_OUT = GOOD_MATCH
+CHUNKS = [{"chunk_id": 7, "document_id": 1, "page": 1, "section_path": "6.2", "text": "MFA is optional."}]
+GOOD_CLASS = {
+    "classification": [
+        {"id": 1, "category": "TP", "golden": "W1", "reason": "doc 1 §6.2 'MFA is optional'"},
+        {"id": 2, "category": "BOILERPLATE", "golden": None, "reason": "generic"},
+    ],
+    "missed_goldens": [{"golden": "W2", "fact_in_chunks": False, "where": "", "note": "absent"}],
+}
+
+
+@respx.mock
+def test_classify_happy_path(judge):
+    respx.post(f"{BASE}/chat/completions").mock(
+        return_value=Response(200, json=_completion(json.dumps(GOOD_CLASS)))
+    )
+    out, records = judge.classify_findings(EXPECTED, ACTUAL, MATCH_OUT, CHUNKS, "full")
+    assert [c.category for c in out.classification] == ["TP", "BOILERPLATE"]
+    assert records[0].purpose == "finding_class" and records[0].ok
+    body = json.loads(records[0].request_json)
+    assert body["max_tokens"] == settings.JUDGE_MAX_TOKENS
+    assert "MFA is optional" in body["messages"][1]["content"]
+
+
+@respx.mock
+def test_classify_structural_checks_retry(judge):
+    # golden missing on a TP, then two primaries for one golden, then good
+    bad1 = {"classification": [
+        {"id": 1, "category": "TP", "golden": None, "reason": "r"},
+        {"id": 2, "category": "BOILERPLATE", "golden": None, "reason": "r"}], "missed_goldens": []}
+    route = respx.post(f"{BASE}/chat/completions")
+    route.side_effect = [
+        Response(200, json=_completion(json.dumps(bad1))),
+        Response(200, json=_completion(json.dumps(GOOD_CLASS))),
+    ]
+    out, records = judge.classify_findings(EXPECTED, ACTUAL, MATCH_OUT, CHUNKS, "full")
+    assert not records[0].ok and "requires a golden id" in records[0].error
+    assert records[1].ok and len(out.classification) == 2
+
+
+@respx.mock
+def test_classify_rejects_two_primaries_per_golden_and_missing_ids(judge):
+    bad = {"classification": [
+        {"id": 1, "category": "TP", "golden": "W1", "reason": "r"},
+        {"id": 2, "category": "JUDGE_FN", "golden": "W1", "reason": "r"}], "missed_goldens": []}
+    bad2 = {"classification": [
+        {"id": 1, "category": "TP", "golden": "W1", "reason": "r"}], "missed_goldens": []}
+    route = respx.post(f"{BASE}/chat/completions")
+    route.side_effect = [
+        Response(200, json=_completion(json.dumps(bad))),
+        Response(200, json=_completion(json.dumps(bad2))),
+    ]
+    with pytest.raises(JudgeError) as ei:
+        judge.classify_findings(EXPECTED, ACTUAL, MATCH_OUT, CHUNKS, "full")
+    assert "primary matches" in ei.value.records[0].error
+    assert "reported ids mismatch" in ei.value.records[1].error

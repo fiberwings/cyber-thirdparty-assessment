@@ -27,7 +27,14 @@ class BenchSettings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     JUDGE_MODEL: str = "anthropic/claude-sonnet-4.6"
-    JUDGE_MAX_TOKENS: int = 8192
+    # Sized for 100+ reported findings: the match and classification steps
+    # emit one justified entry per finding (~100 tokens each with a verbose
+    # judge) and the baseline already hit 8192 at ~40 findings.
+    JUDGE_MAX_TOKENS: int = 32768
+    # Finding classification (judge=full): the whole evidence bundle (all
+    # chunks) is sent when it fits this many characters (~4 chars/token);
+    # otherwise only the chunks the reported weaknesses cite are sent.
+    JUDGE_CLASSIFY_CHUNK_BUDGET_CHARS: int = 120_000
 
     # Results DB
     BENCH_DB_PATH: str = str(BENCHMARK_DIR / "data" / "bench.sqlite")

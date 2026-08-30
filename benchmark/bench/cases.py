@@ -47,9 +47,15 @@ class ExecSummaryRubric(BaseModel):
     must_not_claim: list[MustNotClaim] = Field(default_factory=list)
 
 
+RISK_BANDS = ("Low", "Moderate", "High", "VeryHigh")
+
+
 class GoldenExpectations(BaseModel):
     expected_weaknesses: list[ExpectedWeakness] = Field(default_factory=list)
     exec_summary_rubric: ExecSummaryRubric = Field(default_factory=ExecSummaryRubric)
+    # Hand-assigned residual risk band (app aggregate band vocabulary); drives
+    # the deterministic band_error metric. Omit when not yet decided.
+    expected_band: Optional[Literal["Low", "Moderate", "High", "VeryHigh"]] = None
 
     @model_validator(mode="after")
     def unique_ids(self) -> "GoldenExpectations":

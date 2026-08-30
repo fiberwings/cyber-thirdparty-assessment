@@ -138,10 +138,22 @@ as they start; per-case rows appear as they finish.
 
 | Flag | Default | Meaning |
 |---|---|---|
+**Grading a stored assessment (no pipeline, no app LLM cost):**
+
+```
+.venv/bin/bench grade --assessment 9 --case orbitclear [--judge match|full|none] [--notes "..."]
+```
+Fetches the report (+ chunks for `--judge full`) of an assessment that already exists on the backend and runs the judge
+only. Records a run with `config.mode = "grade"`, empty stage timings, and `tokens_json` reflecting the stored
+assessment's original pipeline cost. Use it to re-grade after re-running a single stage on a stored assessment
+(`POST .../extract-weaknesses`, `.../gap-analysis/run`, `.../recalculate`) instead of driving the whole pipeline.
+
 | `--cases a,b` | all | Comma-separated case ids (directory names under `cases/`) |
 | `--reps N` | 1 | Repetitions per case (distinct assessments; measures nondeterminism) |
 | `--concurrency N` | 1 | Parallel cases via threads. **Experimental above 1** — the backend task registry is in-process and the app DB is SQLite (write-lock contention); keep N ≤ 3 |
 | `--cleanup none\|ok\|all` | `ok` | Delete created assessments after grading. `ok` keeps errored ones for debugging |
+| `--judge none\|match\|full` | `full` | `none`: no judge calls — deterministic metrics only (`band_error`, `n_weaknesses`). `match`: weakness matching (P/R/F1, ~5k tokens). `full`: matching + signal/noise classification of every reported weakness against the evidence chunks + exec-summary rubric |
+| `--skip-narratives` | off | Skip the narratives + executive-summary stage (~30k app tokens); the exec rubric is then not graded |
 | `--judge-model M` | `JUDGE_MODEL` | Judge model for this run (recorded on the run) |
 | `--override STAGE=MODEL` | — | Per-stage model override, repeatable. Stages: `scoping`, `scenarios`, `gap_analysis`, `weaknesses`, `narrative`, `executive_summary` |
 | `--smoke` | off | Pins all six stages **and** the judge to the app's fast-profile default — a cheap plumbing check, not an accuracy measurement. Explicit `--override`/`--judge-model` still win |
@@ -171,7 +183,8 @@ environment variables or `benchmark/.env`:
 | `OPENROUTER_API_KEY` | — | **Required.** Judge auth (independent of the app's key handling) |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | Judge endpoint |
 | `JUDGE_MODEL` | `anthropic/claude-sonnet-4.6` | Pinned judge model |
-| `JUDGE_MAX_TOKENS` | 8192 | Judge completion cap |
+| `JUDGE_MAX_TOKENS` | 32768 | Judge completion cap — sized for 100+ reported findings (one justified entry each in the match and classification steps) |
+| `JUDGE_CLASSIFY_CHUNK_BUDGET_CHARS` | 120000 | `--judge full`: the whole evidence bundle (all chunks) is sent to the classifier when it fits this many characters; otherwise only the chunks the weaknesses cite |
 | `BENCH_DB_PATH` | `benchmark/data/bench.sqlite` | Results DB |
 | `CASES_DIR` | `benchmark/cases` | Case directory root |
 | `MAIN_REPO_DIR` | repo root | Where `git rev-parse` runs for provenance |
@@ -266,6 +279,31 @@ Scoring (`metrics.py`):
 - Severity agreement over counted matches, on an ordinal scale
   (low=1…critical=4): `severity_exact` (fraction equal) and `severity_mae`
   (mean absolute rank difference).
+
+**1b. Signal/noise classification (`--judge full`)**
+
+A second judge call classifies EVERY reported weakness against the parsed
+evidence chunks (the only source of truth about what the documents say) into
+one category from `testdata/_results/cases/fp_spec.md`: `TP`, `TP_OPTIONAL`,
+`DUP_OF_TP`, `LEGIT_UNKEYED`, `BOILERPLATE`, `MISREAD`, `JUDGE_FN` (matcher
+missed a real golden hit), `JUDGE_FP_MATCH` (matcher linked a non-hit). It also
+states, for each missed golden, whether the underlying fact is present in any
+chunk (ingestion vs reasoning problem). Structural checks: every reported id
+exactly once, golden required/forbidden per category, at most one primary hit
+per golden. Metrics (`metrics.score_classification`):
+
+- `signal_share = (TP + TP_OPTIONAL + LEGIT_UNKEYED + JUDGE_FN) / n reported`
+- `dup_per_golden = DUP_OF_TP / distinct goldens with a primary hit`
+- `judge_fn` count — a non-zero value means the P/R/F1 above under-count.
+
+P/R/F1 are deliberately NOT corrected by the classification so they stay
+comparable with pre-Phase-0 runs.
+
+**1c. Deterministic metrics (any `--judge` mode)**
+
+- `band_error = rank(app aggregate band) − rank(golden expected_band)` on
+  Low=1 … VeryHigh=4 (+ = app harsher); `None` when the case has no `expected_band`.
+- `n_weaknesses` = weaknesses reported.
 
 **2. Executive summary rubric → 0–100**
 

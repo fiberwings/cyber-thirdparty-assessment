@@ -59,6 +59,7 @@ documents:
   - path: docs/BCP_DR_Policy_CloudNimbus_v4.2.docx
     kind: policy
 golden:
+  expected_band: Moderate
   expected_weaknesses:
     - id: CN-G1
       description: >-

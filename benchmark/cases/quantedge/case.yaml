@@ -56,6 +56,7 @@ documents:
   - path: docs/BCP_DR_Policy_QuantEdge_v2.5.docx
     kind: policy
 golden:
+  expected_band: Moderate
   expected_weaknesses:
     - id: QE-G1
       description: >-

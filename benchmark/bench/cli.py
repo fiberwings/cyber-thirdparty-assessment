@@ -1,8 +1,11 @@
 """bench CLI: run benchmarks, list cases, init the results DB.
 
     bench run [--cases a,b] [--reps N] [--concurrency N]
-              [--cleanup none|ok|all] [--judge-model M]
-              [--override stage=model ...] [--smoke] [--notes "..."]
+              [--cleanup none|ok|all] [--judge none|match|full] [--judge-model M]
+              [--skip-narratives] [--override stage=model ...] [--smoke]
+              [--notes "..."]
+    bench grade --assessment ID --case CASE [--judge none|match|full]
+                [--judge-model M] [--notes "..."]      # grade a stored assessment, no pipeline
     bench list-cases
     bench init-db
 """
@@ -79,9 +82,32 @@ def cmd_run(args: argparse.Namespace) -> int:
         cleanup=args.cleanup,
         model_overrides=overrides,
         judge_model=judge_model,
+        judge_mode=args.judge,
+        skip_narratives=args.skip_narratives,
         notes=args.notes or ("smoke" if args.smoke else ""),
     )
     run_id, status = run_batch(cases, config)
+    print(f"run {run_id} finished: {status}")
+    return 0 if status == "done" else 1
+
+
+def cmd_grade(args: argparse.Namespace) -> int:
+    from .cases import CaseLoadError, load_cases
+    from .runner import RunConfig, grade_stored
+
+    try:
+        cases = load_cases(Path(settings.CASES_DIR), [args.case])
+    except CaseLoadError as e:
+        print(f"case error: {e}", file=sys.stderr)
+        return 2
+    config = RunConfig(
+        case_ids=[args.case],
+        cleanup="none",
+        judge_model=args.judge_model,
+        judge_mode=args.judge,
+        notes=args.notes or f"grade of stored assessment {args.assessment}",
+    )
+    run_id, status = grade_stored(cases[0], args.assessment, config)
     print(f"run {run_id} finished: {status}")
     return 0 if status == "done" else 1
 
@@ -124,6 +150,13 @@ def main() -> None:
                        help="parallel cases (experimental above 1; keep <=3)")
     p_run.add_argument("--cleanup", choices=["none", "ok", "all"], default="ok",
                        help="delete created assessments: ok=successful only (default)")
+    p_run.add_argument("--judge", choices=["none", "match", "full"], default="full",
+                       help="none=no judge calls (band error + counts only); "
+                            "match=weakness matching (P/R/F1); "
+                            "full=matching + signal/noise classification + exec rubric (default)")
+    p_run.add_argument("--skip-narratives", action="store_true",
+                       help="skip the narratives + executive-summary stage (~30k tokens); "
+                            "the exec rubric is then not graded")
     p_run.add_argument("--judge-model", help=f"judge model (default {settings.JUDGE_MODEL})")
     p_run.add_argument("--override", action="append", metavar="STAGE=MODEL",
                        help="per-stage model override (repeatable)")
@@ -131,6 +164,14 @@ def main() -> None:
                        help="cheap end-to-end check: fast profile everywhere + cheap judge")
     p_run.add_argument("--notes", help="free-text note stored on the run")
     p_run.set_defaults(func=cmd_run)
+
+    p_grade = sub.add_parser("grade", help="grade an assessment already on the backend (no pipeline, no app LLM cost)")
+    p_grade.add_argument("--assessment", type=int, required=True, help="assessment id on the backend")
+    p_grade.add_argument("--case", required=True, help="case id whose golden key to grade against")
+    p_grade.add_argument("--judge", choices=["none", "match", "full"], default="full")
+    p_grade.add_argument("--judge-model", help=f"judge model (default {settings.JUDGE_MODEL})")
+    p_grade.add_argument("--notes", help="free-text note stored on the run")
+    p_grade.set_defaults(func=cmd_grade)
 
     p_list = sub.add_parser("list-cases", help="list available cases")
     p_list.set_defaults(func=cmd_list_cases)

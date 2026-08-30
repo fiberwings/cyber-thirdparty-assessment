@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from dataclasses import dataclass
 from typing import Literal, TypeVar
@@ -55,6 +56,32 @@ class WeaknessMatchOut(BaseModel):
     matches: list[MatchEntry] = Field(default_factory=list)
     unmatched_expected: list[UnmatchedExpected] = Field(default_factory=list)
     unmatched_actual: list[UnmatchedActual] = Field(default_factory=list)
+
+
+FindingCategory = Literal[
+    "TP", "TP_OPTIONAL", "DUP_OF_TP", "LEGIT_UNKEYED", "BOILERPLATE", "MISREAD",
+    "JUDGE_FN", "JUDGE_FP_MATCH",
+]
+GOLDEN_REQUIRED_CATEGORIES = {"TP", "TP_OPTIONAL", "DUP_OF_TP", "JUDGE_FN", "JUDGE_FP_MATCH"}
+
+
+class ClassEntry(BaseModel):
+    id: int
+    category: FindingCategory
+    golden: str | None = None
+    reason: str
+
+
+class MissedGolden(BaseModel):
+    golden: str
+    fact_in_chunks: bool
+    where: str = ""
+    note: str = ""
+
+
+class FindingClassOut(BaseModel):
+    classification: list[ClassEntry] = Field(default_factory=list)
+    missed_goldens: list[MissedGolden] = Field(default_factory=list)
 
 
 class CoverageItem(BaseModel):
@@ -157,6 +184,56 @@ class Judge:
             structural_check=structural_check,
         )
 
+    def classify_findings(
+        self,
+        expected: list[dict],
+        actual: list[dict],
+        match_out: dict,
+        chunks: list[dict],
+        chunk_scope: str,
+    ) -> tuple[FindingClassOut, list[JudgeCallRecord]]:
+        """Signal/noise classification of every reported weakness against the
+        evidence chunks (categories from fp_spec.md)."""
+
+        def structural_check(out: FindingClassOut) -> str | None:
+            act_ids = sorted(a["id"] for a in actual)
+            exp_ids = {e["id"] for e in expected}
+            seen = sorted(c.id for c in out.classification)
+            problems = []
+            if seen != act_ids:
+                problems.append(
+                    f"reported ids mismatch: tool output has {act_ids}, "
+                    f"you produced {seen} (each exactly once)"
+                )
+            for c in out.classification:
+                needs_golden = c.category in GOLDEN_REQUIRED_CATEGORIES
+                if needs_golden and not c.golden:
+                    problems.append(f"id {c.id}: {c.category} requires a golden id")
+                elif needs_golden and c.golden not in exp_ids:
+                    problems.append(f"id {c.id}: unknown golden {c.golden!r}")
+                elif not needs_golden and c.golden:
+                    problems.append(f"id {c.id}: {c.category} must have golden null")
+            primary: dict[str, list[int]] = {}
+            for c in out.classification:
+                if c.category in ("TP", "TP_OPTIONAL", "JUDGE_FN"):
+                    primary.setdefault(c.golden or "", []).append(c.id)
+            for g, ids in primary.items():
+                if len(ids) > 1:
+                    problems.append(
+                        f"golden {g} has {len(ids)} primary matches {ids}; "
+                        "keep one and mark the rest DUP_OF_TP"
+                    )
+            return "; ".join(problems) or None
+
+        return self._call(
+            purpose="finding_class",
+            prompt_version=prompts.FINDING_CLASS_VERSION,
+            system=prompts.FINDING_CLASS_SYSTEM,
+            user=prompts.finding_class_user(expected, actual, match_out, chunks, chunk_scope),
+            schema=FindingClassOut,
+            structural_check=structural_check,
+        )
+
     def grade_exec_summary(
         self,
         summary_text: str,
@@ -211,6 +288,11 @@ class Judge:
         last_error = ""
 
         for attempt in range(2):
+            print(
+                f"  judge {purpose} ({prompt_version}) attempt {attempt + 1}: "
+                f"~{len(system + user) // 4} input tokens …",
+                file=sys.stderr, flush=True,
+            )
             body = {
                 "model": self.model,
                 "messages": messages,
@@ -243,6 +325,13 @@ class Judge:
                         error = f"structural: {structural}"
                         parsed = None
 
+            print(
+                f"  judge {purpose} attempt {attempt + 1}: {'ok' if parsed is not None else 'FAILED'} "
+                f"in {latency_ms / 1000:.0f}s, tokens in/out "
+                f"{usage.get('prompt_tokens')}/{usage.get('completion_tokens')}"
+                f"{' — ' + error[:120] if error else ''}",
+                file=sys.stderr, flush=True,
+            )
             records.append(
                 JudgeCallRecord(
                     purpose=purpose,

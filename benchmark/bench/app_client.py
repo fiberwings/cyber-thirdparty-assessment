@@ -138,6 +138,11 @@ class AppClient:
         r.raise_for_status()
         return r.json()
 
+    def get_chunks(self, document_id: int) -> list[dict]:
+        r = self.http.get(f"/api/documents/{document_id}/chunks")
+        r.raise_for_status()
+        return r.json()
+
     # ---- task polling ----
 
     def wait_task(

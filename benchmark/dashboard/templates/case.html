@@ -9,7 +9,8 @@
 <div class="card">
   <dl class="meta-grid">
     <div><dt>Assessment</dt><dd>#{{ cr.assessment_id or '—' }}{% if cr.assessment_deleted %} <span class="muted">(deleted after run)</span>{% endif %}</dd></div>
-    <div><dt>Aggregate</dt><dd>{{ cr.aggregate_band or '—' }} (rank {{ cr.aggregate_rank if cr.aggregate_rank is not none else '—' }})</dd></div>
+    <div><dt>Aggregate</dt><dd>{{ cr.aggregate_band or '—' }} (rank {{ cr.aggregate_rank if cr.aggregate_rank is not none else '—' }}{% if cr.band_error is not none %}, band error {{ '%+d' % cr.band_error }}{% endif %})</dd></div>
+    <div><dt>Signal / noise</dt><dd>n {{ cr.n_weaknesses if cr.n_weaknesses is not none else '—' }} · signal {{ '%.0f%%' % (100 * cr.signal_share) if cr.signal_share is not none else '—' }} · dup/golden {{ '%.2f' % cr.dup_per_golden if cr.dup_per_golden is not none else '—' }} · judge FN {{ cr.judge_fn if cr.judge_fn is not none else '—' }}</dd></div>
     <div><dt>Findings</dt><dd>TP {{ cr.tp }} · FP {{ cr.fp }} · FN {{ cr.fn }} → P {{ '%.2f' % cr.precision if cr.precision is not none else '—' }} / R {{ '%.2f' % cr.recall if cr.recall is not none else '—' }} / F1 {{ '%.2f' % cr.f1 if cr.f1 is not none else '—' }}</dd></div>
     <div><dt>Exec summary</dt><dd>{{ '%.0f' % cr.exec_overall if cr.exec_overall is not none else '—' }} (cov {{ '%.2f' % cr.exec_coverage if cr.exec_coverage is not none else '—' }} · faith {{ '%.2f' % cr.exec_faithfulness if cr.exec_faithfulness is not none else '—' }} · viol {{ '%.2f' % cr.exec_violation if cr.exec_violation is not none else '—' }})</dd></div>
   </dl>
@@ -21,20 +22,21 @@
 <h2>Matched findings ({{ matched | length }})</h2>
 <div class="card">
   <table>
-    <thead><tr><th>Golden</th><th>Expected (golden)</th><th>Reported by app</th><th>Sev (exp / act)</th><th>Confidence</th><th>Counted</th><th>Judge justification</th></tr></thead>
+    <thead><tr><th>Golden</th><th>Expected (golden)</th><th>Reported by app</th><th>Class</th><th>Sev (exp / act)</th><th>Confidence</th><th>Counted</th><th>Judge justification</th></tr></thead>
     <tbody>
       {% for m in matched %}
       <tr>
         <td class="mono">{{ m.expected_id }}{% if m.expected_optional %} <span class="muted">(opt)</span>{% endif %}</td>
         <td>{{ m.expected_description }}</td>
         <td>{{ m.actual_description }}</td>
+        <td class="mono small" title="{{ category_by_id.get(m.actual_weakness_id, {}).get('reason', '') }}">{{ category_by_id.get(m.actual_weakness_id, {}).get('category', '—') }}</td>
         <td>{{ m.expected_severity }} / {{ m.actual_severity }}</td>
         <td>{{ m.confidence }}</td>
         <td>{{ 'yes' if m.counted else 'no' }}</td>
         <td class="small muted">{{ m.justification }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="7" class="muted">none</td></tr>
+      <tr><td colspan="8" class="muted">none</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -65,20 +67,54 @@
   <p class="small muted">Reported but not in the answer key. These count as false positives —
   review them: a defensible extra finding may deserve promotion into the golden set.</p>
   <table>
-    <thead><tr><th>App weakness</th><th>Severity</th><th>Judge justification</th></tr></thead>
+    <thead><tr><th>App weakness</th><th>Class</th><th>Severity</th><th>Judge justification</th></tr></thead>
     <tbody>
       {% for m in extra %}
       <tr>
         <td>{{ m.actual_description }}</td>
+        <td class="mono small" title="{{ category_by_id.get(m.actual_weakness_id, {}).get('reason', '') }}">{{ category_by_id.get(m.actual_weakness_id, {}).get('category', '—') }}{% if category_by_id.get(m.actual_weakness_id, {}).get('golden') %} <span class="muted">({{ category_by_id[m.actual_weakness_id].golden }})</span>{% endif %}</td>
         <td>{{ m.actual_severity }}</td>
         <td class="small muted">{{ m.justification }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="3" class="muted">none</td></tr>
+      <tr><td colspan="4" class="muted">none</td></tr>
       {% endfor %}
     </tbody>
   </table>
 </div>
+
+{% if classification %}
+<h2>Signal / noise classification</h2>
+<div class="card">
+  <p class="small muted">Every reported weakness classified by the judge against the evidence chunks
+  ({{ classification.chunk_scope }} bundle, {{ classification.n_chunks_sent }} chunks sent).
+  Signal = TP + TP_OPTIONAL + LEGIT_UNKEYED + JUDGE_FN.</p>
+  <table>
+    <thead><tr>{% for k, v in classification.counts.items() %}<th class="num">{{ k }}</th>{% endfor %}</tr></thead>
+    <tbody><tr>{% for k, v in classification.counts.items() %}<td class="num">{{ v }}</td>{% endfor %}</tr></tbody>
+  </table>
+  <h3>Per finding</h3>
+  <table>
+    <thead><tr><th>Id</th><th>Category</th><th>Golden</th><th>Reason</th></tr></thead>
+    <tbody>
+      {% for c in classification.classification %}
+      <tr><td class="mono">{{ c.id }}</td><td class="mono">{{ c.category }}</td><td class="mono">{{ c.golden or '' }}</td><td class="small">{{ c.reason }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if classification.missed_goldens %}
+  <h3>Missed goldens — is the fact in the chunks?</h3>
+  <table>
+    <thead><tr><th>Golden</th><th>In chunks</th><th>Where</th><th>Note</th></tr></thead>
+    <tbody>
+      {% for m in classification.missed_goldens %}
+      <tr><td class="mono">{{ m.golden }}</td><td>{{ 'yes' if m.fact_in_chunks else 'no' }}</td><td class="small">{{ m.where }}</td><td class="small">{{ m.note }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{% endif %}
 
 {% if rubric %}
 <h2>Executive summary rubric</h2>

@@ -112,3 +112,53 @@ def test_exec_rubric_scoring():
 def test_exec_rubric_empty_lists():
     s = score_exec_rubric([], [], 5, 0, 0)
     assert s.coverage == 1.0 and s.violation == 1.0 and s.overall == 100.0
+
+
+# ---- signal/noise classification + band error (Phase 0) ----
+
+from bench.metrics import band_error, score_classification  # noqa: E402
+
+
+def _cls(cat, golden=None, i=[0]):
+    i[0] += 1
+    return {"id": i[0], "category": cat, "golden": golden, "reason": "r"}
+
+
+def test_classification_matches_manual_baseline_tabulation():
+    # orbitclear baseline: TP 5, TP_OPT 1, DUP 4, LEGIT 8, BOILER 19, MISREAD 3 → 35 % signal
+    rows = (
+        [_cls("TP", f"G{k}") for k in range(5)]
+        + [_cls("TP_OPTIONAL", "O1")]
+        + [_cls("DUP_OF_TP", "G1"), _cls("DUP_OF_TP", "G1"), _cls("DUP_OF_TP", "G3"), _cls("DUP_OF_TP", "G5")]
+        + [_cls("LEGIT_UNKEYED") for _ in range(8)]
+        + [_cls("BOILERPLATE") for _ in range(19)]
+        + [_cls("MISREAD") for _ in range(3)]
+    )
+    s = score_classification(rows)
+    assert s.n == 40
+    assert s.signal_share == 0.35
+    assert s.dup_per_golden == round(4 / 6, 4)
+    assert s.judge_fn == 0 and s.judge_fp_match == 0
+
+
+def test_classification_judge_fn_is_signal_and_fp_match_is_noise():
+    rows = [_cls("JUDGE_FN", "G1"), _cls("JUDGE_FP_MATCH", "G2"), _cls("DUP_OF_TP", "G1")]
+    s = score_classification(rows)
+    assert s.signal_share == round(1 / 3, 4)
+    assert s.dup_per_golden == 1.0  # one golden hit (via JUDGE_FN), one dup
+    assert s.judge_fn == 1 and s.judge_fp_match == 1
+
+
+def test_classification_empty_and_no_golden_hit():
+    assert score_classification([]).signal_share is None
+    s = score_classification([_cls("BOILERPLATE"), _cls("DUP_OF_TP", "G1")])
+    assert s.signal_share == 0.0
+    assert s.dup_per_golden is None  # no primary hit to normalise by
+
+
+def test_band_error_signed_and_none_when_unknown():
+    assert band_error("VeryHigh", "High") == 1
+    assert band_error("Moderate", "High") == -1
+    assert band_error("High", "High") == 0
+    assert band_error("VeryHigh", None) is None
+    assert band_error("", "High") is None
