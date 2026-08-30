@@ -1,0 +1,139 @@
+id: verifypro
+vendor_name: "VerifyPro Compliance Solutions S.A."
+description: |
+  ### Assessing organisation and standards
+  Client: Aurora Investment Bank plc (Cyber Third-Party Risk Management). The
+  assessment reference date is 1 May 2026. Aurora's standards applied to vendors:
+  - TPRM Std 5.1: a current SOC 2 Type II (or ISO 27001 plus equivalent) is required
+    for any vendor processing confidential data or employee/client PII; SOC 1 alone
+    is not sufficient.
+  - TPRM Std 5.4: SOC reports must be refreshed within 12 months of period end;
+    certifications must be current (not expired) at the time of assessment.
+  - TPRM Std 8.2: independent external penetration test by an accredited firm at
+    least every 12 months, covering all bank-facing integration channels.
+  - TPRM Std 6.4: a complete, versioned sub-processor list; all sub-processors that
+    touch bank data must be disclosed in the DPA with an adequate transfer basis.
+  - Crypto Std 4.1/4.2: documented encryption at rest with customer-managed or
+    per-tenant keys and defined rotation; SFTP with key-based auth (4.3).
+  - Resilience Std 6.1: cross-region backups, defined RTO/RPO, and a live DR test
+    within 12 months; restore-from-backup tests at least semi-annually.
+  - Privacy Std 3.4: PII retention target of 5 years for non-regulated data with
+    automated deletion; policies reviewed at least annually.
+  - IAM Std 2.1: phishing-resistant MFA mandatory for administrators; NIST 800-63B
+    password policy.
+
+  ### Vendor and service
+  VerifyPro Compliance Solutions S.A. (Luxembourg; ~620 FTE; founded 2012)
+  provides identity verification, KYC enrichment, sanctions/PEP screening and
+  adverse media monitoring for Aurora's client onboarding and ongoing CDD. It
+  ingests customer identity documents (passports, national IDs, proof of
+  address), performs OCR and biometric liveness, screens against global
+  watchlists and returns risk scoring. Criticality: Tier 1 - Critical,
+  regulatory-critical supplier. Data: Highly Confidential / PII / special
+  category - full client PII, identity document images, biometric facial images
+  and liveness video, beneficial ownership data, AML screening payloads. ~62 TB
+  live PII, ~2.1B identity records. EUR 4.1m ACV, 3-year MSA.
+  Geography: primary Luxembourg + Frankfurt (Azure EEA), DR Dublin; some
+  operations processing in Mauritius. Connectivity: multi-tenant REST API over
+  HTTPS, daily/intraday SFTP batch screening, HMAC-signed webhooks, web admin
+  portal for analyst review. Disclosed sub-processors: Microsoft Ireland (Azure),
+  Onfido (UK), LexisNexis Risk Solutions (US), VerifyPro Operations (Mauritius)
+  Ltd. (manual review of KYC exceptions), Twilio Ireland (SMS OTP).
+  Vendor-claimed: ISO 27001:2013 (TUV Rheinland, EU-22-09-117), SOC 2 Type II
+  (Mazars), eIDAS QTSP (limited scope). Vendor self-asserted maturity: Moderate.
+  Evidence: context document, ISP v2.1, BCP/DR v1.8, SIG Lite 2026Q2, SOC 2 Type II
+  2024-2025, ISO 27001 certificate, pen test attestation.
+documents:
+  - path: docs/Context_VerifyPro.docx
+    kind: other
+  - path: docs/SIG_Lite_Response_VerifyPro_2026Q2.xlsx
+    kind: questionnaire
+  - path: docs/SOC_Report_VerifyPro_2024-2025.pdf
+    kind: soc
+  - path: docs/ISO27001_Certificate_VerifyPro.pdf
+    kind: iso
+  - path: docs/PenTest_Attestation_VerifyPro.pdf
+    kind: pentest
+  - path: docs/Information_Security_Policy_VerifyPro_v2.1.docx
+    kind: policy
+  - path: docs/BCP_DR_Policy_VerifyPro_v1.8.docx
+    kind: policy
+golden:
+  expected_weaknesses:
+    - id: VP-G1
+      description: >-
+        The ISO 27001 certificate (ISO 27001:2013, TUV Rheinland) expired on
+        2026-02-03, about 3 months before the assessment, with no evidence of
+        transition to ISO/IEC 27001:2022.
+      severity: high
+    - id: VP-G2
+      description: >-
+        Excessive PII retention: identity documents and biometrics are retained
+        for 10 years post-offboarding by default versus the bank's 5-year target,
+        risking a GDPR storage-limitation breach.
+      severity: high
+    - id: VP-G3
+      description: >-
+        VerifyPro Operations (Mauritius) Ltd. performs human review of KYC
+        exception queues, exposing client PII to staff in a non-adequate
+        jurisdiction; this sub-processor is not covered in the DPA and only appears
+        in the privacy notice annex / sub-processor list.
+      severity: high
+    - id: VP-G4
+      description: >-
+        The SOC 2 Type II carries a Qualified opinion from Mazars with three
+        control exceptions: internal-audit vacancy, late incident notifications,
+        and overdue data deletion.
+      severity: high
+    - id: VP-G5
+      description: >-
+        The BCP commits to a 24-hour RTO for a Tier-1 service, but the only test in
+        the last 24 months was a desktop/tabletop walkthrough with no live cut-over
+        to the DR site.
+      severity: medium
+    - id: VP-G6
+      description: >-
+        The SOC 2 report covers Nov 2024 - Oct 2025 and has not been refreshed:
+        at the May 2026 assessment date the report is ~6 months past period end
+        and outside the bank's expected refresh window.
+      severity: medium
+    - id: VP-G7
+      description: >-
+        The Information Security Policy was last reviewed/approved on 2024-04-09,
+        more than 12 months before the assessment (annual review expected).
+      severity: low
+    - id: VP-G8
+      description: >-
+        The cold backup tier relies solely on provider-managed encryption with
+        shared keys across tenants (no per-tenant key separation), risking
+        cross-tenant data exposure under a provider-side incident.
+      severity: medium
+  exec_summary_rubric:
+    must_cover:
+      - id: VP-K1
+        point: >-
+          An overall residual risk verdict is stated and it is high (not low or
+          moderate) given the PII sensitivity and control weaknesses.
+      - id: VP-K2
+        point: >-
+          The qualified SOC 2 opinion and/or its exceptions are mentioned.
+      - id: VP-K3
+        point: >-
+          The expired ISO 27001 certificate is mentioned.
+      - id: VP-K4
+        point: >-
+          PII exposure via the Mauritius operations entity (non-adequate
+          jurisdiction) is mentioned.
+      - id: VP-K5
+        point: >-
+          Excessive retention of identity/biometric data is mentioned.
+    must_not_claim:
+      - id: VP-F1
+        claim: >-
+          VerifyPro holds a current / valid ISO 27001 certification.
+      - id: VP-F2
+        claim: >-
+          The SOC 2 opinion was unqualified / clean.
+      - id: VP-F3
+        claim: >-
+          All processing of client PII occurs within the EEA.

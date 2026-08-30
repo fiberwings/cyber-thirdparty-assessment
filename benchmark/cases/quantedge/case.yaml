@@ -1,0 +1,123 @@
+id: quantedge
+vendor_name: "QuantEdge Analytics Inc."
+description: |
+  ### Assessing organisation and standards
+  Client: Aurora Investment Bank plc (Cyber Third-Party Risk Management). The
+  assessment reference date is 1 May 2026. Aurora's standards applied to vendors:
+  - TPRM Std 5.1: a current SOC 2 Type II (or ISO 27001 plus equivalent) is required
+    for any vendor processing confidential data or employee/client PII; SOC 1 alone
+    is not sufficient.
+  - TPRM Std 5.4: SOC reports must be refreshed within 12 months of period end;
+    certifications must be current (not expired) at the time of assessment.
+  - TPRM Std 8.2: independent external penetration test by an accredited firm at
+    least every 12 months, covering all bank-facing integration channels.
+  - TPRM Std 6.4: a complete, versioned sub-processor list; all sub-processors that
+    touch bank data must be disclosed in the DPA with an adequate transfer basis.
+  - Crypto Std 4.1/4.2: documented encryption at rest with customer-managed or
+    per-tenant keys and defined rotation; SFTP with key-based auth (4.3).
+  - Resilience Std 6.1: cross-region backups, defined RTO/RPO, and a live DR test
+    within 12 months; restore-from-backup tests at least semi-annually.
+  - Privacy Std 3.4: PII retention target of 5 years for non-regulated data with
+    automated deletion; policies reviewed at least annually.
+  - IAM Std 2.1: phishing-resistant MFA mandatory for administrators; NIST 800-63B
+    password policy.
+
+  ### Vendor and service
+  QuantEdge Analytics Inc. (New York; ~310 FTE; founded 2018) provides a
+  multi-tenant SaaS platform for systematic strategy backtesting, real-time
+  portfolio analytics, factor risk decomposition and Greeks calculation, used by
+  Aurora's Equity Quant Strategies desk and Cross-Asset Risk team. Aurora's quants
+  configure models; positions and trade history are uploaded daily.
+  Criticality: Tier 2 - Important. Data: Confidential - daily EOD positions and
+  trade history (anonymised account IDs), proprietary strategy parameters and
+  alpha signals (IP), licensed reference data, SSO identity claims (email/UPN
+  only). ~14 TB. USD 2.4m annual subscription, 3-year agreement.
+  Geography: primary AWS us-east-1, DR us-west-2; US data residency.
+  Connectivity: HTTPS REST/GraphQL API (token-based short-lived JWTs, mTLS
+  optional), SAML SSO + SCIM, daily SFTP feed for bulk position uploads (a primary
+  integration channel), WebSocket streaming. Sub-processors: AWS, Snowflake,
+  Auth0/Okta, Datadog, Twilio SendGrid (all US). Vendor-claimed: ISO 27001:2022
+  (Schellman), SOC 2 Type II (Schellman). Vendor self-asserted maturity: High.
+  Evidence: context document, ISP v3.7, BCP/DR v2.5, SIG Lite 2026Q2, SOC 2 Type II
+  2025-2026, ISO 27001 certificate, pen test attestation.
+documents:
+  - path: docs/Context_QuantEdge.docx
+    kind: other
+  - path: docs/SIG_Lite_Response_QuantEdge_2026Q2.xlsx
+    kind: questionnaire
+  - path: docs/SOC_Report_QuantEdge_2025-2026.pdf
+    kind: soc
+  - path: docs/ISO27001_Certificate_QuantEdge.pdf
+    kind: iso
+  - path: docs/PenTest_Attestation_QuantEdge.pdf
+    kind: pentest
+  - path: docs/Information_Security_Policy_QuantEdge_v3.7.docx
+    kind: policy
+  - path: docs/BCP_DR_Policy_QuantEdge_v2.5.docx
+    kind: policy
+golden:
+  expected_weaknesses:
+    - id: QE-G1
+      description: >-
+        Critical patching SLA breach: the documented critical vulnerability
+        remediation SLA is 30 days (ISP 10.3) but the SOC 2 CC7.1 exception
+        discloses a p95 of ~45 days, acknowledged but not remediated.
+      severity: medium
+    - id: QE-G2
+      description: >-
+        External penetration test scope was limited to the customer portal; the
+        public REST/GraphQL API and SFTP gateway (the bank's primary integration
+        channels) were out of scope with no compensating assurance.
+      severity: medium
+    - id: QE-G3
+      description: >-
+        The customer data / analytics tier uses a shared customer master key (CMK)
+        across tenants in the standard subscription (SOC 2 CC6.7 exception);
+        per-tenant CMKs are only an Enterprise add-on, increasing key-compromise
+        blast radius.
+      severity: medium
+    - id: QE-G4
+      description: >-
+        Backups have not been restore-tested for over 12 months: the last
+        documented restore test was 2024-12-11 against a semi-annual internal
+        requirement, so BCP recovery assertions are unverified.
+      severity: medium
+    - id: QE-G5
+      description: >-
+        BCP testing has been tabletop only; the last live regional failover was
+        August 2024 (18+ months), so the stated 4-hour RTO is theoretical.
+      severity: low
+    - id: QE-G6
+      description: >-
+        The SOC 2 Type II covers only a 6-month period (Oct 2025 - Mar 2026)
+        rather than 12 months, a regression from the prior 12-month report.
+      severity: low
+  exec_summary_rubric:
+    must_cover:
+      - id: QE-K1
+        point: >-
+          An overall residual risk verdict is stated and consistent with the
+          computed aggregate band.
+      - id: QE-K2
+        point: >-
+          The pen test scope exclusion of the API and SFTP integration channels is mentioned.
+      - id: QE-K3
+        point: >-
+          The shared cross-tenant encryption key (CMK) is mentioned.
+      - id: QE-K4
+        point: >-
+          Unverified recovery capability (untested backups restore and/or tabletop-only
+          BCP testing) is mentioned.
+      - id: QE-K5
+        point: >-
+          The vulnerability remediation SLA breach disclosed in the SOC 2 is mentioned.
+    must_not_claim:
+      - id: QE-F1
+        claim: >-
+          The penetration test covered the API and SFTP channels.
+      - id: QE-F2
+        claim: >-
+          Per-tenant encryption keys are in place for the bank's data.
+      - id: QE-F3
+        claim: >-
+          A live DR failover was performed within the last 12 months.

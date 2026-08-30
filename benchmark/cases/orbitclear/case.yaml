@@ -1,0 +1,154 @@
+id: orbitclear
+vendor_name: "OrbitClear Technologies Ltd"
+description: |
+  Requesting organisation: Helvetia Global Markets Ltd (HGM), a global investment
+  bank (HQ London; regulated entities in New York, Zurich, Frankfurt, Singapore,
+  Hong Kong, Tokyo). Regimes: EU DORA, GDPR, UK PRA SS2/21, SEC Reg S-P, NYDFS 23
+  NYCRR 500, MAS TRM, HKMA C-RAF 2.0. The DPA references EU Standard Contractual
+  Clauses (2021/914) Module 2; a DORA ICT third-party schedule was executed Dec 2024.
+
+  Supplier: OrbitClear Technologies Ltd, Dublin-incorporated SaaS vendor (subsidiary
+  of OrbitClear Holdings Inc., Delaware). ~620 FTE across Ireland (HQ, production
+  hosting), UK, Singapore, India (development and 24x7 support). Live since June 2023.
+
+  Criticality (HGM): Tier 1 - Material / Important Business Service under DORA.
+  Unavailability > 2 hours breaches HGM's impact tolerance.
+
+  ### Service in scope: "OrbitClear Post-Trade Cloud"
+  - Real-time trade capture over FIX 4.4 / FpML 5.x (cash equities, listed
+    derivatives, FX, OTC IRS/CDS)
+  - Matching, allocation and affirmation; GL and sub-ledger reconciliation
+  - Break management / exception workflow
+  - Transaction-reporting adapter for EMIR REFIT, MiFIR, CFTC Part 43/45, MAS 610,
+    HKMA (~4.5M events/day)
+
+  ### Data exchanged
+  - Trade economics incl. LEI, trader ID (Confidential - MNPI)
+  - Standing settlement instructions / nostro-vostro account identifiers (Payment Data)
+  - Counterparty static data; ~1,200 HGM employee identities (GDPR personal data)
+  - Limited client PII (natural-person officers, name + DOB for KYC)
+  - Regulatory submissions: full trade-level records retained 7 years (Regulated Record)
+
+  ### Connectivity
+  Site-to-site IPsec VPN; IBM MQ (TLS 1.2 mutual); SFTP (SSH keys, PGP payloads);
+  REST API (OAuth 2.0 + mTLS); SAML 2.0 SSO from HGM Azure AD with step-up MFA
+  delegated to OrbitClear's identity sub-processor.
+
+  ### Hosting posture as disclosed by OrbitClear
+  Production AWS eu-west-1 (Dublin); DR AWS eu-central-1 (Frankfurt), active-standby.
+  OrbitClear represents that "no customer data is transferred outside the EEA."
+
+  ### Assessment objective
+  Determine whether OrbitClear's control environment, as described and evidenced,
+  is commensurate with HGM's Tier-1 requirements and GDPR / DORA / NYDFS / MAS
+  obligations. Identify control gaps, inconsistencies between claimed and evidenced
+  controls, and assurance blind spots (including those arising from sub-processors
+  and subservice organisations). The evidence bundle must be reviewed jointly:
+  gaps may emerge only when questionnaire claims are compared with the SOC 2 and
+  the supplier's own policies. Absence of expected evidence is itself a finding.
+  Evidence: SIG-Lite questionnaire response, SOC 2 Type 2 (Marlow & Vance LLP),
+  InfoSec Policy v3.2, BC/DR Policy v2.4, TPRM Policy v1.6 incl. Critical
+  Sub-Processor Register.
+documents:
+  - path: docs/00_Context_Briefing.pdf
+    kind: other
+  - path: docs/01_SIG_Questionnaire_OrbitClear_Response.xlsx
+    kind: questionnaire
+  - path: docs/02_SOC2_Type2_Report_OrbitClear.pdf
+    kind: soc
+  - path: docs/03_InfoSec_Policy_OrbitClear_v3-2.pdf
+    kind: policy
+  - path: docs/04_BCDR_Policy_OrbitClear_v2-4.pdf
+    kind: policy
+  - path: docs/05_TPRM_Policy_OrbitClear_v1-6.pdf
+    kind: policy
+golden:
+  expected_weaknesses:
+    - id: ORB-G1
+      description: >-
+        MFA is not enforced on all privileged accounts: the questionnaire (AC-03)
+        and InfoSec Policy (6.2) claim MFA for 100% of accounts with no exceptions,
+        but the SOC 2 Section IV control AC-04 exception shows 3 of 40 sampled
+        privileged Cloud Infrastructure accounts operated without MFA enrolment for
+        47 days (2 March - 18 April 2025).
+      severity: high
+      mapped_control_codes: [IAM.MFA]
+    - id: ORB-G2
+      description: >-
+        Data encryption key rotation every 3 years (questionnaire EN-03) violates
+        the vendor's own InfoSec Policy 7.3 requirement to rotate keys at least
+        every 12 months (and NIST SP 800-57 guidance).
+      severity: medium
+    - id: ORB-G3
+      description: >-
+        Critical-vulnerability remediation misses the stated 14-day SLA: the SOC 2
+        VM-02 exception reports a mean time-to-remediate of 38 days with 9 of 25
+        (36%) critical findings remediated outside the 14-day SLA (and 3 of 40 high
+        findings outside 30 days), contradicting the questionnaire and policy claims.
+      severity: high
+    - id: ORB-G4
+      description: >-
+        Data residency violation: the questionnaire states no customer data leaves
+        the EEA (DS-02/DS-03), but the BC/DR Policy 6.4 discloses that immutable
+        regulatory archive copies (trade-level records) are replicated to Amazon S3
+        Glacier Deep Archive in AWS us-east-2 (Ohio), a US region, raising GDPR
+        Chapter V / Schrems II transfer issues.
+      severity: high
+    - id: ORB-G5
+      description: >-
+        Nexus Identity Services LLC, the subservice organization providing step-up
+        MFA factor issuance/verification, is carved out of the SOC 2, absent from
+        the TPRM Policy Critical Sub-Processor Register (only AWS, Okta, Datadog),
+        and has no independent assurance report in the bundle, contradicting the
+        questionnaire TP-04 claim that all critical sub-processors have current
+        assurance; additionally the SOC 2 covers only 6 months (1 Jan - 30 Jun 2025)
+        as a first Type 2 examination, leaving 2024 without Type 2 assurance.
+      severity: high
+    - id: ORB-O1
+      description: >-
+        The DR cut-over test of 14-15 Feb 2026 falls after the SOC 2 reporting
+        period, so it is claimed in the questionnaire but not attested.
+      severity: low
+      optional: true
+    - id: ORB-O2
+      description: >-
+        DORA threat-led penetration testing (Art 24-27) is only scheduled for Q3 2026
+        and has not yet been performed.
+      severity: low
+      optional: true
+    - id: ORB-O3
+      description: >-
+        BYOK is supported but HYOK is not; incident notification SLA is 24 hours.
+      severity: low
+      optional: true
+  exec_summary_rubric:
+    must_cover:
+      - id: ORB-K1
+        point: >-
+          An overall residual risk verdict is stated and consistent with the
+          computed aggregate band.
+      - id: ORB-K2
+        point: >-
+          The MFA exception on privileged accounts (SOC 2 AC-04) contradicting the
+          "no exceptions" claim is mentioned.
+      - id: ORB-K3
+        point: >-
+          The replication of regulatory archive data to a US AWS region contrary to
+          the EEA-only commitment is mentioned.
+      - id: ORB-K4
+        point: >-
+          The critical-vulnerability remediation SLA breach evidenced by the SOC 2 is mentioned.
+      - id: ORB-K5
+        point: >-
+          An assurance gap concerning the SOC 2 (short period and/or the carved-out
+          identity subservice organization Nexus without assurance) is mentioned.
+    must_not_claim:
+      - id: ORB-F1
+        claim: >-
+          MFA is enforced for all privileged accounts without exception.
+      - id: ORB-F2
+        claim: >-
+          All customer data remains within the EEA.
+      - id: ORB-F3
+        claim: >-
+          Critical vulnerabilities are consistently remediated within 14 days.
