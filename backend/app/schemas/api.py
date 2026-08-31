@@ -100,6 +100,7 @@ class DocumentRead(BaseModel):
     size_bytes: int
     parsed_at: Optional[datetime]
     weakness_extracted_at: Optional[datetime] = None
+    attestation_profile: Optional[dict] = None
     # Populated only on the upload response so the frontend can poll the
     # background extraction task. Other endpoints return None.
     weakness_task_id: Optional[str] = None

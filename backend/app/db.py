@@ -72,6 +72,8 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     # Accuracy program Phase 3 (R3/R4): legacy rows are reported rows
     ("weakness", "status", "VARCHAR(20) NOT NULL DEFAULT 'confirmed'"),
     ("weakness", "review", "JSON"),
+    # Accuracy program Phase 4 (thin R2)
+    ("document", "attestation_profile", "JSON"),
 ]
 
 _POST_MIGRATION_INDEXES: list[str] = [

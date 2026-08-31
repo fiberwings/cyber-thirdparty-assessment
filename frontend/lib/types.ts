@@ -88,6 +88,9 @@ export interface DocumentRead {
   mime: string;
   size_bytes: number;
   parsed_at: string | null;
+  // Typed attestation profile (SOC / ISO / pen-test docs); every field
+  // carries the quote it came from. Shape mirrors backend AttestationProfileOut.
+  attestation_profile?: Record<string, any> | null;
 }
 
 export interface ChunkRead {

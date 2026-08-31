@@ -136,3 +136,28 @@ def test_legacy_rows_and_user_rows_default_to_confirmed(fresh_db):
         db.commit()
         db.refresh(a)
         assert [w.status for w in a.weaknesses] == ["confirmed"]
+
+
+@pytest.mark.asyncio
+async def test_confirmation_truncation_splits_and_failure_keeps_candidates(fresh_db, fake_client):
+    with SessionLocal() as db:
+        a, sig, pol, (w1, w2, w3, w4) = _fixture(db)
+        # sig doc (1 candidate): truncated once at 8192 → enlarged retry also truncated → single row → kept+flagged
+        fake_client.push_truncated("")
+        fake_client.push_truncated("")
+        # pol doc (3 candidates): truncated twice → split into [w2] + [w3, w4]
+        fake_client.push_truncated("")
+        fake_client.push_truncated("")
+        fake_client.push_json({"decisions": [
+            {"id": w2, "decision": "confirmed", "confidence": "high", "reason": "real archive residency deficiency"}]})
+        fake_client.push_json({"decisions": [
+            {"id": w3, "decision": "dropped", "confidence": "high", "reason": "restates candidate w2 verbatim"},
+            {"id": w4, "decision": "evidence_note", "confidence": "medium", "reason": "owner naming is context only"}]})
+        fake_client.push_json({"groups": []})  # merge pass over the two confirmed rows
+        counts = await confirmation.review(db, a.id, client=fake_client)
+        assert counts["confirmed"] == 1 and counts["dropped"] == 1 and counts["evidence_note"] == 1
+        assert counts["unreviewed_kept"] == 1  # the sig candidate survived the failed call
+        rows = {w.id: w for w in db.query(Weakness).filter(Weakness.assessment_id == a.id).all()}
+        assert rows[w1].status == "confirmed" and rows[w1].review["unreviewed"] is True
+        assert "confirmation call failed" in rows[w1].review["reason"]
+        assert rows[w2].status == "confirmed" and rows[w3].status == "dropped"

@@ -128,6 +128,10 @@ class Document(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     parsed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     weakness_extracted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Typed attestation profile (SOC / ISO / pen-test docs only; Phase 4).
+    # Shape: schemas.attestation.AttestationProfileOut dump — every field
+    # carries the verbatim quote it came from.
+    attestation_profile: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     assessment: Mapped[Assessment] = relationship(back_populates="documents")

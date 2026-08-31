@@ -345,6 +345,12 @@ async def run(
     if a is None:
         raise ValueError(f"Assessment {assessment_id} not found")
 
+    # Phase 4: deterministic attestation checks first (they need only the
+    # stored profiles + analysis date + standards; re-runs replace).
+    from app.ai.agents import attestation as attestation_agent
+
+    attestation_agent.apply_checks(db, assessment_id)
+
     # R3/R4: review extracted candidates against the whole bundle first, then
     # consolidate; only confirmed rows are correlated and scored.
     from app.ai.agents import confirmation as confirm_agent

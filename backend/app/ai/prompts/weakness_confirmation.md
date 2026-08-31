@@ -18,7 +18,7 @@ Principles — judge, do not pattern-match:
 
 # Output schema (JSON only — no prose, no code fences)
 
-Return every candidate id exactly once:
+Return every candidate id exactly once. Be terse — one short sentence per reason, no reasoning outside the JSON:
 ```
 {"decisions": [{"id": 123, "decision": "confirmed|evidence_note|dropped", "confidence": "high|medium|low", "reason": "<one sentence citing the decisive source>"}]}
 ```

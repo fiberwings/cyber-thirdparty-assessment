@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from app.ai.agents import attestation as attestation_agent
 from app.ai.agents import document_weaknesses as docw_agent
 from app.api.deps import db_session, get_assessment
 from app.api.serializers import serialize_document
@@ -104,12 +105,21 @@ async def upload_document(
             await docw_agent.extract(
                 inner, doc_id, on_progress=extract_progress
             )
+            # Typed attestation profile for assurance documents (fast, cheap).
+            # Best-effort: a failed profile never fails the extraction job —
+            # the document simply has no profile (deterministic checks stay
+            # silent) and the profile can be re-extracted via the API.
+            profile_warning = ""
+            try:
+                await attestation_agent.extract_profile(inner, doc_id)
+            except Exception as e:
+                profile_warning = f" — attestation profile failed (re-run available): {str(e)[:150]}"
         # Extraction only. Confirmation against the whole bundle, merge and
         # cross-correlation run in the explicit cross-correlate step (R3):
         # doing them per upload would judge candidates against a partial
         # bundle. The evidence phase therefore stays "pending" until that
         # step is run (analysis page, step 2).
-        await handle.update(progress=1.0, detail="Extracted candidates")
+        await handle.update(progress=1.0, detail="Extracted candidates" + profile_warning)
 
     handle = registry.submit(job, kind="cross_correlation", assessment_id=assessment_id)
     # Attach the task id to the response so the frontend can poll
@@ -189,3 +199,17 @@ def download_document(
     if not target.exists():
         raise HTTPException(status_code=410, detail="File missing on disk")
     return FileResponse(target, media_type=d.mime, filename=d.filename)
+
+
+@router.post("/documents/{document_id}/attestation-profile", response_model=DocumentRead)
+async def rerun_attestation_profile(document_id: int, db: Session = Depends(db_session)):
+    """(Re)extract the typed attestation profile for one assurance document
+    (synchronous — one fast-profile call)."""
+    d = db.get(Document, document_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if d.kind not in attestation_agent.ATTESTATION_KINDS:
+        raise HTTPException(status_code=400, detail="Not an assurance document (soc/iso/pentest)")
+    await attestation_agent.extract_profile(db, document_id)
+    db.refresh(d)
+    return serialize_document(d)

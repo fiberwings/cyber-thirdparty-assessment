@@ -67,32 +67,52 @@ async def confirm_candidates(
     for w in candidates:
         by_doc.setdefault(w.source_document_id, []).append(w)
 
-    n_docs = len(by_doc)
-    for i, (doc_id, rows) in enumerate(by_doc.items()):
-        doc_name = rows[0].document.filename if rows[0].document is not None else f"document {doc_id}"
+    from app.ai.router import OpenRouterError
+
+    async def decide(doc_id: int | None, doc_name: str, rows: list[Weakness]) -> list:
+        """One review call for these candidates. Output truncation splits the
+        batch in half (recursively); a single candidate that still cannot be
+        reviewed is kept-and-flagged by the caller (never fatal, never lost)."""
         user = (
             f"{assessment_context_block(assessment)}\n\n"
             f"# Vendor\n{assessment.vendor_name}\n\n"
             f"{bundle_text}\n\n"
             f"# Candidate weaknesses extracted from \"{doc_name}\" (document_id={doc_id}) — {len(rows)} to review\n"
             + "\n".join(_fmt_candidate(w) for w in rows)
-            + "\n\nDecide every candidate above. JSON only."
+            + "\n\nDecide every candidate above. One short sentence per reason; "
+            "no analysis outside the JSON. JSON only."
         )
-        out: CandidateReviewOut = await call_structured(
-            db,
-            purpose="weakness_confirmation",
-            profile="reasoner",
-            messages=[{"role": "system", "content": CONFIRM_PROMPT}, {"role": "user", "content": user}],
-            schema=CandidateReviewOut,
-            assessment_id=assessment.id,
-            model_override=model_override,
-            max_tokens=8192,
-            client=client,
-        )
+        try:
+            out: CandidateReviewOut = await call_structured(
+                db,
+                purpose="weakness_confirmation",
+                profile="reasoner",
+                messages=[{"role": "system", "content": CONFIRM_PROMPT}, {"role": "user", "content": user}],
+                schema=CandidateReviewOut,
+                assessment_id=assessment.id,
+                model_override=model_override,
+                max_tokens=8192,
+                client=client,
+            )
+        except OpenRouterError as e:
+            if not e.truncated or len(rows) < 2:
+                raise
+            mid = len(rows) // 2
+            return (await decide(doc_id, doc_name, rows[:mid])) + (await decide(doc_id, doc_name, rows[mid:]))
+        return list(out.decisions)
+
+    n_docs = len(by_doc)
+    for i, (doc_id, rows) in enumerate(by_doc.items()):
+        doc_name = rows[0].document.filename if rows[0].document is not None else f"document {doc_id}"
+        keep_reason = "not decided by the confirmation model (omitted from its answer); kept for human review"
+        try:
+            decisions = await decide(doc_id, doc_name, rows)
+        except Exception as e:
+            decisions = []
+            keep_reason = f"confirmation call failed ({str(e)[:120]}); kept for human review"
         wanted = {w.id: w for w in rows}
         decided: set[int] = set()
-        model_id = None
-        for d in out.decisions:
+        for d in decisions:
             w = wanted.get(d.id)
             if w is None or d.id in decided:
                 continue
@@ -114,7 +134,7 @@ async def confirm_candidates(
             w.review = {
                 "decision": "confirmed",
                 "confidence": "low",
-                "reason": "not decided by the confirmation model (omitted from its answer); kept for human review",
+                "reason": keep_reason,
                 "at": _now(),
                 "stage": "confirmation",
                 "unreviewed": True,

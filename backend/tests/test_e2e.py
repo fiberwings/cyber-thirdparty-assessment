@@ -42,6 +42,13 @@ def patched_client(monkeypatch, fresh_db):
     # — clean SOC report. With no extracted weaknesses, the auto-fired
     # cross-correlation step sees nothing to do and exits without a call.
     fake.push_json({"weaknesses": []})
+    # Attestation profile (fast call, fired for soc/iso/pentest uploads).
+    fake.push_json({
+        "doc_type": "soc2_type2", "doc_type_quote": "SOC 2 Type 2 report",
+        "period_start": {"value": "2025-01-01", "quote": "period 1 January 2025"},
+        "period_end": {"value": "2025-12-31", "quote": "to 31 December 2025"},
+        "opinion": {"value": "unqualified", "quote": "in our opinion, controls were suitably designed"},
+    })
     # Scenario generation — phase 1 (skeletons)
     fake.push_json(
         {

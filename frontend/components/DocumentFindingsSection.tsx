@@ -45,6 +45,7 @@ export function DocumentFindingsSection({
         empty ? "border-ink-100 opacity-70" : "border-ink-200",
       )}
     >
+      {/* rendered below the summary row */}
       <summary
         className={clsx(
           "flex items-center gap-3 px-4 py-3 cursor-pointer select-none list-none",
@@ -99,6 +100,7 @@ export function DocumentFindingsSection({
           delete
         </button>
       </summary>
+      {doc.attestation_profile && <AttestationProfileCard profile={doc.attestation_profile} />}
 
       {!empty && (
         <ul className="border-t border-ink-100 text-ink-700">
@@ -136,5 +138,37 @@ function Caret() {
     >
       <path d="M3 1l4 4-4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" fill="none" />
     </svg>
+  );
+}
+
+
+function AttestationProfileCard({ profile }: { profile: Record<string, any> }) {
+  const q = (f: any) => (f && f.value !== undefined ? String(f.value) : null);
+  const items: [string, string | null][] = [
+    ["Type", profile.doc_type ?? null],
+    ["Period", q(profile.period_start) && q(profile.period_end) ? `${q(profile.period_start)} → ${q(profile.period_end)}` : null],
+    ["Opinion", q(profile.opinion)],
+    ["First examination", profile.first_examination ? String(profile.first_examination.value) : null],
+    ["Carve-outs", profile.carve_outs?.length ? profile.carve_outs.map((c: any) => c.name).join(", ") : null],
+    ["CUECs", q(profile.cuec_count)],
+    ["Auditor / tester", q(profile.auditor) ?? q(profile.tester)],
+    ["Cert expiry", q(profile.cert_expiry_date)],
+    ["Test date", q(profile.test_end_date) ?? q(profile.test_start_date)],
+  ];
+  const shown = items.filter(([, v]) => v);
+  if (!shown.length) return null;
+  return (
+    <div className="mx-4 mb-2 rounded border border-ink-100 bg-ink-50/50 px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wide text-ink-500 font-semibold mb-1">
+        Attestation profile <span className="normal-case font-normal">(every value carries a source quote; drives deterministic freshness checks)</span>
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-ink-700">
+        {shown.map(([k, v]) => (
+          <span key={k}>
+            <span className="text-ink-500">{k}:</span> {v}
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }
