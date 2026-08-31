@@ -93,12 +93,11 @@ golden:
         the last 24 months was a desktop/tabletop walkthrough with no live cut-over
         to the DR site.
       severity: medium
-    - id: VP-G6
-      description: >-
-        The SOC 2 report covers Nov 2024 - Oct 2025 and has not been refreshed:
-        at the May 2026 assessment date the report is ~6 months past period end
-        and outside the bank's expected refresh window.
-      severity: medium
+    # VP-G6 removed 2026-08-31 (user decision, Phase 6): the case's own stated
+    # standard (TPRM Std 5.4, "SOC reports must be refreshed within 12 months
+    # of period end") makes a report 6 months past period end COMPLIANT at the
+    # May 2026 analysis date — the golden contradicted the evidence, and the
+    # deterministic attestation check is right not to fire.
     - id: VP-G7
       description: >-
         The Information Security Policy was last reviewed/approved on 2024-04-09,

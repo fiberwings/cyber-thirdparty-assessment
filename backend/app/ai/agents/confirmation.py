@@ -177,29 +177,45 @@ async def merge_confirmed(
     if len(rows) < 2:
         return 0
     by_id = {w.id: w for w in rows}
-    user = (
-        f"# Vendor\n{assessment.vendor_name}\n\n"
-        f"# Confirmed weaknesses ({len(rows)})\n"
-        + "\n".join(
-            _fmt_candidate(w) + f"\n  control_codes: {', '.join(w.mapped_control_codes or []) or '(none)'}"
-            for w in rows
+
+    from app.ai.router import OpenRouterError
+
+    async def merge_call(subset: list[Weakness]) -> list:
+        """One merge call; a truncated output splits the row set in half and
+        merges each half independently (cross-half merges are sacrificed —
+        strictly fewer merges, never a failed pass or an invented one)."""
+        user = (
+            f"# Vendor\n{assessment.vendor_name}\n\n"
+            f"# Confirmed weaknesses ({len(subset)})\n"
+            + "\n".join(
+                _fmt_candidate(w) + f"\n  control_codes: {', '.join(w.mapped_control_codes or []) or '(none)'}"
+                for w in subset
+            )
+            + "\n\nGroup only rows that are the same underlying deficiency. Be terse. JSON only."
         )
-        + "\n\nGroup only rows that are the same underlying deficiency. JSON only."
-    )
-    out: MergeOut = await call_structured(
-        db,
-        purpose="weakness_merge",
-        profile="reasoner",
-        messages=[{"role": "system", "content": MERGE_PROMPT}, {"role": "user", "content": user}],
-        schema=MergeOut,
-        assessment_id=assessment.id,
-        model_override=model_override,
-        max_tokens=8192,
-        client=client,
-    )
+        try:
+            out: MergeOut = await call_structured(
+                db,
+                purpose="weakness_merge",
+                profile="reasoner",
+                messages=[{"role": "system", "content": MERGE_PROMPT}, {"role": "user", "content": user}],
+                schema=MergeOut,
+                assessment_id=assessment.id,
+                model_override=model_override,
+                max_tokens=8192,
+                client=client,
+            )
+        except OpenRouterError as e:
+            if not e.truncated or len(subset) < 4:
+                raise
+            mid = len(subset) // 2
+            return (await merge_call(subset[:mid])) + (await merge_call(subset[mid:]))
+        return list(out.groups)
+
+    groups = await merge_call(rows)
     used: set[int] = set()
     merged = 0
-    for g in out.groups:
+    for g in groups:
         primary = by_id.get(g.primary_id)
         members = [by_id[m] for m in g.member_ids if m in by_id and m != g.primary_id]
         if primary is None or not members or primary.id in used or any(m.id in used for m in members):

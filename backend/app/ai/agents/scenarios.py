@@ -121,7 +121,7 @@ async def _phase2_worker(
                 schema=ExpectedControlListOut,
                 assessment_id=assessment_id,
                 model_override=model_override,
-                max_tokens=4096,
+                max_tokens=8192,  # dense scenarios overflowed 4096→8192; start at 8192 so the enlargement reaches 16k
                 client=client,
             )
             for c_out in controls_out.expected_controls:

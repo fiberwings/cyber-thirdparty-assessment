@@ -2,9 +2,9 @@
 
 **Program:** accuracy improvements, plan in `PLAN.md` (frozen), baseline in `BASELINE.md`, test protocol in `TESTING.md`.
 **Branch:** `accuracy-program`, created 2026-08-30 from `main` @ 0dedfe7 (scaffold commit; app code identical to d391c80).
-**Current phase:** Phase 6 — full validation — awaiting user go (≈ 12 pipeline runs, expected < 3 M tokens). Plan rev. 2.
-**Last benchmark run:** run 17 (2026-08-31, Phase 4 canary a17 salvaged + graded judge=match: recall 5/5, n 14; deterministic 6-month-first-Type-2 emitted with exact dates).
-**Cost spent on program so far:** ≈ 5.4 M tokens — through Phase 3 ≈ 4.0 M; Phase 4: two failed canary attempts ≈ 600k + salvaged canary 777k + judge 7k.
+**Program COMPLETE** (Phase 6 closed 2026-08-31; one qualified item open — recall-floor interpretation, see Open decisions). Closing report: `phases/06-full-validation.md`.
+**Last benchmark run:** runs 18–21 (Phase 6 full validation + salvages + re-grade). Union recall 32/37; bands 6/6 within one of expected; signal median 78 %; dup 0.42; cost ≈ 54 % of baseline.
+**Cost spent on program (final):** ≈ 13.8 M tokens (phases 0–4 ≈ 5.4 M; Phase 5 zero; Phase 6 ≈ 8.4 M).
 
 ## Phase checklist (PLAN rev. 2)
 - [x] Phase 0 — measurement (harness metrics, flags, `bench grade`) — closed 2026-08-30
@@ -13,12 +13,17 @@
 - [x] Phase 3 — confirmation + thin dedupe (R3, R4) — closed 2026-08-31 (see Open decisions)
 - [x] Phase 4 — attestation profile (thin R2) — closed 2026-08-31, all floors and targets met
 - [x] Phase 5 — scoring & severity (R5, R6) — closed 2026-08-31 after user band review (option a)
-- [ ] Phase 6 — full validation
+- [x] Phase 6 — full validation — closed 2026-08-31 (recall-floor sign-off open)
 
 ## Open decisions for the user
+- 2026-08-31 · **Phase 6 recall floor (qualified miss):** "≥ 35/36" is not evaluable on the expanded key (36→37 required after
+  additions and the VP-G6 removal). Union recall 32/37 (86 %); no demonstrated regression on baseline-era goldens (sole
+  baseline-era miss CN-G3 was already "partial" at baseline). Sign-off requested; misses + follow-ups in phases/06.
 - 2026-08-30 · Delete partial assessment #12 on the backend (orphan of aborted run 6)? Harmless to keep.
 
 ## Decisions taken
+- 2026-08-31 · Phase 6: salvage option B (globaltalent r2 + verifypro r2); VP-G6 golden removed — it contradicted the
+  case's own stated refresh standard; the evidence (and the deterministic check) wins over the case narrative (user)
 - 2026-08-31 · Phase 5 bands reviewed and approved; uplift gate kept as-is (option a: a17 −1 accepted); "rule B"
   (single auditor-tested high satisfies the uplift gate) to be re-examined on Phase 6's re-run data; aggregate
   rounding fixed to half-up (user)
@@ -35,6 +40,7 @@
 - 2026-08-30 · classifier prompt frozen at fc-2 (33/40 agreement with the manual classification on the canary)
 
 ## Log (newest first; one line per stopping point: date · phase/step · run id or stage · key numbers · next action)
+- 2026-08-31 · Phase 6 closed, program complete · runs 18–21: bands 6/6 within one (floor met), dup 0.42 (met), signal median 78 % (mean 74 %, target miss), cost ≈ 54 % (near miss), union recall 32/37 (qualified floor miss, sign-off open) · rule B rejected on data · fixes en route: merge/scenario/extraction truncation robustness · follow-ups listed in phases/06 · **next: user sign-off on recall floor; backlog items 1–4**
 - 2026-08-31 · Phase 5 closed after review (option a; rule B deferred to Phase 6; half-up rounding fixed) · committed · **next: Phase 6 full validation on user go**
 - 2026-08-31 · Phase 5 implemented (0 LLM tokens) · engine: state-based downgrades, +1 bounded uplift, auditor-tested ceiling, meta→confidence, weighted-mean aggregation · rescore (DB copy): 6/6 within one band (was 0/6 discrimination), 0 floor violations · tests 85 pass, tsc clean · **next: user reviews band table → commit → Phase 6 (full validation)**
 - 2026-08-31 · Phase 4 closed · runs 15/16 failed (schema tolerance; confirmation truncation) → fixes · run 17 (a17 salvaged): recall 5/5, n 14, SOC profile fully quoted, soc_short_first_examination deterministic with exact dates, 0 model staleness rows, app 527k/250k · tests 83/38 pass · **next: Phase 5 (R5/R6 scoring) — LLM-free iteration on stored assessments; user reviews band changes before merge**

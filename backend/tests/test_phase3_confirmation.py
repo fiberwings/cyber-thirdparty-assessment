@@ -161,3 +161,27 @@ async def test_confirmation_truncation_splits_and_failure_keeps_candidates(fresh
         assert rows[w1].status == "confirmed" and rows[w1].review["unreviewed"] is True
         assert "confirmation call failed" in rows[w1].review["reason"]
         assert rows[w2].status == "confirmed" and rows[w3].status == "dropped"
+
+
+@pytest.mark.asyncio
+async def test_merge_splits_on_truncation(fresh_db, fake_client):
+    with SessionLocal() as db:
+        a, sig, pol, (w1, w2, w3, w4) = _fixture(db)
+        # confirm all four (one call per source doc)
+        fake_client.push_json({"decisions": [
+            {"id": w1, "decision": "confirmed", "confidence": "high", "reason": "keep for merge test"}]})
+        fake_client.push_json({"decisions": [
+            {"id": i, "decision": "confirmed", "confidence": "high", "reason": "keep for merge test"}
+            for i in (w2, w3, w4)]})
+        # merge over 4 rows truncates → split into two halves of 2
+        fake_client.push_truncated("")
+        fake_client.push_truncated("")
+        fake_client.push_json({"groups": []})
+        fake_client.push_json({"groups": [
+            {"primary_id": w3, "member_ids": [w4], "description": "same archive deficiency stated twice over",
+             "reason": "same section restated"}]})
+        counts = await confirmation.review(db, a.id, client=fake_client)
+        assert counts["merged"] == 1
+        rows = {w.id: w for w in db.query(Weakness).filter(Weakness.assessment_id == a.id).all()}
+        assert rows[w4].status == "merged" and rows[w4].review["merged_into"] == w3
+        assert rows[w1].status == "confirmed" and rows[w2].status == "confirmed"

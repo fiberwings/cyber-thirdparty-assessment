@@ -48,7 +48,7 @@ class BenchSettings(BaseSettings):
 
     # Stage timeouts (seconds)
     TIMEOUT_SCENARIOS: int = 600
-    TIMEOUT_EXTRACTION: int = 600
+    TIMEOUT_EXTRACTION: int = 1800  # windowed questionnaire extraction splits on truncation and can take long
     TIMEOUT_CORRELATE: int = 1800  # includes the R3 confirmation calls (one per document, whole bundle)
     TIMEOUT_GAP_ANALYSIS: int = 1800
     TIMEOUT_NARRATIVES: int = 900
