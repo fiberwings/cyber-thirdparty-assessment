@@ -66,8 +66,10 @@ def _format_scenarios(a: Assessment, scenario_reads) -> str:
             f"  residual: impact={_LEVEL_NAME[sr.residual_impact]}, "
             f"likelihood={_LEVEL_NAME[sr.residual_likelihood]}, band={sr.band}\n"
             f"  control coverage index: {sr.coverage_index:.2f} (0=no controls evidenced, 1=fully evidenced)\n"
-            f"  uplift applied: +{sr.combined_uplift} band(s) "
-            f"(meta raw {sr.meta_uplift_raw}, weakness raw {sr.weakness_uplift_raw})\n"
+            f"  uplift applied: +{sr.uplift} band(s) "
+            f"({sr.distinct_high_critical} distinct high/critical deficiencies, "
+            f"{sr.auditor_tested_high_critical} auditor-tested)\n"
+            f"  evidence confidence: {sr.confidence} (assessment-quality label — qualify wording accordingly)\n"
             f"  rationale: {sr.rationale or '(none written)'}"
         )
     return "\n\n".join(parts) if parts else "(no scenarios)"

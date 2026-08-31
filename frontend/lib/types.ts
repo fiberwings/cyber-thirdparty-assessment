@@ -167,14 +167,16 @@ export interface ScenarioScoreRead {
   inherent_likelihood: number;
   coverage_index: number;
   likelihood_reduction: number;
-  combined_uplift: number;
-  meta_uplift_raw: number;
-  weakness_uplift_raw: number;
-  effectiveness_downgrades: string[];
+  uplift: number;
+  distinct_high_critical: number;
+  auditor_tested_high_critical: number;
+  confidence: "high" | "medium" | "low";
+  state_downgrades: string[];
   rationale: string;
 }
 
 export interface AggregateScoreRead {
+  confidence?: "high" | "medium" | "low";
   band: Band;
   rank: number;
   weighted_mean_rank: number;

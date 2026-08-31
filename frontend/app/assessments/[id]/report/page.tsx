@@ -20,7 +20,7 @@ function driverLine(s: ScenarioScoreRead): string {
   const parts = [
     `Coverage ${formatPercent(s.coverage_index)} → −${s.likelihood_reduction} likelihood`,
   ];
-  if (s.combined_uplift > 0) parts.push(`uplift +${s.combined_uplift}`);
+  if (s.uplift > 0) parts.push(`uplift +${s.uplift}`);
   return parts.join(" · ");
 }
 

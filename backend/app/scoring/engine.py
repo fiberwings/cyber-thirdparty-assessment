@@ -1,17 +1,33 @@
-"""Deterministic risk scoring.
+"""Deterministic risk scoring (accuracy program Phase 5 — R5/R6).
+
+Design: weaknesses change the *state* of the controls they hit instead of
+adding per-row uplift; assessment-quality issues (meta) report a confidence
+band instead of raising likelihood; residual never exceeds inherent unless an
+independently evidenced (auditor-tested) high/critical deficiency maps to the
+scenario.
 
 Pipeline (per scenario):
-  1. effectiveness_score(coverage, effectiveness) ∈ [0, 1] for each expected control
-  2. weighted average across expected controls
-  3. likelihood_reduction = round(weighted_avg × 3) — best case drops 3 bands
-  4. residual_likelihood = clamp(inherent − reduction + combined_uplift, 1, 4)
-     where combined_uplift = round(min(cap, meta_raw + weakness_raw)); the raw
-     components are reported alongside so the split stays faithful
-  5. band = lookup_4x4(residual_impact, residual_likelihood)
+  1. Each expected control's (coverage, effectiveness) is adjusted by the
+     weaknesses mapped to it — an operating exception, not arithmetic:
+       high/critical weakness → effectiveness forced to "weak"
+       medium weakness        → effectiveness capped at "adequate"
+       low                    → no state change
+     (Adjustments are auditable via `state_downgrades`.)
+  2. effectiveness_score(coverage, effectiveness) ∈ [0, 1], weighted average
+     → coverage_index; likelihood_reduction = round(coverage_index × 3).
+  3. residual_likelihood = clamp(inherent − reduction + uplift) where uplift
+     is 0 or 1: +1 only when ≥ 1 critical or ≥ 2 distinct high/critical
+     deficiencies map to the scenario. Residual is capped at inherent unless
+     at least one of those deficiencies is auditor-tested (evidence_strength
+     "auditor_tested"), in which case it may exceed inherent by at most one.
+  4. band = lookup_4x4(residual_impact, residual_likelihood).
+  5. confidence (high/medium/low) from the scenario's meta issues — reported,
+     never scored.
 
-Aggregation (across scenarios):
-  - top-2 average and weighted-mean (by inherent_impact); the UI shows both
-  - overall band = the higher of the two (= more conservative)
+Aggregation: the impact-weighted mean of scenario band ranks drives the
+overall band; VeryHigh additionally requires either the weighted mean to
+round there or ≥ 2 independent scenarios at VeryHigh. Confidence = the worst
+scenario confidence.
 
 No LLM is invoked here. Recalc is sub-millisecond.
 """
@@ -44,29 +60,20 @@ _EFFECTIVENESS_TABLE: dict[tuple[str, str], float] = {
     ("full", "unknown"): 0.45,
 }
 
+# Meta issues → reported confidence band (never likelihood). Weights follow
+# the old uplift weights so the ordering of "how compromised is this
+# assessment" is unchanged — only its effect moved from the score to a label.
 _META_WEIGHTS: dict[str, float] = {
     "insufficient_info": 1.0,
     "vague_answer": 0.5,
     "missing_doc": 0.75,
-    # Legacy only: gap analysis no longer emits this flag (contradictions are
-    # scored as weaknesses instead). Kept so assessments scored before that
-    # change keep their bands until they are re-run.
-    "conflicting_evidence": 1.0,
+    "conflicting_evidence": 1.0,  # legacy rows only
 }
-_META_UPLIFT_CAP = 2.0
+_CONFIDENCE_MEDIUM_AT = 0.5   # any real evidence-quality signal → at most medium
+_CONFIDENCE_LOW_AT = 2.0      # several / severe signals → low
 
-# Per-severity uplift contributed by a weakness mapped to a scenario's
-# expected_control. Capped per scenario at _WEAKNESS_UPLIFT_CAP so a single
-# noisy doc can't single-handedly max out residual; combined with meta_uplift
-# at _META_UPLIFT_CAP so the total uplift stays within the existing band.
-_WEAKNESS_SEVERITY_UPLIFT: dict[str, float] = {
-    "low": 0.0,
-    "medium": 0.25,
-    "high": 0.75,
-    "critical": 1.0,
-}
-_WEAKNESS_UPLIFT_CAP = 1.5
 _HIGH_SEVERITY = {"high", "critical"}
+EVIDENCE_STRENGTHS = ("auditor_tested", "vendor_admitted", "inferred_absence")
 
 
 def level_to_name(level: int) -> str:
@@ -111,6 +118,10 @@ class WeaknessInput:
 
     severity: str  # low|medium|high|critical
     mapped_control_codes: list[str] = field(default_factory=list)
+    # auditor_tested (SOC/ISO/pen-test evidence) > vendor_admitted (the
+    # vendor's own statements) > inferred_absence (something not found in a
+    # document). Gates whether residual may exceed inherent.
+    evidence_strength: str = "vendor_admitted"
 
 
 @dataclass
@@ -129,59 +140,66 @@ class ScenarioScore:
     residual_impact: int
     residual_likelihood: int
     band: str
-    coverage_index: float  # weighted avg eff_score, in [0, 1]
+    coverage_index: float  # weighted avg eff_score AFTER state adjustment, in [0, 1]
     likelihood_reduction: int
-    combined_uplift: int  # bands actually applied to residual likelihood
-    meta_uplift_raw: float  # pre-cap meta contribution, for faithful reporting
-    weakness_uplift_raw: float  # pre-cap weakness contribution
-    effectiveness_downgrades: list[str]
+    uplift: int  # 0 or 1 band (bounded, deficiency-gated)
+    distinct_high_critical: int
+    auditor_tested_high_critical: int
+    confidence: str  # high|medium|low — evidence-quality label, not a score input
+    state_downgrades: list[str]  # "CODE: strong→weak (critical, auditor_tested)"
     rationale_breakdown: dict
 
 
-def _meta_uplift_value(meta: Iterable[MetaIssueInput]) -> float:
+def _confidence_value(meta: Iterable[MetaIssueInput]) -> tuple[str, float]:
     raw = 0.0
     seen_vague = 0
     for m in meta:
         if m.kind == "vague_answer":
             seen_vague += 1
-            if seen_vague <= 2:
-                raw += _META_WEIGHTS["vague_answer"]
-        else:
-            raw += _META_WEIGHTS.get(m.kind, 0.5)
-    return min(raw, _META_UPLIFT_CAP)
+            if seen_vague > 2:
+                continue
+        raw += _META_WEIGHTS.get(m.kind, 0.5)
+    if raw >= _CONFIDENCE_LOW_AT:
+        return "low", raw
+    if raw >= _CONFIDENCE_MEDIUM_AT:
+        return "medium", raw
+    return "high", raw
 
 
-def _weakness_uplift_value(weaknesses: Iterable[WeaknessInput]) -> float:
-    raw = sum(_WEAKNESS_SEVERITY_UPLIFT.get(w.severity, 0.0) for w in weaknesses)
-    return min(raw, _WEAKNESS_UPLIFT_CAP)
+_EFF_ORDER = {"weak": 0, "unknown": 1, "adequate": 2, "strong": 3}
 
 
-def _high_severity_mapped_codes(weaknesses: Iterable[WeaknessInput]) -> set[str]:
-    out: set[str] = set()
-    for w in weaknesses:
-        if w.severity in _HIGH_SEVERITY:
-            out.update(c for c in (w.mapped_control_codes or []) if c)
-    return out
+def _adjusted_effectiveness(eff: str, worst_hit: str | None) -> str:
+    """Apply the operating-exception state change for the worst weakness
+    severity mapped to this control."""
+    if worst_hit in _HIGH_SEVERITY:
+        return "weak"
+    if worst_hit == "medium" and _EFF_ORDER.get(eff, 1) > _EFF_ORDER["adequate"]:
+        return "adequate"
+    return eff
 
 
 def score_scenario(s: ScenarioInput) -> ScenarioScore:
-    # Force-downgrade `strong` → `adequate` (for scoring only) on any control
-    # hit by a high/critical weakness. The display value on the underlying
-    # ControlAssessment is left untouched; the override is auditable via the
-    # `effectiveness_downgrades` list in the rationale_breakdown.
-    hi_codes = _high_severity_mapped_codes(s.weaknesses)
-    downgrades: list[str] = []
+    # Worst mapped severity per control code (state change, not arithmetic).
+    sev_rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    worst_by_code: dict[str, str] = {}
+    for w in s.weaknesses:
+        for c in w.mapped_control_codes or []:
+            if not c:
+                continue
+            if sev_rank.get(w.severity, 0) > sev_rank.get(worst_by_code.get(c, ""), -1):
+                worst_by_code[c] = w.severity
 
+    downgrades: list[str] = []
     if not s.controls:
         coverage_index = 0.0
     else:
         total_w = 0.0
         weighted_sum = 0.0
         for c in s.controls:
-            eff = c.effectiveness
-            if eff == "strong" and c.code in hi_codes:
-                eff = "adequate"
-                downgrades.append(c.code)
+            eff = _adjusted_effectiveness(c.effectiveness, worst_by_code.get(c.code))
+            if eff != c.effectiveness:
+                downgrades.append(f"{c.code}: {c.effectiveness}→{eff} ({worst_by_code.get(c.code)})")
             w = max(c.weight, 0.0)
             total_w += w
             weighted_sum += effectiveness_score(c.coverage, eff) * w
@@ -189,19 +207,25 @@ def score_scenario(s: ScenarioInput) -> ScenarioScore:
 
     likelihood_reduction = round(coverage_index * 3)
 
-    raw_meta = _meta_uplift_value(s.meta_issues)
-    raw_weakness = _weakness_uplift_value(s.weaknesses)
-    # Combined cap preserves the existing residual envelope so a scenario can
-    # never gain more than `_META_UPLIFT_CAP` bands of uplift in total.
-    combined_raw = min(_META_UPLIFT_CAP, raw_meta + raw_weakness)
-    combined_int = round(combined_raw)
+    # Bounded uplift: distinct high/critical deficiencies, not row arithmetic.
+    hi = [w for w in s.weaknesses if w.severity in _HIGH_SEVERITY and w.mapped_control_codes]
+    n_hi = len(hi)
+    n_crit = sum(1 for w in hi if w.severity == "critical")
+    n_auditor = sum(1 for w in hi if w.evidence_strength == "auditor_tested")
+    uplift = 1 if (n_crit >= 1 or n_hi >= 2) else 0
 
     inherent_l = max(1, min(4, s.inherent_likelihood))
     inherent_i = max(1, min(4, s.inherent_impact))
 
-    residual_l = max(1, min(4, inherent_l - likelihood_reduction + combined_int))
+    residual_l = inherent_l - likelihood_reduction + uplift
+    # Residual ≤ inherent unless an independently evidenced (auditor-tested)
+    # high/critical failure maps to this scenario — then at most inherent + 1.
+    ceiling = inherent_l + 1 if n_auditor >= 1 else inherent_l
+    residual_l = max(1, min(4, min(residual_l, ceiling)))
     residual_i = inherent_i  # impact does not reduce; controls reduce likelihood
     band = band_for(residual_i, residual_l)
+
+    confidence, meta_raw = _confidence_value(s.meta_issues)
 
     return ScenarioScore(
         code=s.code,
@@ -210,22 +234,29 @@ def score_scenario(s: ScenarioInput) -> ScenarioScore:
         band=band,
         coverage_index=round(coverage_index, 3),
         likelihood_reduction=likelihood_reduction,
-        combined_uplift=combined_int,
-        meta_uplift_raw=round(raw_meta, 3),
-        weakness_uplift_raw=round(raw_weakness, 3),
-        effectiveness_downgrades=downgrades,
+        uplift=uplift,
+        distinct_high_critical=n_hi,
+        auditor_tested_high_critical=n_auditor,
+        confidence=confidence,
+        state_downgrades=downgrades,
         rationale_breakdown={
             "inherent_impact": inherent_i,
             "inherent_likelihood": inherent_l,
             "coverage_index": round(coverage_index, 3),
             "likelihood_reduction_bands": likelihood_reduction,
-            "combined_uplift_bands": combined_int,
-            "meta_uplift_raw": round(raw_meta, 3),
-            "weakness_uplift_raw": round(raw_weakness, 3),
-            "combined_uplift_raw": round(combined_raw, 3),
-            "effectiveness_downgrades": list(downgrades),
+            "uplift_bands": uplift,
+            "distinct_high_critical": n_hi,
+            "critical": n_crit,
+            "auditor_tested_high_critical": n_auditor,
+            "residual_ceiling": ceiling,
+            "confidence": confidence,
+            "meta_raw": round(meta_raw, 3),
+            "state_downgrades": list(downgrades),
         },
     )
+
+
+_CONF_ORDER = {"low": 0, "medium": 1, "high": 2}
 
 
 @dataclass
@@ -234,22 +265,20 @@ class AggregateScore:
     rank: int
     weighted_mean_rank: float
     top2_mean_rank: float
+    confidence: str
     per_scenario: list[ScenarioScore]
 
 
 def aggregate(scenarios: list[ScenarioScore], inherent_impacts: dict[str, int]) -> AggregateScore:
     if not scenarios:
         return AggregateScore(
-            band="Low",
-            rank=1,
-            weighted_mean_rank=1.0,
-            top2_mean_rank=1.0,
-            per_scenario=[],
+            band="Low", rank=1, weighted_mean_rank=1.0, top2_mean_rank=1.0,
+            confidence="high", per_scenario=[],
         )
 
     ranks = sorted((BAND_RANK[s.band] for s in scenarios), reverse=True)
     top2 = ranks[: min(2, len(ranks))]
-    top2_mean = sum(top2) / len(top2)
+    top2_mean = sum(top2) / len(top2)  # reported, no longer drives the band
 
     total_w = 0.0
     weighted_sum = 0.0
@@ -259,13 +288,26 @@ def aggregate(scenarios: list[ScenarioScore], inherent_impacts: dict[str, int]) 
         weighted_sum += BAND_RANK[s.band] * w
     weighted_mean = weighted_sum / total_w if total_w > 0 else float(ranks[0])
 
-    rank = max(1, min(4, round(max(top2_mean, weighted_mean))))
+    # The weighted view drives the band. VeryHigh needs either the weighted
+    # mean to round there or at least two independent scenarios at VeryHigh.
+    # Half-up rounding, not Python's banker's rounding: a mean sitting exactly
+    # on a band boundary resolves conservatively upward (2.5 → High).
+    rounded = int(weighted_mean + 0.5)
+    rank = max(1, min(4, rounded))
+    n_veryhigh = sum(1 for r in ranks if r == 4)
+    if rank >= 4 and n_veryhigh < 2 and rounded < 4:
+        rank = 3
+    if n_veryhigh >= 2:
+        rank = 4
     band = RANK_BAND[rank]
+
+    confidence = min((s.confidence for s in scenarios), key=lambda c: _CONF_ORDER[c])
 
     return AggregateScore(
         band=band,
         rank=rank,
         weighted_mean_rank=round(weighted_mean, 2),
         top2_mean_rank=round(top2_mean, 2),
+        confidence=confidence,
         per_scenario=scenarios,
     )

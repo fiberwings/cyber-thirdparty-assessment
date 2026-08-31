@@ -2,7 +2,7 @@
 
 **Program:** accuracy improvements, plan in `PLAN.md` (frozen), baseline in `BASELINE.md`, test protocol in `TESTING.md`.
 **Branch:** `accuracy-program`, created 2026-08-30 from `main` @ 0dedfe7 (scaffold commit; app code identical to d391c80).
-**Current phase:** Phase 5 — scoring & severity (R5, R6) — next; band changes need user review before merge. Plan rev. 2.
+**Current phase:** Phase 6 — full validation — awaiting user go (≈ 12 pipeline runs, expected < 3 M tokens). Plan rev. 2.
 **Last benchmark run:** run 17 (2026-08-31, Phase 4 canary a17 salvaged + graded judge=match: recall 5/5, n 14; deterministic 6-month-first-Type-2 emitted with exact dates).
 **Cost spent on program so far:** ≈ 5.4 M tokens — through Phase 3 ≈ 4.0 M; Phase 4: two failed canary attempts ≈ 600k + salvaged canary 777k + judge 7k.
 
@@ -12,13 +12,16 @@
 - [x] Phase 2 — whole-bundle assessment (R1) — closed 2026-08-30; decision point: R2 claims/entity reconciliation dropped
 - [x] Phase 3 — confirmation + thin dedupe (R3, R4) — closed 2026-08-31 (see Open decisions)
 - [x] Phase 4 — attestation profile (thin R2) — closed 2026-08-31, all floors and targets met
-- [ ] Phase 5 — scoring & severity (R5, R6) — user review of band changes required
+- [x] Phase 5 — scoring & severity (R5, R6) — closed 2026-08-31 after user band review (option a)
 - [ ] Phase 6 — full validation
 
 ## Open decisions for the user
 - 2026-08-30 · Delete partial assessment #12 on the backend (orphan of aborted run 6)? Harmless to keep.
 
 ## Decisions taken
+- 2026-08-31 · Phase 5 bands reviewed and approved; uplift gate kept as-is (option a: a17 −1 accepted); "rule B"
+  (single auditor-tested high satisfies the uplift gate) to be re-examined on Phase 6's re-run data; aggregate
+  rounding fixed to half-up (user)
 - 2026-08-30 · dev response cache is in scope for Phase 1 (user)
 - 2026-08-30 · do not re-run the pipeline when the app is unchanged; grade stored assessments with `bench grade` (user) —
   Phase 0 floor re-defined accordingly: grade of stored assessment 9 reports the new metrics and matches baseline recall 5/5
@@ -32,6 +35,8 @@
 - 2026-08-30 · classifier prompt frozen at fc-2 (33/40 agreement with the manual classification on the canary)
 
 ## Log (newest first; one line per stopping point: date · phase/step · run id or stage · key numbers · next action)
+- 2026-08-31 · Phase 5 closed after review (option a; rule B deferred to Phase 6; half-up rounding fixed) · committed · **next: Phase 6 full validation on user go**
+- 2026-08-31 · Phase 5 implemented (0 LLM tokens) · engine: state-based downgrades, +1 bounded uplift, auditor-tested ceiling, meta→confidence, weighted-mean aggregation · rescore (DB copy): 6/6 within one band (was 0/6 discrimination), 0 floor violations · tests 85 pass, tsc clean · **next: user reviews band table → commit → Phase 6 (full validation)**
 - 2026-08-31 · Phase 4 closed · runs 15/16 failed (schema tolerance; confirmation truncation) → fixes · run 17 (a17 salvaged): recall 5/5, n 14, SOC profile fully quoted, soc_short_first_examination deterministic with exact dates, 0 model staleness rows, app 527k/250k · tests 83/38 pass · **next: Phase 5 (R5/R6 scoring) — LLM-free iteration on stored assessments; user reviews band changes before merge**
 - 2026-08-31 · Phase 3 closed · run 14 (canary a-stray-1): recall 5/5, 31→10 reported (8 dropped, 11 notes, 4 merged, all reasons logged), signal 60 %, dup 0.2, exec 94, app 440k/182k · spot check a15 (verifypro): 12 "See comment" misreads → ≤1, 97→47 reported · harness TIMEOUT_CORRELATE 600→1800 s; StageError keeps assessment id; questionnaire window splits on output truncation · tests 72/38 pass · **next: user sign-off on signal 60 % → commit already done → Phase 4 (attestation profile)**
 - 2026-08-30 · Phase 2 closed · run 10 (a14, first build): recall 4/5, gap 177k/283 s, 1 batch truncated · fixes (batch 5, split, reported-context, punctuation-insensitive binding) · run 11: recall 5/5, gap 277k (34 %), 10:49, G4+G5 as multi-source contradictions, 0 dups · run 12 (conc. 3): 5/5, 8:30, 1 dup → concurrency 2 kept · tests 67 pass · **next: user sign-off on wall target → Phase 3 (R3 confirmation + R4 thin dedupe)**

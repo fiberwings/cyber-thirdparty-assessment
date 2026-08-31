@@ -24,6 +24,27 @@ from app.tasks import mark_phase_done, mark_phase_error, mark_phase_started, reg
 router = APIRouter(prefix="/api/assessments", tags=["scoring"])
 
 
+# kind_signal → evidence strength fallback, used when the confirmation pass
+# has not stored one on the row (legacy assessments, gap contradictions).
+_STRENGTH_BY_KIND = {
+    "soc_exception": "auditor_tested",
+    "pentest_finding": "auditor_tested",
+    "iso_nonconformity": "auditor_tested",
+    "attestation_check": "auditor_tested",   # arithmetic over audited, quoted dates
+    "questionnaire_negative": "vendor_admitted",
+    "cross_doc_conflict": "vendor_admitted",  # the vendor's own statements disagree
+    "policy_gap": "inferred_absence",
+    "dpa_clause_missing": "inferred_absence",
+}
+
+
+def _evidence_strength(w) -> str:
+    stored = (w.review or {}).get("evidence_strength") if w.review else None
+    if stored in ("auditor_tested", "vendor_admitted", "inferred_absence"):
+        return stored
+    return _STRENGTH_BY_KIND.get(w.kind_signal or "", "vendor_admitted")
+
+
 def _recalculate_in_session(db: Session, a: Assessment) -> tuple[list[ScenarioScoreRead], AggregateScoreRead]:
     scored = []
     inherent_impacts = {}
@@ -33,13 +54,14 @@ def _recalculate_in_session(db: Session, a: Assessment) -> tuple[list[ScenarioSc
     # controls. Unmatched weaknesses don't count here — they're either folded
     # into emergent scenarios by cross_correlation or surfaced as advisory
     # findings, but they don't move a mapped scenario's residual.
-    weaknesses_by_code: dict[str, list[tuple[int, str, list[str]]]] = {}
+    weaknesses_by_code: dict[str, list[tuple[int, str, list[str], str]]] = {}
     for w in a.weaknesses:
         if w.unmatched:
             continue
         codes = list(w.mapped_control_codes or [])
+        strength = _evidence_strength(w)
         for code in codes:
-            weaknesses_by_code.setdefault(code, []).append((w.id, w.severity, codes))
+            weaknesses_by_code.setdefault(code, []).append((w.id, w.severity, codes, strength))
 
     for s in a.scenarios:
         ec_codes = [ec.code for ec in s.expected_controls]
@@ -49,12 +71,16 @@ def _recalculate_in_session(db: Session, a: Assessment) -> tuple[list[ScenarioSc
         seen: set[int] = set()
         scenario_weaknesses: list[WeaknessInput] = []
         for code in ec_codes:
-            for w_id, sev, w_codes in weaknesses_by_code.get(code, []):
+            for w_id, sev, w_codes, strength in weaknesses_by_code.get(code, []):
                 if w_id in seen:
                     continue
                 seen.add(w_id)
                 scenario_weaknesses.append(
-                    WeaknessInput(severity=sev, mapped_control_codes=list(w_codes))
+                    WeaknessInput(
+                        severity=sev,
+                        mapped_control_codes=list(w_codes),
+                        evidence_strength=strength,
+                    )
                 )
 
         controls = [
@@ -102,10 +128,11 @@ def _recalculate_in_session(db: Session, a: Assessment) -> tuple[list[ScenarioSc
             inherent_likelihood=s.inherent_likelihood,
             coverage_index=res.coverage_index,
             likelihood_reduction=res.likelihood_reduction,
-            combined_uplift=res.combined_uplift,
-            meta_uplift_raw=res.meta_uplift_raw,
-            weakness_uplift_raw=res.weakness_uplift_raw,
-            effectiveness_downgrades=list(res.effectiveness_downgrades),
+            uplift=res.uplift,
+            distinct_high_critical=res.distinct_high_critical,
+            auditor_tested_high_critical=res.auditor_tested_high_critical,
+            confidence=res.confidence,
+            state_downgrades=list(res.state_downgrades),
             rationale=s.rationale,
         )
         for s, res in scored
@@ -115,6 +142,7 @@ def _recalculate_in_session(db: Session, a: Assessment) -> tuple[list[ScenarioSc
         rank=agg.rank,
         weighted_mean_rank=agg.weighted_mean_rank,
         top2_mean_rank=agg.top2_mean_rank,
+        confidence=agg.confidence,
     )
     return scenario_reads, aggregate_read
 

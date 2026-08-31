@@ -9,14 +9,14 @@ function driverLine(s: ScenarioScoreRead): string {
   const parts = [
     `Coverage ${formatPercent(s.coverage_index)} → −${s.likelihood_reduction} likelihood`,
   ];
-  if (s.combined_uplift > 0) {
-    const causes: string[] = [];
-    if (s.weakness_uplift_raw > 0) causes.push("weaknesses");
-    if (s.meta_uplift_raw > 0) causes.push("assessment gaps");
-    parts.push(`uplift +${s.combined_uplift} from ${causes.join(" & ") || "issues"}`);
+  if (s.uplift > 0) {
+    parts.push(`uplift +${s.uplift} (${s.distinct_high_critical} distinct high/critical, ${s.auditor_tested_high_critical} auditor-tested)`);
   }
-  if (s.effectiveness_downgrades.length > 0) {
-    parts.push(`${s.effectiveness_downgrades.length} control(s) downgraded by high/critical findings`);
+  if (s.state_downgrades.length > 0) {
+    parts.push(`${s.state_downgrades.length} control state(s) downgraded by findings`);
+  }
+  if (s.confidence !== "high") {
+    parts.push(`${s.confidence} evidence confidence`);
   }
   return parts.join(" · ");
 }
@@ -70,23 +70,24 @@ export function ScoreExplanation({
                 <Cell label="Likelihood reduction" value={`-${s.likelihood_reduction}`} />
                 <Cell
                   label="Uplift applied"
-                  value={`+${s.combined_uplift}`}
-                  hint={`meta ${s.meta_uplift_raw.toFixed(2)} + weaknesses ${s.weakness_uplift_raw.toFixed(2)}, capped`}
+                  value={`+${s.uplift}`}
+                  hint={`${s.distinct_high_critical} distinct high/critical deficiencies (${s.auditor_tested_high_critical} auditor-tested); residual > inherent only when auditor-tested`}
                 />
                 <Cell
-                  label="Downgrades"
-                  value={s.effectiveness_downgrades.length > 0 ? s.effectiveness_downgrades.join(", ") : "—"}
+                  label="State downgrades"
+                  value={s.state_downgrades.length > 0 ? s.state_downgrades.join(", ") : "—"}
                 />
+                <Cell label="Evidence confidence" value={s.confidence} />
               </div>
 
               {meta.length > 0 && (
                 <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
-                  <div className="font-medium mb-0.5">Assessment-quality uplift drivers</div>
+                  <div className="font-medium mb-0.5">Evidence-quality signals (reported as confidence, not scored)</div>
                   <ul className="space-y-0.5">
                     {meta.map((m) => (
                       <li key={m.id}>
                         <span className="font-medium">{m.kind.replace(/_/g, " ")}</span>
-                        {m.target_ref ? ` (${m.target_ref})` : ""} — +{m.weight}
+                        {m.target_ref ? ` (${m.target_ref})` : ""}
                       </li>
                     ))}
                   </ul>

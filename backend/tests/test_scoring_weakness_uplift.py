@@ -1,203 +1,77 @@
-"""Engine-level tests for the weakness scoring path.
+"""Phase 5: weaknesses change control state; uplift is bounded and evidence-gated."""
 
-Three integrations to verify:
-  1. Force-downgrade `strong` → `adequate` when a high-severity weakness is
-     mapped onto the control's code.
-  2. Per-scenario weakness uplift on residual likelihood.
-  3. Combined `meta_uplift + weakness_uplift` capped at the existing
-     `_META_UPLIFT_CAP=2.0` (no double-counting blowing past the band envelope).
-"""
-
-from __future__ import annotations
-
-from app.scoring.engine import (
-    ControlInput,
-    MetaIssueInput,
-    ScenarioInput,
-    WeaknessInput,
-    score_scenario,
-)
+from app.scoring.engine import ControlInput, ScenarioInput, WeaknessInput, score_scenario
 
 
-def test_high_severity_weakness_downgrades_strong_to_adequate():
-    s = ScenarioInput(
-        code="X",
-        inherent_impact=3,
-        inherent_likelihood=4,
-        controls=[
-            ControlInput(
-                code="IAM.MFA",
-                name="MFA",
-                weight=1.0,
-                coverage="full",
-                effectiveness="strong",
-            ),
-        ],
-        weaknesses=[
-            WeaknessInput(severity="high", mapped_control_codes=["IAM.MFA"]),
-        ],
-    )
-    score = score_scenario(s)
-    assert "IAM.MFA" in score.effectiveness_downgrades
-    # full+strong → 1.0 reduction → 3 bands. After downgrade to adequate
-    # (full+adequate=0.8 → 2 bands).
-    assert score.likelihood_reduction == 2
-    assert score.rationale_breakdown["effectiveness_downgrades"] == ["IAM.MFA"]
+def _ctrl(code="IAM.MFA", coverage="full", effectiveness="strong"):
+    return ControlInput(code=code, name=code, weight=1.0, coverage=coverage, effectiveness=effectiveness)
 
 
-def test_medium_severity_does_not_downgrade_strong():
-    s = ScenarioInput(
-        code="X",
-        inherent_impact=3,
-        inherent_likelihood=4,
-        controls=[
-            ControlInput(
-                code="IAM.MFA",
-                name="MFA",
-                weight=1.0,
-                coverage="full",
-                effectiveness="strong",
-            ),
-        ],
-        weaknesses=[
-            WeaknessInput(severity="medium", mapped_control_codes=["IAM.MFA"]),
-        ],
-    )
-    score = score_scenario(s)
-    assert score.effectiveness_downgrades == []
-    assert score.likelihood_reduction == 3  # full+strong unchanged
+def _w(sev, codes=("IAM.MFA",), strength="vendor_admitted"):
+    return WeaknessInput(severity=sev, mapped_control_codes=list(codes), evidence_strength=strength)
 
 
-def test_critical_weakness_lifts_residual_likelihood():
-    base = ScenarioInput(
-        code="X",
-        inherent_impact=3,
-        inherent_likelihood=2,
-        controls=[
-            ControlInput(
-                code="ENC.REST",
-                name="enc",
-                weight=1.0,
-                coverage="full",
-                effectiveness="adequate",
-            ),
-        ],
-    )
-    base_score = score_scenario(base)
-
-    with_weak = ScenarioInput(
-        code="X",
-        inherent_impact=3,
-        inherent_likelihood=2,
-        controls=[
-            ControlInput(
-                code="ENC.REST",
-                name="enc",
-                weight=1.0,
-                coverage="full",
-                effectiveness="adequate",
-            ),
-        ],
-        weaknesses=[
-            WeaknessInput(severity="critical", mapped_control_codes=["ENC.REST"]),
-        ],
-    )
-    weak_score = score_scenario(with_weak)
-    assert weak_score.weakness_uplift_raw >= 1.0
-    assert weak_score.combined_uplift >= 1
-    assert weak_score.residual_likelihood >= base_score.residual_likelihood
+def test_high_severity_forces_control_to_weak_state():
+    s = score_scenario(ScenarioInput(
+        code="X", inherent_impact=3, inherent_likelihood=3,
+        controls=[_ctrl()], weaknesses=[_w("high")]))
+    # full/strong 1.0 → full/weak 0.5 → reduction 2 (was 3)
+    assert s.coverage_index == 0.5 and s.likelihood_reduction == 2
+    assert s.state_downgrades == ["IAM.MFA: strong→weak (high)"]
 
 
-def test_combined_uplift_capped_at_two_bands():
-    """Even with maxed-out meta and weakness uplift, total uplift never exceeds
-    the existing _META_UPLIFT_CAP=2.0 band envelope."""
-    s = ScenarioInput(
-        code="X",
-        inherent_impact=4,
-        inherent_likelihood=4,
-        controls=[
-            ControlInput(
-                code="X.A",
-                name="a",
-                weight=1.0,
-                coverage="full",
-                effectiveness="adequate",
-            ),
-        ],
-        meta_issues=[
-            MetaIssueInput(kind="insufficient_info"),
-            MetaIssueInput(kind="conflicting_evidence"),
-        ],
-        weaknesses=[
-            WeaknessInput(severity="critical", mapped_control_codes=["X.A"]),
-            WeaknessInput(severity="critical", mapped_control_codes=["X.A"]),
-        ],
-    )
-    score = score_scenario(s)
-    assert score.combined_uplift <= 2
+def test_medium_caps_at_adequate_low_changes_nothing():
+    s = score_scenario(ScenarioInput(
+        code="X", inherent_impact=3, inherent_likelihood=3,
+        controls=[_ctrl()], weaknesses=[_w("medium")]))
+    assert s.coverage_index == 0.8 and s.state_downgrades == ["IAM.MFA: strong→adequate (medium)"]
+    s2 = score_scenario(ScenarioInput(
+        code="X", inherent_impact=3, inherent_likelihood=3,
+        controls=[_ctrl()], weaknesses=[_w("low")]))
+    assert s2.coverage_index == 1.0 and s2.state_downgrades == []
 
 
-def test_uplift_components_reported_faithfully():
-    """When meta saturates the 2.0 cap, the old int split reported
-    weakness_uplift=0 despite real weaknesses. The raws must stay faithful and
-    combined_uplift must equal what was applied to the residual."""
-    s = ScenarioInput(
-        code="X",
-        inherent_impact=4,
-        inherent_likelihood=1,
-        controls=[
-            ControlInput(
-                code="X.A",
-                name="a",
-                weight=1.0,
-                coverage="none",
-                effectiveness="unknown",
-            ),
-        ],
-        meta_issues=[
-            MetaIssueInput(kind="insufficient_info"),  # 1.0
-            MetaIssueInput(kind="conflicting_evidence"),  # 1.0 → meta raw = 2.0 (cap)
-        ],
-        weaknesses=[
-            WeaknessInput(severity="critical", mapped_control_codes=["X.A"]),  # 1.0
-            WeaknessInput(severity="high", mapped_control_codes=["X.A"]),  # 0.75 → 1.75, capped to 1.5
-        ],
-    )
-    score = score_scenario(s)
-    assert score.meta_uplift_raw == 2.0
-    assert score.weakness_uplift_raw == 1.5
-    assert score.combined_uplift == 2  # cap applied to the combination
-    # applied uplift is visible in the residual: 1 + 0 reduction + 2 = 3
-    assert score.residual_likelihood == 3
+def test_many_medium_rows_add_no_uplift():
+    """The additive-by-count failure: 40 mediums used to max the residual."""
+    s = score_scenario(ScenarioInput(
+        code="X", inherent_impact=3, inherent_likelihood=3,
+        controls=[_ctrl()], weaknesses=[_w("medium") for _ in range(40)]))
+    assert s.uplift == 0
+    assert s.residual_likelihood <= 3  # never above inherent
+
+
+def test_uplift_needs_one_critical_or_two_high():
+    one_high = score_scenario(ScenarioInput(
+        code="X", inherent_impact=3, inherent_likelihood=2,
+        controls=[_ctrl(coverage="none", effectiveness="unknown")], weaknesses=[_w("high")]))
+    assert one_high.uplift == 0
+    two_high = score_scenario(ScenarioInput(
+        code="X", inherent_impact=3, inherent_likelihood=2,
+        controls=[_ctrl(coverage="none", effectiveness="unknown")],
+        weaknesses=[_w("high"), _w("high", codes=("ENC.REST",))]))
+    assert two_high.uplift == 1
+    one_crit = score_scenario(ScenarioInput(
+        code="X", inherent_impact=3, inherent_likelihood=2,
+        controls=[_ctrl(coverage="none", effectiveness="unknown")], weaknesses=[_w("critical")]))
+    assert one_crit.uplift == 1
+
+
+def test_residual_capped_at_inherent_unless_auditor_tested():
+    vendor_only = score_scenario(ScenarioInput(
+        code="X", inherent_impact=3, inherent_likelihood=2,
+        controls=[_ctrl(coverage="none", effectiveness="unknown")],
+        weaknesses=[_w("critical"), _w("high", codes=("ENC.REST",))]))
+    assert vendor_only.residual_likelihood == 2  # uplift earned but capped at inherent
+    audited = score_scenario(ScenarioInput(
+        code="X", inherent_impact=3, inherent_likelihood=2,
+        controls=[_ctrl(coverage="none", effectiveness="unknown")],
+        weaknesses=[_w("critical", strength="auditor_tested")]))
+    assert audited.residual_likelihood == 3  # may exceed inherent by exactly one
+    assert audited.rationale_breakdown["residual_ceiling"] == 3
 
 
 def test_unmapped_weakness_does_not_affect_score():
-    """A weakness with no overlapping mapped_control_codes is filtered out
-    upstream by _recalculate_in_session, but if it ever reaches the engine
-    it still doesn't move the score because the engine looks at
-    `mapped_control_codes` to decide downgrades, and the uplift fires only
-    via the same intersection logic upstream. We verify the engine itself
-    is well-behaved when mapped_control_codes is empty."""
-    s = ScenarioInput(
-        code="X",
-        inherent_impact=3,
-        inherent_likelihood=3,
-        controls=[
-            ControlInput(
-                code="ENC.REST",
-                name="enc",
-                weight=1.0,
-                coverage="full",
-                effectiveness="strong",
-            ),
-        ],
-        weaknesses=[
-            WeaknessInput(severity="critical", mapped_control_codes=[]),
-        ],
-    )
-    score = score_scenario(s)
-    # The engine still applies severity-based uplift even without mapped codes
-    # — the intersection is enforced by the recalc layer above. Effectiveness
-    # downgrade does require a mapped code, so a strong control with no
-    # matching code stays strong.
-    assert score.effectiveness_downgrades == []
+    s = score_scenario(ScenarioInput(
+        code="X", inherent_impact=3, inherent_likelihood=3,
+        controls=[_ctrl()], weaknesses=[WeaknessInput(severity="critical", mapped_control_codes=[])]))
+    assert s.coverage_index == 1.0 and s.uplift == 0 and s.distinct_high_critical == 0

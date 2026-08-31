@@ -272,10 +272,14 @@ class ScenarioScoreRead(BaseModel):
     inherent_likelihood: int
     coverage_index: float
     likelihood_reduction: int
-    combined_uplift: int
-    meta_uplift_raw: float
-    weakness_uplift_raw: float
-    effectiveness_downgrades: list[str] = Field(default_factory=list)
+    # Phase 5 scoring: bounded 0/1 uplift gated on distinct high/critical
+    # deficiencies; confidence is the evidence-quality label (meta issues no
+    # longer move the score).
+    uplift: int
+    distinct_high_critical: int
+    auditor_tested_high_critical: int
+    confidence: str
+    state_downgrades: list[str] = Field(default_factory=list)
     rationale: str
 
 
@@ -284,6 +288,9 @@ class AggregateScoreRead(BaseModel):
     rank: int
     weighted_mean_rank: float
     top2_mean_rank: float
+    # Worst scenario confidence — how much the evidence quality qualifies the
+    # band, reported instead of scored (Phase 5).
+    confidence: str = "high"
 
 
 class KeyRiskRead(BaseModel):

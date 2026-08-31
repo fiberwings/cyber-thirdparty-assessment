@@ -118,6 +118,8 @@ async def confirm_candidates(
                 continue
             decided.add(d.id)
             w.status = d.decision
+            if d.severity and d.decision == "confirmed":
+                w.severity = d.severity  # by consequence, judged with the bundle
             w.review = {
                 "decision": d.decision,
                 "confidence": d.confidence,
@@ -125,6 +127,8 @@ async def confirm_candidates(
                 "at": _now(),
                 "stage": "confirmation",
             }
+            if d.evidence_strength:
+                w.review["evidence_strength"] = d.evidence_strength
             counts[d.decision] += 1
         for wid, w in wanted.items():
             if wid in decided:

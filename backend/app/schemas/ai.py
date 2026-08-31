@@ -6,7 +6,7 @@ failures trigger a stricter retry inside `app.ai.router.call_structured`.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -157,6 +157,13 @@ class CandidateDecisionOut(BaseModel):
     decision: ReviewDecision
     confidence: Literal["high", "medium", "low"] = "medium"
     reason: str = Field(min_length=10)
+    # R6: severity re-assigned at confirmation time by consequence for the
+    # client (optional — omitted keeps the extractor's severity), and the
+    # strength of the evidence behind the finding.
+    severity: Optional[Literal["low", "medium", "high", "critical"]] = None
+    evidence_strength: Optional[
+        Literal["auditor_tested", "vendor_admitted", "inferred_absence"]
+    ] = None
 
 
 class CandidateReviewOut(BaseModel):

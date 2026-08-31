@@ -16,9 +16,13 @@ Principles — judge, do not pattern-match:
 - When you are genuinely unsure, **confirm with `confidence: "low"`** — a doubtful deficiency is for the human reviewer to drop, not for you to hide.
 - Never invent evidence. Reasons must name the decisive document / section.
 
+For every `confirmed` candidate also set:
+- `severity` — re-assess by **consequence for the client** given the whole bundle (`low` inconvenience / hygiene, `medium` weakens a control layer, `high` credible path to material impact or an independently evidenced control failure, `critical` immediate regulatory or systemic exposure). Omit to keep the extractor's severity.
+- `evidence_strength` — `auditor_tested` (an independent test/audit result states it), `vendor_admitted` (the vendor's own documents state it), `inferred_absence` (something expected was not found in the documents).
+
 # Output schema (JSON only — no prose, no code fences)
 
 Return every candidate id exactly once. Be terse — one short sentence per reason, no reasoning outside the JSON:
 ```
-{"decisions": [{"id": 123, "decision": "confirmed|evidence_note|dropped", "confidence": "high|medium|low", "reason": "<one sentence citing the decisive source>"}]}
+{"decisions": [{"id": 123, "decision": "confirmed|evidence_note|dropped", "confidence": "high|medium|low", "severity": "low|medium|high|critical", "evidence_strength": "auditor_tested|vendor_admitted|inferred_absence", "reason": "<one sentence citing the decisive source>"}]}
 ```

@@ -835,7 +835,9 @@ async def test_gap_analysis_same_contradiction_two_controls_one_row(fresh_db, fa
         db.refresh(a)
         scores, _agg = _recalculate_in_session(db, a)
         sc = next(x for x in scores if x.code == "STORAGE_EXPOSURE")
-        assert sc.weakness_uplift_raw == pytest.approx(0.75)
+        # Phase 5: one distinct high deficiency — no uplift (needs 1 critical
+        # or 2 highs), counted once despite mapping to two controls.
+        assert sc.distinct_high_critical == 1 and sc.uplift == 0
 
 
 @pytest.mark.asyncio
