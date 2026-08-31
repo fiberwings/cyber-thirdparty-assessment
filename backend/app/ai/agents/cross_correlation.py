@@ -263,6 +263,7 @@ def _force_emergent_for_unmapped(
         .filter(
             Weakness.assessment_id == assessment_id,
             Weakness.unmatched.is_(True),
+            Weakness.status == "confirmed",
             Weakness.severity.in_(["high", "critical"]),
         )
         .all()
@@ -343,12 +344,25 @@ async def run(
     a = db.get(Assessment, assessment_id)
     if a is None:
         raise ValueError(f"Assessment {assessment_id} not found")
+
+    # R3/R4: review extracted candidates against the whole bundle first, then
+    # consolidate; only confirmed rows are correlated and scored.
+    from app.ai.agents import confirmation as confirm_agent
+
+    async def review_progress(p: float, detail: str):
+        if on_progress:
+            await on_progress(0.3 * p, f"Confirming candidates — {detail}")
+
+    review_counts = await confirm_agent.review(
+        db, assessment_id, client=client, on_progress=review_progress
+    )
+    a = db.get(Assessment, assessment_id)
     scenarios = list(a.scenarios)
     weaknesses = [w for w in a.weaknesses if w.unmatched]
     if not weaknesses:
         if on_progress:
             await on_progress(1.0, "No unmatched weaknesses; nothing to correlate.")
-        return {"mapped": 0, "emergent_proposed": 0, "forced_emergent": 0, "unscored": 0}
+        return {"mapped": 0, "emergent_proposed": 0, "forced_emergent": 0, "unscored": 0, **{f"review_{k}": v for k, v in review_counts.items()}}
 
     # Valid control codes the reasoner may map to: codes from existing
     # scenarios. The catalogue is for emergent scenario *expected_controls*

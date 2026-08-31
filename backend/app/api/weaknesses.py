@@ -13,9 +13,14 @@ router = APIRouter(prefix="/api/assessments", tags=["weaknesses"])
 
 
 @router.get("/{assessment_id}/weaknesses", response_model=list[WeaknessRead])
-def list_weaknesses(assessment_id: int, db: Session = Depends(db_session)):
+def list_weaknesses(
+    assessment_id: int, include: str = "confirmed", db: Session = Depends(db_session)
+):
+    """Reported weaknesses (status confirmed). `include=all` also returns
+    candidates, evidence notes, dropped and merged rows with their review."""
     a = get_assessment(assessment_id, db)
-    return [WeaknessRead.model_validate(w) for w in a.weaknesses]
+    rows = a.all_weaknesses if include == "all" else a.weaknesses
+    return [WeaknessRead.model_validate(w) for w in sorted(rows, key=lambda w: w.id)]
 
 
 @router.post(

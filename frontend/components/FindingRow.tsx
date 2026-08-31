@@ -47,15 +47,40 @@ export function FindingRow({ weakness, documentId }: { weakness: WeaknessRead; d
     });
   };
 
+  const status = weakness.status ?? "confirmed";
+  const notReported = status !== "confirmed";
+  const statusLabel: Record<string, string> = {
+    candidate: "awaiting review",
+    evidence_note: "evidence note",
+    dropped: "dropped",
+    merged: "merged",
+  };
+  const reviewReason = weakness.review?.reason || weakness.review?.merge_reason || "";
+
   return (
     <li
       className={`group flex gap-3 px-4 py-3 border-t border-ink-100 first:border-t-0 ${
         canOpen ? "cursor-pointer hover:bg-ink-50" : ""
-      }`}
+      } ${notReported ? "opacity-60" : ""}`}
       onClick={refs ? undefined : handle}
     >
       <SeverityBadge severity={weakness.severity} className="mt-0.5 shrink-0 w-[68px]" />
       <div className="min-w-0 flex-1">
+        {notReported && (
+          <div className="mb-0.5 flex items-center gap-1.5">
+            <span
+              className="text-[9px] uppercase tracking-wider text-ink-600 bg-ink-100 border border-ink-200 rounded px-1.5 py-0.5"
+              title={reviewReason}
+            >
+              {statusLabel[status] ?? status}
+              {weakness.review?.merged_into ? ` into #${weakness.review.merged_into}` : ""}
+            </span>
+            {reviewReason && <span className="text-[10px] text-ink-500 line-clamp-1">{reviewReason}</span>}
+          </div>
+        )}
+        {!notReported && weakness.review?.unreviewed && (
+          <div className="mb-0.5 text-[10px] text-amber-700">kept without model review — check manually</div>
+        )}
         <div className="text-sm text-ink-800 leading-snug">{weakness.description}</div>
         {refs ? (
           <ul className="mt-1 space-y-0.5">

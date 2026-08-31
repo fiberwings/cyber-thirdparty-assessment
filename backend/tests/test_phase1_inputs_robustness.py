@@ -325,3 +325,33 @@ def test_settings_endpoint_and_per_control_rerun(client, fake_client):
     # durable task row exists
     with SessionLocal() as db:
         assert db.get(TaskRecord, tid).status == "done"
+
+
+@pytest.mark.asyncio
+async def test_questionnaire_window_splits_when_output_truncates(fresh_db, fake_client, monkeypatch):
+    """A dense sheet whose OUTPUT overflows the budget is split by section, never capped."""
+    monkeypatch.setattr(document_weaknesses, "QUESTIONNAIRE_WINDOW_MAX_TOKENS", 100_000)  # one window
+    fake_client.push_truncated("")  # single-call path (router enlarges once → second truncation)
+    fake_client.push_truncated("")
+    fake_client.push_truncated("")  # window 1 of 1 at 8192
+    fake_client.push_truncated("")  # …enlarged to 16384, still truncated → split
+    row = {"severity": "medium", "description": "MFA is not enforced.", "quote": "Q: MFA? A: No",
+           "section_path": "Sheet 'A' (rows 1-2)", "page": None,
+           "kind_signal": "questionnaire_negative", "suggested_control_codes": []}
+    fake_client.push_json({"weaknesses": [row]})  # half a (sheet A)
+    fake_client.push_json({"weaknesses": [{**row, "quote": "Q: SIEM? A: No", "section_path": "Sheet 'B' (rows 1-2)"}]})  # half b
+    with SessionLocal() as db:
+        a = Assessment(vendor_name="Acme")
+        db.add(a)
+        db.flush()
+        doc = Document(assessment_id=a.id, kind="questionnaire", filename="sig.xlsx",
+                       mime="application/x", sha256="x", size_bytes=1)
+        db.add(doc)
+        db.flush()
+        for i, sheet in enumerate("AB"):
+            db.add(Chunk(document_id=doc.id, page=None, section_path=f"Sheet '{sheet}' (rows 1-2)",
+                         ord=i, text=f"Q: control {sheet}? A: No. " * 8))
+        db.commit()
+        assert await document_weaknesses.extract(db, doc.id, client=fake_client) == 2
+    labels = [c["messages"][1]["content"].split("# Window ")[1].split(":")[0] for c in fake_client.calls[2:]]
+    assert labels == ["1 of 1", "1 of 1", "1 of 1a", "1 of 1b"]

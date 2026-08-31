@@ -65,8 +65,16 @@ class Assessment(Base):
     scenarios: Mapped[list["Scenario"]] = relationship(
         back_populates="assessment", cascade="all, delete-orphan"
     )
-    weaknesses: Mapped[list["Weakness"]] = relationship(
+    # Every weakness row regardless of review status (owns the cascade).
+    all_weaknesses: Mapped[list["Weakness"]] = relationship(
         back_populates="assessment", cascade="all, delete-orphan"
+    )
+    # Reported weaknesses only — the rows that score, map, and appear in the
+    # report. Candidates awaiting review, evidence notes, dropped and merged
+    # rows are excluded (see Weakness.status).
+    weaknesses: Mapped[list["Weakness"]] = relationship(
+        primaryjoin="and_(Weakness.assessment_id == Assessment.id, Weakness.status == 'confirmed')",
+        viewonly=True,
     )
     meta_issues: Mapped[list["MetaIssue"]] = relationship(
         back_populates="assessment", cascade="all, delete-orphan"
@@ -291,8 +299,17 @@ class Weakness(Base):
     # keep re-runs idempotent (a target re-run drops its claim; a row with no
     # remaining claimants is removed).
     origin_refs: Mapped[list] = mapped_column(JSON, default=list)
+    # Review status (R3/R4): "candidate" (extracted, not yet reviewed against
+    # the bundle) | "confirmed" (reported, scored) | "evidence_note" (true
+    # and useful context, not a deficiency) | "dropped" (unsupported or
+    # misread) | "merged" (same deficiency as another row; see review).
+    # Rows created by gap analysis or by users are confirmed directly.
+    status: Mapped[str] = mapped_column(String(20), default="confirmed")
+    # Audit trail of the review: {decision, reason, confidence, model_id, at,
+    # merged_into?, members?}. Every non-confirmed status carries a reason.
+    review: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
-    assessment: Mapped[Assessment] = relationship(back_populates="weaknesses")
+    assessment: Mapped[Assessment] = relationship(back_populates="all_weaknesses")
     chunk: Mapped[Optional[Chunk]] = relationship()
     document: Mapped[Optional[Document]] = relationship(back_populates="weaknesses")
 

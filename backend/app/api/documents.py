@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.ai.agents import cross_correlation as corr_agent
 from app.ai.agents import document_weaknesses as docw_agent
 from app.api.deps import db_session, get_assessment
 from app.api.serializers import serialize_document
@@ -18,7 +17,7 @@ from app.models import Chunk, Document
 from app.parsing import parse_document
 from app.schemas.api import ChunkRead, DocumentRead
 from app.storage.files import signed_token, store_file, verify_token
-from app.tasks import mark_phase_done, mark_phase_error, mark_phase_started, registry
+from app.tasks import registry
 
 router = APIRouter(prefix="/api", tags=["documents"])
 
@@ -105,34 +104,12 @@ async def upload_document(
             await docw_agent.extract(
                 inner, doc_id, on_progress=extract_progress
             )
-            unprocessed = (
-                inner.query(Document)
-                .filter(
-                    Document.assessment_id == assessment_id,
-                    Document.weakness_extracted_at.is_(None),
-                )
-                .count()
-            )
-
-        if unprocessed == 0:
-            await handle.update(progress=0.85, detail="All documents extracted; cross-correlating...")
-
-            async def corr_progress(p: float, detail: str):
-                await handle.update(
-                    progress=0.85 + p * 0.15,
-                    detail=f"Correlation: {detail}",
-                )
-
-            mark_phase_started(assessment_id, "cross_correlation", handle.id)
-            try:
-                with SessionLocal() as inner:
-                    await corr_agent.run(
-                        inner, assessment_id, on_progress=corr_progress
-                    )
-                mark_phase_done(assessment_id, "cross_correlation")
-            except Exception as e:
-                mark_phase_error(assessment_id, "cross_correlation", str(e))
-                raise
+        # Extraction only. Confirmation against the whole bundle, merge and
+        # cross-correlation run in the explicit cross-correlate step (R3):
+        # doing them per upload would judge candidates against a partial
+        # bundle. The evidence phase therefore stays "pending" until that
+        # step is run (analysis page, step 2).
+        await handle.update(progress=1.0, detail="Extracted candidates")
 
     handle = registry.submit(job, kind="cross_correlation", assessment_id=assessment_id)
     # Attach the task id to the response so the frontend can poll

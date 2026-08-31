@@ -99,7 +99,8 @@ export const api = {
     http<{ task_id: string }>(`/api/assessments/${id}/narratives/run`, { method: "POST" }),
   runExecutiveSummary: (id: number) =>
     http<{ task_id: string }>(`/api/assessments/${id}/executive-summary/run`, { method: "POST" }),
-  listWeaknesses: (id: number) => http<WeaknessRead[]>(`/api/assessments/${id}/weaknesses`),
+  listWeaknesses: (id: number, includeAll = false) =>
+    http<WeaknessRead[]>(`/api/assessments/${id}/weaknesses${includeAll ? "?include=all" : ""}`),
   report: (id: number) => http<ReportOut>(`/api/assessments/${id}/report`),
 
   // models

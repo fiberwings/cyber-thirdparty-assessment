@@ -285,6 +285,9 @@ def _build_weakness_row(
         unmatched=True,
         kind_signal=w.kind_signal,
         dedupe_key=_dedupe_key(assessment_id, w.quote, chunk_id),
+        # R3: extraction produces candidates; the bundle-aware review
+        # (confirmation agent) decides what is reported.
+        status="candidate",
     )
 
 
@@ -356,14 +359,18 @@ async def _extract_questionnaire_windowed(
     n = len(windows)
     inserted = 0
     failures: list[BaseException] = []
-    for i, win in enumerate(windows):
+
+    async def extract_window(win: list[Chunk], label: str) -> int:
+        """One extraction call for a window; a window whose OUTPUT truncates
+        (dense sheets: one row per negative answer) is split in half and each
+        half extracted — down to single sections. Nothing is capped."""
         first_sec = win[0].section_path or "(root)"
         last_sec = win[-1].section_path or "(root)"
         user_block = (
             f"{header}\n"
             f"# Vendor service: {vendor_name}\n"
             f"# Document: {doc.filename} (kind: {doc.kind})\n"
-            f"# Window {i + 1} of {n}: sections \"{first_sec}\" … \"{last_sec}\" "
+            f"# Window {label}: sections \"{first_sec}\" … \"{last_sec}\" "
             "(other windows are extracted separately — report only what is in this window)\n\n"
             f"{_render_chunks(win)}"
         )
@@ -383,15 +390,28 @@ async def _extract_questionnaire_windowed(
                 client=client,
             )
         except OpenRouterError as e:
-            failures.append(e)
-            continue
+            sections = _group_by_section(win)
+            if not e.truncated or len(sections) < 2:
+                raise
+            secs = list(sections.values())
+            mid = len(secs) // 2
+            left = [c for sec in secs[:mid] for c in sec]
+            right = [c for sec in secs[mid:] for c in sec]
+            return await extract_window(left, label + "a") + await extract_window(right, label + "b")
         rows = [
             _build_weakness_row(
                 w=w, assessment_id=assessment_id, document_id=doc.id, chunks=chunks
             )
             for w in out.weaknesses
         ]
-        inserted += _persist_rows(rows)
+        return _persist_rows(rows)
+
+    for i, win in enumerate(windows):
+        try:
+            inserted += await extract_window(win, f"{i + 1} of {n}")
+        except OpenRouterError as e:
+            failures.append(e)
+            continue
         if on_progress:
             await on_progress(
                 0.15 + 0.85 * (i + 1) / n,

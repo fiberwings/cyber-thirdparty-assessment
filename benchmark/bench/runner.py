@@ -151,10 +151,11 @@ def run_pipeline(
 
         with timed("report"):
             report = client.get_report(assessment_id)
-    except StageError:
+    except StageError as e:
+        e.assessment_id = assessment_id
         raise
     except Exception as e:  # httpx errors etc. — attribute to the last stage
-        raise StageError("pipeline", str(e)) from e
+        raise StageError("pipeline", str(e), assessment_id) from e
 
     return assessment_id, report, timings
 
@@ -627,6 +628,8 @@ def run_one(
             status = "error"
             cr.error_stage = e.stage
             cr.error_detail = e.detail
+            assessment_id = e.assessment_id
+            cr.assessment_id = assessment_id  # keep the link for debugging / bench grade
             raise
 
         status = _grade_and_persist(session, cr, client, case, report, config)

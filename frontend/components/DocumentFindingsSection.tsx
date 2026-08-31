@@ -25,8 +25,12 @@ export function DocumentFindingsSection({
   onDelete: (id: number) => void;
   searchActive: boolean;
 }) {
-  const counts = severityCounts(weaknesses);
-  const total = weaknesses.length;
+  // Header counts reflect reported rows only; the list still shows
+  // candidates, evidence notes, dropped and merged rows with their status.
+  const reported = weaknesses.filter((w) => (w.status ?? "confirmed") === "confirmed");
+  const counts = severityCounts(reported);
+  const total = reported.length;
+  const notReported = weaknesses.length - total;
   const empty = total === 0;
   // When a search is active, force-open sections that have matches and
   // force-close sections that don't, so the filter result is obvious.
@@ -54,6 +58,14 @@ export function DocumentFindingsSection({
             <span className="text-[10px] uppercase tracking-wider text-ink-500 bg-ink-100 rounded px-1.5 py-0.5">
               {doc.kind}
             </span>
+            {notReported > 0 && (
+              <span
+                className="text-[10px] uppercase tracking-wider text-ink-500 bg-ink-50 border border-ink-200 rounded px-1.5 py-0.5"
+                title="Candidates the bundle-aware review did not report (dropped, evidence notes, merged)"
+              >
+                {notReported} not reported
+              </span>
+            )}
             {!doc.parsed_at && (
               <span className="text-[10px] uppercase tracking-wider text-amber-700 bg-amber-50 rounded px-1.5 py-0.5">
                 queued

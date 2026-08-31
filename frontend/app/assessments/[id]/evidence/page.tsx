@@ -43,7 +43,9 @@ export default function EvidencePage({ params }: { params: Promise<{ id: string 
   });
   const { data: weaknesses } = useQuery({
     queryKey: ["weaknesses", aid],
-    queryFn: () => api.listWeaknesses(aid),
+    // The evidence page shows every extracted candidate with its review
+    // outcome (dropped / evidence note / merged), not only reported rows.
+    queryFn: () => api.listWeaknesses(aid, true),
   });
   const { data: scenarios } = useQuery({
     queryKey: ["scenarios", aid],

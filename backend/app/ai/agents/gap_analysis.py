@@ -101,6 +101,7 @@ def _known_weaknesses_for_control(
         .filter(
             Weakness.assessment_id == assessment_id,
             Weakness.origin != GAP_ANALYSIS_ORIGIN,
+            Weakness.status == "confirmed",
         )
         .order_by(Weakness.id)
         .all()

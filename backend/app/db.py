@@ -69,6 +69,9 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("control_assessment", "last_error", "TEXT"),
     ("control_assessment", "last_run_at", "DATETIME"),
     ("model_call", "cached", "BOOLEAN NOT NULL DEFAULT 0"),
+    # Accuracy program Phase 3 (R3/R4): legacy rows are reported rows
+    ("weakness", "status", "VARCHAR(20) NOT NULL DEFAULT 'confirmed'"),
+    ("weakness", "review", "JSON"),
 ]
 
 _POST_MIGRATION_INDEXES: list[str] = [

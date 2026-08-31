@@ -222,6 +222,9 @@ class WeaknessRead(BaseModel):
     origin: str = "document"
     evidence_refs: list = Field(default_factory=list)
     origin_refs: list = Field(default_factory=list)
+    # candidate | confirmed | evidence_note | dropped | merged (+ review audit)
+    status: str = "confirmed"
+    review: Optional[dict] = None
 
     class Config:
         from_attributes = True

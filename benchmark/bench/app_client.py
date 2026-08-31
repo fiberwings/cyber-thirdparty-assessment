@@ -19,11 +19,14 @@ from .config import settings
 
 
 class StageError(Exception):
-    """A pipeline stage failed or timed out for one case."""
+    """A pipeline stage failed or timed out for one case. Carries the
+    assessment id (when one was created) so the case row keeps pointing at
+    the assessment left on the backend."""
 
-    def __init__(self, stage: str, detail: str):
+    def __init__(self, stage: str, detail: str, assessment_id: int | None = None):
         self.stage = stage
         self.detail = detail
+        self.assessment_id = assessment_id
         super().__init__(f"[{stage}] {detail}")
 
 

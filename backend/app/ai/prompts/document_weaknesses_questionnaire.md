@@ -16,6 +16,8 @@ Emit one weakness per:
 
 A confident "yes" with no qualifiers is **not** a weakness — skip it.
 
+Read every row as the triple **(question, response, comment)**: the response cell is often a pointer ("See comment", "Refer to SOC 2", "Yes*") and the comment carries the actual answer. An answer whose comment confirms the control without qualification is not a weakness; an answer whose comment reveals a gap, exception, future date or scope limit is. Quote the part of the row that shows the gap.
+
 # Required fields per weakness
 
 - `description` — restate the question and the problematic answer in your own words (1–2 sentences).

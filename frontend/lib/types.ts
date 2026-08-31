@@ -192,6 +192,12 @@ export interface WeaknessRead {
   origin: "document" | "gap_analysis" | string;
   evidence_refs: EvidenceRef[];
   origin_refs: string[];
+  // Review status: only "confirmed" rows are reported and scored.
+  status?: "candidate" | "confirmed" | "evidence_note" | "dropped" | "merged";
+  review?: {
+    decision?: string; confidence?: string; reason?: string; at?: string; stage?: string;
+    unreviewed?: boolean; merged_into?: number; merge_reason?: string; members?: number[];
+  } | null;
 }
 
 export interface EvidenceRef {

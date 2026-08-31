@@ -517,6 +517,7 @@ async def test_cross_correlation_maps_and_force_emerges(fresh_db, fake_client):
         db.commit()
 
         # Push fake AFTER inserting so we know the IDs.
+        fake_client.push_json({"groups": []})  # R4 merge pass (runs before correlation)
         fake_client.push_json(
             {
                 "weakness_mappings": [
@@ -589,6 +590,7 @@ async def test_cross_correlation_splits_batch_on_truncation(fresh_db, fake_clien
 
         # Full-batch call truncates twice (initial + router retry), then each
         # half succeeds.
+        fake_client.push_json({"groups": []})  # R4 merge pass (runs before correlation)
         fake_client.push_truncated("{}")
         fake_client.push_truncated("{}")
         for w in ws:
@@ -604,7 +606,7 @@ async def test_cross_correlation_splits_batch_on_truncation(fresh_db, fake_clien
 
         stats = await cross_correlation.run(db, a.id, client=fake_client)
         assert stats["mapped"] == 2
-        assert len(fake_client.calls) == 4
+        assert len(fake_client.calls) == 5  # + the R4 merge call before correlation
 
         db.expire_all()
         for w in ws:

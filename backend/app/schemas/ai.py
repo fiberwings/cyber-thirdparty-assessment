@@ -147,6 +147,33 @@ class ControlAssessmentOut(BaseModel):
         return v
 
 
+# ---------- Bundle-aware confirmation (R3) + thin merge (R4) ----------
+
+ReviewDecision = Literal["confirmed", "evidence_note", "dropped"]
+
+
+class CandidateDecisionOut(BaseModel):
+    id: int
+    decision: ReviewDecision
+    confidence: Literal["high", "medium", "low"] = "medium"
+    reason: str = Field(min_length=10)
+
+
+class CandidateReviewOut(BaseModel):
+    decisions: list[CandidateDecisionOut] = Field(default_factory=list)
+
+
+class MergeGroupOut(BaseModel):
+    primary_id: int
+    member_ids: list[int] = Field(min_length=1)
+    description: str = Field(min_length=10)
+    reason: str = Field(min_length=5)
+
+
+class MergeOut(BaseModel):
+    groups: list[MergeGroupOut] = Field(default_factory=list)
+
+
 class ControlBatchOut(BaseModel):
     """Whole-bundle gap analysis: one verdict per requested control code."""
 
