@@ -66,7 +66,10 @@ export const api = {
   // scenarios
   listScenarios: (id: number) => http<ScenarioRead[]>(`/api/assessments/${id}/scenarios`),
   generateScenarios: (id: number) =>
-    http<{ task_id: string }>(`/api/assessments/${id}/scenarios/generate`, { method: "POST" }),
+    http<{ task_id: string; status: string; progress: number; detail: string }>(
+      `/api/assessments/${id}/scenarios/generate`,
+      { method: "POST" },
+    ),
   patchScenario: (id: number, patch: Partial<{ inherent_impact: number; inherent_likelihood: number; name: string; description: string }>) =>
     http<ScenarioRead>(`/api/scenarios/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
   deleteScenario: (id: number) =>

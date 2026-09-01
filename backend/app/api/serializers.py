@@ -142,15 +142,9 @@ def compute_phase_status(a: Assessment) -> dict[str, PhaseInfo]:
         completed_at = _parse_iso(entry.get("completed_at"))
         task_id = entry.get("task_id")
         error = entry.get("error")
-        if completed_when or completed_at is not None:
-            return PhaseInfo(
-                state="done",
-                started_at=started_at,
-                completed_at=completed_at,
-                error=None,
-                warning=entry.get("warning") or None,
-                failed_targets=list(entry.get("failed_targets") or []),
-            )
+        # A live in-flight task wins over data-derived "done": partial rows
+        # persisted mid-run (e.g. scenario skeletons at 20%) must not flip the
+        # phase to done while the run is still writing.
         if task_id:
             handle = registry.get(task_id)
             if handle is None:
@@ -159,12 +153,30 @@ def compute_phase_status(a: Assessment) -> dict[str, PhaseInfo]:
                     started_at=started_at,
                     error="Task lost on server restart — re-run the step.",
                 )
+            if handle.status in ("pending", "running"):
+                return PhaseInfo(
+                    state="running",
+                    started_at=started_at,
+                    task_id=task_id,
+                    detail=handle.detail or None,
+                    progress=handle.progress,
+                )
+            if handle.status == "error":
+                return PhaseInfo(
+                    state="error",
+                    started_at=started_at,
+                    error=handle.error or handle.detail or "Task failed",
+                )
+            # handle.status == "done" but mark_phase_done hasn't committed yet:
+            # fall through to the completed checks below.
+        if completed_when or completed_at is not None:
             return PhaseInfo(
-                state="running",
+                state="done",
                 started_at=started_at,
-                task_id=task_id,
-                detail=handle.detail or None,
-                progress=handle.progress,
+                completed_at=completed_at,
+                error=None,
+                warning=entry.get("warning") or None,
+                failed_targets=list(entry.get("failed_targets") or []),
             )
         if error:
             return PhaseInfo(state="error", started_at=started_at, error=error)

@@ -31,6 +31,7 @@ from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
 from app.db import SessionLocal
 from app.models import Assessment, ExpectedControl, Scenario
+from app.scoring.engine import band_for
 from app.schemas.ai import (
     ExpectedControlListOut,
     ScenarioListOut,
@@ -192,7 +193,9 @@ async def generate(
             inherent_likelihood=sk.inherent_likelihood,
             residual_impact=sk.inherent_impact,
             residual_likelihood=sk.inherent_likelihood,
-            score_band="Moderate",
+            # Inherent band from the 4x4 matrix; recalculate overwrites it
+            # with the residual band once gap analysis has run.
+            score_band=band_for(sk.inherent_impact, sk.inherent_likelihood),
         )
         db.add(s)
         db.flush()  # populate s.id

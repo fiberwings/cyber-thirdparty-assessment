@@ -42,6 +42,7 @@ from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
 from app.db import SessionLocal
 from app.models import Assessment, ExpectedControl, MetaIssue, Scenario, Weakness
+from app.scoring.engine import band_for
 from app.schemas.ai import (
     CrossCorrelationOut,
     WeaknessClusterMappingOut,
@@ -222,7 +223,9 @@ def _apply_mapping(
             inherent_likelihood=s_out.inherent_likelihood,
             residual_impact=s_out.inherent_impact,
             residual_likelihood=s_out.inherent_likelihood,
-            score_band="Moderate",
+            # Inherent band from the 4x4 matrix; recalculate overwrites it
+            # with the residual band once gap analysis has run.
+            score_band=band_for(s_out.inherent_impact, s_out.inherent_likelihood),
             origin_weakness_ids=list(cluster.origin_weakness_ids),
         )
         inner.add(s)
@@ -297,7 +300,10 @@ def _force_emergent_for_unmapped(
             inherent_likelihood=3,
             residual_impact=max_sev,
             residual_likelihood=3,
-            score_band="High" if max_sev >= 3 else "Moderate",
+            # Matrix lookup replaces the old ad-hoc heuristic ("High" if
+            # max_sev >= 3): identical for sev 3, and correctly VeryHigh for
+            # sev 4 instead of understating it.
+            score_band=band_for(max_sev, 3),
             origin_weakness_ids=[w.id for w in weaknesses],
         )
         inner.add(s)

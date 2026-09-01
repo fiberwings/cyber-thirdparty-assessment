@@ -32,6 +32,21 @@ async def generate_scenarios(assessment_id: int, db: Session = Depends(db_sessio
     a = get_assessment(assessment_id, db)
     if a.description is None or not a.description.text.strip():
         raise HTTPException(status_code=400, detail="Set the service description first.")
+
+    # Concurrency guard: at most one generation run per assessment. Two
+    # concurrent runs interleave destructively (each clears and reinserts the
+    # description-sourced scenarios, and phase-2 control writes then attach to
+    # the other run's rows). A second request re-attaches to the run in flight.
+    existing_id = ((a.phase_state or {}).get("scenarios_generation") or {}).get("task_id")
+    if existing_id:
+        existing = registry.get(existing_id)
+        if existing is not None and existing.status in ("pending", "running"):
+            return TaskStatusRead(
+                task_id=existing.id,
+                status=existing.status,
+                progress=existing.progress,
+                detail=existing.detail,
+            )
     summary = (a.description.sufficiency_json or {}).get("summary_so_far") or a.description.text
 
     aid = a.id
