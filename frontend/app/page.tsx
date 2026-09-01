@@ -24,6 +24,10 @@ export default function Home() {
     },
   });
   const [vendor, setVendor] = useState("");
+  const remove = useMutation({
+    mutationFn: (id: number) => api.deleteAssessment(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["assessments"] }),
+  });
   const create = useMutation({
     mutationFn: (name: string) => api.createAssessment(name),
     onSuccess: (a) => {
@@ -77,8 +81,8 @@ export default function Home() {
           ) : data && data.length > 0 ? (
             <ul className="rounded-lg border border-ink-200 bg-white divide-y divide-ink-100">
               {data.map((a) => (
-                <li key={a.id}>
-                  <Link href={`/assessments/${a.id}/scoping`} className="flex items-center justify-between gap-4 px-5 py-3 hover:bg-ink-50">
+                <li key={a.id} className="flex items-center gap-2 pr-3 hover:bg-ink-50">
+                  <Link href={`/assessments/${a.id}/scoping`} className="flex items-center justify-between gap-4 px-5 py-3 min-w-0 flex-1">
                     <div className="min-w-0 flex-1">
                       <div className="text-sm font-medium text-ink-900">
                         {a.vendor_name} <span className="text-ink-400 font-normal">#{a.id}</span>
@@ -100,6 +104,24 @@ export default function Home() {
                       {new Date(a.created_at).toLocaleString()}
                     </div>
                   </Link>
+                  <button
+                    type="button"
+                    title="Delete assessment"
+                    aria-label={`Delete assessment ${a.vendor_name} #${a.id}`}
+                    disabled={remove.isPending}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          `Delete assessment "${a.vendor_name}" #${a.id}? This removes its documents, scenarios, findings, and scores permanently.`,
+                        )
+                      ) {
+                        remove.mutate(a.id);
+                      }
+                    }}
+                    className="shrink-0 rounded px-2 py-1 text-xs text-ink-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-40"
+                  >
+                    Delete
+                  </button>
                 </li>
               ))}
             </ul>
