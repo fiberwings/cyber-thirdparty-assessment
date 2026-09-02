@@ -20,6 +20,7 @@ from app.api import (
     tasks,
     weaknesses,
 )
+from app.ai.router import warn_if_configured_models_undersized
 from app.config import settings
 from app.db import init_db
 from app.tasks import reconcile_interrupted_tasks
@@ -29,6 +30,7 @@ from app.tasks import reconcile_interrupted_tasks
 async def lifespan(_: FastAPI):
     init_db()
     reconcile_interrupted_tasks()
+    warn_if_configured_models_undersized()
     yield
 
 

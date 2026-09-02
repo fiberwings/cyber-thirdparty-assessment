@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, _resolve_model, call_structured
+from app.config import settings
 from app.models import Assessment
 from app.schemas.ai import ExecutiveSummaryOut
 
@@ -208,7 +209,7 @@ async def write(
         schema=ExecutiveSummaryOut,
         assessment_id=a.id,
         model_override=model_override,
-        max_tokens=8192,
+        max_tokens=settings.llm_budget_large,
         client=client,
     )
     out = _strip_unknown_references(out, a)

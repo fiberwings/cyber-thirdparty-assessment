@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
+from app.config import settings
 from app.db import SessionLocal
 from app.models import Assessment, ExpectedControl, Scenario
 from app.scoring.engine import band_for
@@ -122,7 +123,7 @@ async def _phase2_worker(
                 schema=ExpectedControlListOut,
                 assessment_id=assessment_id,
                 model_override=model_override,
-                max_tokens=8192,  # dense scenarios overflowed 4096→8192; start at 8192 so the enlargement reaches 16k
+                max_tokens=settings.llm_budget_large,  # dense scenarios overflowed smaller budgets; large tier so the truncation ladder has headroom
                 client=client,
             )
             for c_out in controls_out.expected_controls:
@@ -162,7 +163,7 @@ async def generate(
         schema=ScenarioSkeletonListOut,
         assessment_id=assessment.id,
         model_override=model_override,
-        max_tokens=4096,
+        max_tokens=settings.llm_budget_medium,
         client=client,
     )
     n = len(skeletons_out.scenarios)

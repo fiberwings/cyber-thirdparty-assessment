@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -61,6 +62,80 @@ def _resolve_model(profile: str, override: str | None) -> str:
     if profile not in profiles:
         raise ValueError(f"Unknown profile: {profile}")
     return profiles[profile].default_model
+
+
+# ---------- model capability guard ----------
+
+_logger = logging.getLogger(__name__)
+
+# (context_window, max_output_tokens) for the shipped model catalogue,
+# verified against OpenRouter's live model metadata on 2026-09-02.
+MODEL_CAPS: dict[str, tuple[int, int]] = {
+    "anthropic/claude-opus-4.7": (1_000_000, 128_000),
+    "anthropic/claude-sonnet-4.6": (1_000_000, 128_000),
+    "anthropic/claude-haiku-4.5": (200_000, 64_000),
+    "openai/gpt-5": (400_000, 128_000),
+    "openai/gpt-5-mini": (400_000, 128_000),
+}
+
+# The whole-bundle gap-analysis path packs up to ~100K input tokens plus
+# prompts, so reasoner models need a genuinely large context window.
+_REASONER_MIN_CONTEXT = 200_000
+_FAST_MIN_CONTEXT = 100_000
+
+
+def validate_model_capability(model_id: str, profile: str) -> str | None:
+    """Return a human-readable rejection reason if `model_id` cannot honour
+    the configured output-budget policy for `profile`, else None.
+
+    Unknown model ids get a logged warning, not a rejection: OpenRouter's
+    catalogue moves faster than this table, and hard-failing novel models
+    would be an availability regression.
+    """
+    caps = MODEL_CAPS.get(model_id)
+    if caps is None:
+        _logger.warning(
+            "Model '%s' is not in the local capability table; cannot verify it "
+            "supports the configured output budgets (up to %d tokens).",
+            model_id,
+            settings.llm_truncation_cap,
+        )
+        return None
+    ctx, max_out = caps
+    if profile == "reasoner":
+        need_out = settings.llm_min_model_output_cap
+        need_ctx = _REASONER_MIN_CONTEXT
+    else:
+        # Deepest ladder a fast-profile call can reach: medium-tier start
+        # (attestation), doubled llm_truncation_retries times, clamped.
+        need_out = min(
+            settings.llm_truncation_cap,
+            settings.llm_budget_medium * (2 ** settings.llm_truncation_retries),
+        )
+        need_ctx = _FAST_MIN_CONTEXT
+    if max_out < need_out:
+        return (
+            f"model '{model_id}' supports at most {max_out} output tokens, but the "
+            f"{profile} profile's truncation ladder can request up to {need_out} — "
+            "truncated (incomplete) assessments would be unavoidable"
+        )
+    if ctx < need_ctx:
+        return (
+            f"model '{model_id}' has a {ctx}-token context window; the {profile} "
+            f"profile requires at least {need_ctx} to fit the evidence bundle"
+        )
+    return None
+
+
+def warn_if_configured_models_undersized() -> None:
+    """Startup check: the configured profile defaults must honour the budget
+    policy. Logged at ERROR (not raised) so a misconfiguration is loud without
+    taking the app down."""
+    for profile in ("fast", "reasoner"):
+        model_id = get_profiles()[profile].default_model
+        reason = validate_model_capability(model_id, profile)
+        if reason is not None:
+            _logger.error("Configured %s model fails the capability check: %s", profile, reason)
 
 
 def _hash_prompt(messages: list[dict[str, Any]]) -> str:
@@ -130,10 +205,11 @@ async def _chat_maybe_cached(
 ) -> tuple[dict[str, Any], bool]:
     """cli.chat() behind the dev cache. Returns (response, from_cache).
     Only complete (non-truncated), error-free responses are stored."""
+    timeout = _timeout_for_budget(max_tokens)
     if not settings.llm_dev_cache_active:
         resp = await cli.chat(
             messages, model, response_format=response_format,
-            temperature=temperature, max_tokens=max_tokens,
+            temperature=temperature, max_tokens=max_tokens, timeout=timeout,
         )
         return resp, False
     key = _cache_key(
@@ -145,7 +221,7 @@ async def _chat_maybe_cached(
         return hit, True
     resp = await cli.chat(
         messages, model, response_format=response_format,
-        temperature=temperature, max_tokens=max_tokens,
+        temperature=temperature, max_tokens=max_tokens, timeout=timeout,
     )
     if _finish_reason(resp) != "length":
         _cache_put(db, key, model, prompt_sha, resp)
@@ -171,8 +247,15 @@ class OpenRouterError(RuntimeError):
 
 _TRANSIENT_HTTP_CODES = {408, 429, 500, 502, 503, 504, 524}
 
-# Ceiling for the automatic retry-with-more-tokens on truncated output.
-_TRUNCATION_TOKEN_CAP = 16384
+
+def _timeout_for_budget(tokens: int) -> float:
+    """Per-attempt HTTP timeout sized for a non-streaming response of up to
+    `tokens` output tokens: nothing arrives until generation completes, so the
+    read timeout must cover the whole generation."""
+    return min(
+        settings.llm_timeout_max_s,
+        settings.llm_timeout_base_s + tokens / settings.llm_assumed_output_tps,
+    )
 
 
 class OpenRouterClient:
@@ -199,9 +282,13 @@ class OpenRouterClient:
         *,
         response_format: dict[str, Any] | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 2048,
-        timeout: float = 120.0,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
+        if max_tokens is None:
+            max_tokens = settings.llm_budget_small
+        if timeout is None:
+            timeout = _timeout_for_budget(max_tokens)
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -311,10 +398,12 @@ async def call_structured(
     assessment_id: int | None = None,
     model_override: str | None = None,
     temperature: float = 0.2,
-    max_tokens: int = 2048,
+    max_tokens: int | None = None,
     client: OpenRouterClient | None = None,
 ) -> T:
     """Call the model and parse JSON into `schema`. Retries once on validation failure."""
+    if max_tokens is None:
+        max_tokens = settings.llm_budget_small
 
     model = _resolve_model(profile, model_override)
     cli = client or OpenRouterClient()
@@ -330,7 +419,7 @@ async def call_structured(
 
     validation_retried = False
     garble_retried = False
-    truncation_retried = False
+    truncation_retries = 0
     tokens = max_tokens
     cached = False
 
@@ -359,14 +448,18 @@ async def call_structured(
 
             if _finish_reason(resp) == "length":
                 # Output was truncated. A truncated response must never be
-                # parsed or masked — retry once with a doubled output budget,
-                # then fail loudly so callers can segment the work.
-                if not truncation_retried and tokens < _TRUNCATION_TOKEN_CAP:
-                    truncation_retried = True
+                # parsed or masked — retry with a doubled output budget (up to
+                # the configured ladder depth and ceiling), then fail loudly so
+                # callers can segment the work.
+                if (
+                    truncation_retries < settings.llm_truncation_retries
+                    and tokens < settings.llm_truncation_cap
+                ):
+                    truncation_retries += 1
                     last_err = (
                         f"truncated at max_tokens={tokens}; retried with larger budget"
                     )
-                    tokens = min(tokens * 2, _TRUNCATION_TOKEN_CAP)
+                    tokens = min(tokens * 2, settings.llm_truncation_cap)
                     continue
                 raise OpenRouterError(
                     f"Structured call '{purpose}' output truncated at max_tokens={tokens} "
@@ -451,10 +544,12 @@ async def call_text(
     assessment_id: int | None = None,
     model_override: str | None = None,
     temperature: float = 0.4,
-    max_tokens: int = 1024,
+    max_tokens: int | None = None,
     client: OpenRouterClient | None = None,
 ) -> str:
     """Plain text call. No JSON validation — used for narrative writing only."""
+    if max_tokens is None:
+        max_tokens = settings.llm_budget_small
     model = _resolve_model(profile, model_override)
     cli = client or OpenRouterClient()
     prompt_sha = _hash_prompt(messages)
@@ -467,7 +562,7 @@ async def call_text(
     try:
         try:
             tokens = max_tokens
-            truncation_retried = False
+            truncation_retries = 0
             while True:
                 resp, from_cache = await _chat_maybe_cached(
                     db, cli, messages, model, response_format=None,
@@ -481,9 +576,12 @@ async def call_text(
                     out_tok += o_tok
                 if _finish_reason(resp) == "length":
                     # A cut-off narrative must never be persisted silently.
-                    if not truncation_retried and tokens < _TRUNCATION_TOKEN_CAP:
-                        truncation_retried = True
-                        tokens = min(tokens * 2, _TRUNCATION_TOKEN_CAP)
+                    if (
+                        truncation_retries < settings.llm_truncation_retries
+                        and tokens < settings.llm_truncation_cap
+                    ):
+                        truncation_retries += 1
+                        tokens = min(tokens * 2, settings.llm_truncation_cap)
                         continue
                     raise OpenRouterError(
                         f"Text call '{purpose}' output truncated at max_tokens={tokens} "

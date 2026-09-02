@@ -40,6 +40,7 @@ from sqlalchemy.orm import Session
 from app.ai.context import analysis_datetime, standards_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
+from app.config import settings
 from app.db import SessionLocal
 from app.models import Assessment, ExpectedControl, MetaIssue, Scenario, Weakness
 from app.scoring.engine import band_for
@@ -414,7 +415,7 @@ async def run(
             schema=WeaknessClusterMappingOut,
             assessment_id=assessment_id,
             model_override=model_override,
-            max_tokens=8192,
+            max_tokens=settings.llm_budget_large,
             client=client,
         )
 

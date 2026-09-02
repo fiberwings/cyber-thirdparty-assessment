@@ -307,8 +307,15 @@ class Judge:
                 r = self.http.post("/chat/completions", json=body)
                 r.raise_for_status()
                 data = r.json()
-                raw_text = data["choices"][0]["message"]["content"] or ""
+                choice = data["choices"][0]
+                raw_text = choice["message"]["content"] or ""
                 usage = data.get("usage") or {}
+                if choice.get("finish_reason") == "length":
+                    # Truncated JSON must never be parsed — surface it as a
+                    # truncation, not a parse error.
+                    error = (
+                        f"truncated: judge output hit max_tokens={settings.JUDGE_MAX_TOKENS}"
+                    )
             except httpx.HTTPError as e:
                 error = f"transport: {e}"
             latency_ms = int((time.monotonic() - t0) * 1000)

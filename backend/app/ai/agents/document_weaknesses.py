@@ -24,7 +24,10 @@ Strategy:
                   cross-references and severity calibration stay consistent.
                   Skeletons are deduped by normalised heading.
         Phase 2 — one detail call per skeleton, scoped to that section + the
-                  preamble. Bounded input, small output. Calls run in parallel
+                  preamble. Bounded input; output is usually small but a dense
+                  finding can run long (medium budget — there is nothing to
+                  split, so the truncation ladder is the only remedy). Calls
+                  run in parallel
                   under `asyncio.Semaphore(PHASE2_CONCURRENCY)` with each
                   worker using its own `SessionLocal()` (mirrors scenarios
                   phase-2 pattern) so concurrent commits don't race.
@@ -49,6 +52,7 @@ from sqlalchemy.orm import Session
 from app.ai.context import analysis_datetime, standards_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
+from app.config import settings
 from app.db import SessionLocal
 from app.models import Chunk, Document, Weakness
 from app.schemas.ai import (
@@ -386,7 +390,7 @@ async def _extract_questionnaire_windowed(
                 schema=DocumentWeaknessListOut,
                 assessment_id=assessment_id,
                 model_override=model_override,
-                max_tokens=8192,
+                max_tokens=settings.llm_budget_large,
                 client=client,
             )
         except OpenRouterError as e:
@@ -491,7 +495,7 @@ async def extract(
                 schema=DocumentWeaknessListOut,
                 assessment_id=assessment_id,
                 model_override=model_override,
-                max_tokens=8192,
+                max_tokens=settings.llm_budget_large,
                 client=client,
             )
             rows = [
@@ -562,7 +566,7 @@ async def extract(
             schema=WeaknessSkeletonListOut,
             assessment_id=assessment_id,
             model_override=model_override,
-            max_tokens=4096,
+            max_tokens=settings.llm_budget_medium,
             client=client,
         )
         skeletons.extend(out.skeletons)
@@ -630,7 +634,7 @@ async def extract(
                     schema=DocumentWeaknessListOut,
                     assessment_id=assessment_id,
                     model_override=model_override,
-                    max_tokens=2048,
+                    max_tokens=settings.llm_budget_medium,
                     client=client,
                 )
                 rows = [

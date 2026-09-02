@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.ai.context import analysis_date_line
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, call_text
+from app.config import settings
 from app.models import Assessment, MetaIssue, Scenario
 from app.scoring.engine import level_to_name
 
@@ -72,7 +73,7 @@ async def write_for_scenario(
         model_override=(assessment.model_overrides or {}).get("narrative"),
         # Reasoning models spend completion tokens on thinking before the
         # visible paragraph — 400 gets fully consumed before any text lands.
-        max_tokens=2048,
+        max_tokens=settings.llm_budget_small,
         client=client,
     )
     scenario.rationale = text.strip()

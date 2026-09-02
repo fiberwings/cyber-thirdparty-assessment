@@ -182,7 +182,9 @@ def test_batch_codes_keeps_families_together():
 async def test_bundle_truncation_splits_batch(fresh_db, fake_client):
     with SessionLocal() as db:
         a, s1, s2, sig_id, soc_id = _fixture(db)
-        # batch call truncated at the 16k cap (router cannot enlarge → raises truncated)
+        # batch call truncated on every ladder step (router exhausts the cap →
+        # raises truncated) — one canned truncation per attempt.
+        fake_client.push_truncated("")
         fake_client.push_truncated("")
         # halves: [IAM.MFA] then [LOG.SIEM]
         fake_client.push_json({"controls": [_with_docs(MFA_OUT, sig_id, soc_id)]})

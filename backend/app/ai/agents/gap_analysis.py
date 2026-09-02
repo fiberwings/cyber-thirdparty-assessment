@@ -32,6 +32,7 @@ from app.ai import retrieval
 from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
+from app.config import settings
 from app.db import SessionLocal
 from app.models import (
     Assessment,
@@ -61,7 +62,8 @@ WHOLE_BUNDLE_MAX_TOKENS = 100_000
 # Distinct control codes per whole-bundle call. Related families are packed
 # together; a batch never splits a family unless the family is larger.
 BUNDLE_BATCH_SIZE = 5
-BUNDLE_MAX_OUTPUT_TOKENS = 16384
+# Whole-bundle output budget comes from settings.llm_budget_large (the batch
+# covers BUNDLE_BATCH_SIZE controls, so it needs the large synthesis tier).
 # Whole-bundle calls run with lower parallelism than the per-control path so
 # that most batches see the contradictions already reported by finished
 # batches (cross-batch duplicate suppression is done by the model, in
@@ -451,7 +453,7 @@ async def assess_control(
         schema=ControlAssessmentOut,
         assessment_id=assessment.id,
         model_override=model_override,
-        max_tokens=4096,
+        max_tokens=settings.llm_budget_medium,
         client=client,
     )
 
@@ -476,7 +478,7 @@ async def assess_control(
                 schema=ControlAssessmentOut,
                 assessment_id=assessment.id,
                 model_override=model_override,
-                max_tokens=4096,
+                max_tokens=settings.llm_budget_medium,
                 client=client,
             )
 
@@ -748,7 +750,7 @@ async def assess_codes_with_bundle(
                 schema=ControlBatchOut,
                 assessment_id=assessment.id,
                 model_override=model_override,
-                max_tokens=BUNDLE_MAX_OUTPUT_TOKENS,
+                max_tokens=settings.llm_budget_large,
                 client=client,
             )
         except OpenRouterError as e:

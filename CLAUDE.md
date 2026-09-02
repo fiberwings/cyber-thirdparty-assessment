@@ -5,7 +5,13 @@
 The product is a cyber risk assessment that humans rely on. **Accuracy outranks DX, speed, and code elegance.** Before any change, ask: *could this make the assessment less faithful to the evidence?* If yes, surface it in chat as **"Accuracy trade-off:"** with the risk and an alternative, and wait for confirmation before implementing.
 
 Common accuracy regressions to watch for:
-- Lowering `max_tokens`, swapping models, or relaxing temperature on the reasoner profile
+- Lowering `max_tokens` budgets (they live in `backend/app/config.py` as `LLM_BUDGET_*` /
+  `LLM_TRUNCATION_*`; *raising* them is accuracy-positive, lowering any below the shipped
+  defaults requires the "Accuracy trade-off:" protocol), swapping models, or relaxing
+  temperature on the reasoner profile
+- Bypassing the split-on-truncate contract: a `finish_reason == "length"` response must
+  never be parsed or persisted, and callers rely on the loud `truncated=True` failure to
+  subdivide oversized batches — never paper over it with silent budget inflation
 - Validation/retry logic that masks bad model output instead of surfacing it
 - Truncating service descriptions, evidence chunks, or the control catalogue to save tokens
 - Defaults / fallbacks that silently downgrade scoring when inputs are missing

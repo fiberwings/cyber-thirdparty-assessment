@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Resolve .env candidate paths absolutely so it doesn't matter whether
@@ -70,6 +70,45 @@ class Settings(BaseSettings):
     # Tunables
     fts_topk: int = Field(default=8, alias="FTS_TOPK")
     max_upload_mb: int = Field(default=50, alias="MAX_UPLOAD_MB")
+
+    # LLM output-token budget policy. Three tiers, sized per call kind
+    # (small = short structured outputs, medium = single-item detail work,
+    # large = dense synthesis over many items). Lowering any of these below
+    # the shipped defaults is a flagged accuracy regression — see CLAUDE.md.
+    llm_budget_small: int = Field(default=4096, alias="LLM_BUDGET_SMALL")
+    llm_budget_medium: int = Field(default=8192, alias="LLM_BUDGET_MEDIUM")
+    llm_budget_large: int = Field(default=16384, alias="LLM_BUDGET_LARGE")
+    # Ceiling for the automatic retry-with-more-tokens on truncated output,
+    # and how many doublings the ladder may take before failing loudly.
+    llm_truncation_cap: int = Field(default=32768, alias="LLM_TRUNCATION_CAP")
+    llm_truncation_retries: int = Field(default=2, alias="LLM_TRUNCATION_RETRIES")
+    # Per-attempt HTTP timeout scales with the requested output budget:
+    # base + tokens / assumed_tps, clamped to timeout_max. The client is
+    # non-streaming, so the read timeout must cover the whole generation.
+    llm_timeout_base_s: float = Field(default=60.0, alias="LLM_TIMEOUT_BASE_S")
+    llm_assumed_output_tps: float = Field(default=40.0, alias="LLM_ASSUMED_OUTPUT_TPS")
+    llm_timeout_max_s: float = Field(default=600.0, alias="LLM_TIMEOUT_MAX_S")
+    # Minimum model output cap a reasoner-profile model must support — the
+    # truncation ladder can request up to llm_truncation_cap tokens.
+    llm_min_model_output_cap: int = Field(default=32768, alias="LLM_MIN_MODEL_OUTPUT_CAP")
+
+    @model_validator(mode="after")
+    def _validate_budget_policy(self) -> "Settings":
+        if not (
+            0
+            < self.llm_budget_small
+            <= self.llm_budget_medium
+            <= self.llm_budget_large
+            <= self.llm_truncation_cap
+            <= self.llm_min_model_output_cap
+        ):
+            raise ValueError(
+                "LLM budget policy must satisfy 0 < LLM_BUDGET_SMALL <= LLM_BUDGET_MEDIUM "
+                "<= LLM_BUDGET_LARGE <= LLM_TRUNCATION_CAP <= LLM_MIN_MODEL_OUTPUT_CAP"
+            )
+        if self.llm_truncation_retries < 0:
+            raise ValueError("LLM_TRUNCATION_RETRIES must be >= 0")
+        return self
 
     # Deployment environment: "dev" | "production". Some dev-only switches
     # (LLM response cache) are refused outright in production.

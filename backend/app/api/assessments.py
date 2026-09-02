@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.ai.router import validate_model_capability
 from app.api.deps import db_session, get_assessment
 from app.api.serializers import serialize_assessment, serialize_description
 from app.models import Assessment, ServiceDescription
@@ -75,6 +76,10 @@ def patch_model_overrides(
     a = get_assessment(assessment_id, db)
     overrides = dict(a.model_overrides or {})
     for k, v in payload.model_dump(exclude_none=True).items():
+        profile = "fast" if k in ("scoping", "narrative") else "reasoner"
+        reason = validate_model_capability(v, profile)
+        if reason is not None:
+            raise HTTPException(status_code=422, detail=reason)
         overrides[k] = v
     a.model_overrides = overrides
     db.commit()

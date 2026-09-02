@@ -19,6 +19,7 @@ from app.ai.context import analysis_date, standards_profile
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, call_structured
 from app.attestation_checks import CheckFinding, check_profile, check_required_attestations
+from app.config import settings
 from app.models import Assessment, Chunk, Document, Weakness
 from app.schemas.attestation import AttestationProfileOut
 
@@ -53,7 +54,7 @@ async def extract_profile(
         ],
         schema=AttestationProfileOut,
         assessment_id=doc.assessment_id,
-        max_tokens=4096,
+        max_tokens=settings.llm_budget_medium,
         client=client,
     )
     doc.attestation_profile = out.model_dump(exclude_none=True)

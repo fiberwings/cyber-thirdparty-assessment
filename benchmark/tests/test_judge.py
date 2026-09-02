@@ -169,3 +169,17 @@ def test_classify_rejects_two_primaries_per_golden_and_missing_ids(judge):
         judge.classify_findings(EXPECTED, ACTUAL, MATCH_OUT, CHUNKS, "full")
     assert "primary matches" in ei.value.records[0].error
     assert "reported ids mismatch" in ei.value.records[1].error
+
+
+@respx.mock
+def test_truncated_judge_output_is_never_parsed(judge):
+    body = _completion('{"pairs": [{"golden_id": "W1", "actual_id": 1, "co')
+    body["choices"][0]["finish_reason"] = "length"
+    respx.post(f"{BASE}/chat/completions").mock(return_value=Response(200, json=body))
+    with pytest.raises(JudgeError) as ei:
+        judge.match_weaknesses(EXPECTED, ACTUAL)
+    assert len(ei.value.records) == 2
+    for r in ei.value.records:
+        assert not r.ok
+        assert r.error.startswith("truncated:")
+        assert "parse" not in r.error

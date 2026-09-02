@@ -229,7 +229,8 @@ async def test_dev_cache_serves_second_identical_call(fresh_db, fake_client, mon
                               schema=DocumentWeaknessListOut, client=fake_client)
         # different sampling params → different key → real call (queue empty → error)
         fake_client.push_json({"weaknesses": []})
-        await call_structured(db, purpose="t", profile="fast", messages=msgs, max_tokens=4096,
+        await call_structured(db, purpose="t", profile="fast", messages=msgs,
+                              max_tokens=settings.llm_budget_small * 2,
                               schema=DocumentWeaknessListOut, client=fake_client)
         rows = db.query(ModelCall).order_by(ModelCall.id).all()
     assert len(fake_client.calls) == 2
@@ -355,3 +356,44 @@ async def test_questionnaire_window_splits_when_output_truncates(fresh_db, fake_
         assert await document_weaknesses.extract(db, doc.id, client=fake_client) == 2
     labels = [c["messages"][1]["content"].split("# Window ")[1].split(":")[0] for c in fake_client.calls[2:]]
     assert labels == ["1 of 1", "1 of 1", "1 of 1a", "1 of 1b"]
+
+
+# ---------------- output-token budget tiers ----------------
+
+@pytest.mark.asyncio
+async def test_extraction_budget_tiers(fresh_db, fake_client, monkeypatch):
+    """Single-call extraction uses the large tier; the per-finding detail call
+    uses the medium tier (the VM-02 regression: 2048 was too small for a dense
+    finding, and a single-finding call has nothing to split on truncation)."""
+    with SessionLocal() as db:
+        a = Assessment(vendor_name="Acme")
+        db.add(a)
+        db.flush()
+        doc = Document(assessment_id=a.id, kind="policy", filename="p.pdf",
+                       mime="application/pdf", sha256="x", size_bytes=1)
+        db.add(doc)
+        db.flush()
+        db.add(Chunk(document_id=doc.id, page=1, section_path="1", ord=0,
+                     text="Patching SLA is 90 days for critical findings."))
+        db.commit()
+
+        # Single-call path → large tier.
+        fake_client.push_json({"weaknesses": []})
+        await document_weaknesses.extract(db, doc.id, client=fake_client)
+        assert fake_client.calls[0]["max_tokens"] == settings.llm_budget_large
+
+        # Two-phase path (enumerate + detail) → medium tier for both.
+        fake_client.calls.clear()
+        monkeypatch.setattr(document_weaknesses, "SINGLE_CALL_MAX_TOKENS", -1)
+        fake_client.push_json({"skeletons": [
+            {"heading": "VM-02 remediation SLA exceeded", "severity": "high",
+             "section_path": "1", "kind_signal": "soc2_exception"},
+        ]})
+        fake_client.push_json({"weaknesses": [
+            {"severity": "high", "description": "Critical vulns fixed late.",
+             "quote": "90 days", "section_path": "1", "page": 1,
+             "kind_signal": "soc2_exception", "suggested_control_codes": []},
+        ]})
+        await document_weaknesses.extract(db, doc.id, client=fake_client)
+    assert fake_client.calls[0]["max_tokens"] == settings.llm_budget_medium  # enumerate
+    assert fake_client.calls[1]["max_tokens"] == settings.llm_budget_medium  # detail

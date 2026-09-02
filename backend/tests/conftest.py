@@ -64,8 +64,8 @@ class FakeOpenRouterClient:
         *,
         response_format: dict | None = None,
         temperature: float = 0.2,
-        max_tokens: int = 2048,
-        timeout: float = 120.0,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
     ) -> dict:
         self.calls.append(
             {
@@ -73,6 +73,7 @@ class FakeOpenRouterClient:
                 "messages": messages,
                 "response_format": response_format,
                 "max_tokens": max_tokens,
+                "timeout": timeout,
             }
         )
         if not self.queue:
