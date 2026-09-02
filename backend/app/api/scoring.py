@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app import workflow
 from app.api.deps import db_session, get_assessment
 from app.db import SessionLocal
 from app.models import Assessment, Scenario
@@ -156,8 +157,15 @@ def recalculate(assessment_id: int, db: Session = Depends(db_session)):
 
 @router.post("/{assessment_id}/narratives/run", response_model=TaskStatusRead)
 async def run_narratives(assessment_id: int, db: Session = Depends(db_session)):
-    """Generate score-explanation prose for every scenario."""
+    """Generate score-explanation prose for every scenario, then the
+    executive summary. Requires gap analysis to be done and current (a
+    partial gap analysis — some controls failed — still counts; the warning
+    is repeated on the phase). Re-attaches to a run already in flight."""
     a = get_assessment(assessment_id, db)
+    workflow.require_step_ready(a, "narratives")
+    live = workflow.require_no_run_in_flight(a, reattach_kind=workflow.KIND_NARRATIVES)
+    if live is not None:
+        return workflow.reattach_response(live)
 
     aid = a.id
 
@@ -174,23 +182,25 @@ async def run_narratives(assessment_id: int, db: Session = Depends(db_session)):
                     await handle.update(progress=0.9 * i / total, detail=s.code)
                 await handle.update(progress=0.9, detail="Writing executive summary")
                 await summary_agent.write(inner, aid)
-                assessment = inner.get(Assessment, aid)
-                assessment.current_phase = "score"
                 inner.commit()
             mark_phase_done(aid, "narratives")
         except Exception as e:
             mark_phase_error(aid, "narratives", str(e))
             raise
 
-    handle = registry.submit(job, kind="narratives", assessment_id=aid)
+    handle = registry.submit(job, kind=workflow.KIND_NARRATIVES, assessment_id=aid)
     mark_phase_started(aid, "narratives", handle.id)
-    return TaskStatusRead(task_id=handle.id, status=handle.status, progress=0.0, detail="")
+    return workflow.reattach_response(handle)
 
 
 @router.post("/{assessment_id}/executive-summary/run", response_model=TaskStatusRead)
 async def run_executive_summary(assessment_id: int, db: Session = Depends(db_session)):
-    """(Re)generate only the executive summary, e.g. after edits made it stale."""
+    """(Re)generate only the executive summary, e.g. after edits made it
+    stale. Same prerequisites as narratives (it does not need the narrative
+    prose); refused while any job runs."""
     a = get_assessment(assessment_id, db)
+    workflow.require_step_ready(a, "narratives")
+    workflow.require_no_run_in_flight(a)
     aid = a.id
 
     async def job(handle):
@@ -200,5 +210,5 @@ async def run_executive_summary(assessment_id: int, db: Session = Depends(db_ses
             await summary_agent.write(inner, aid)
         await handle.update(progress=1.0, detail="Executive summary updated")
 
-    handle = registry.submit(job, kind="executive_summary", assessment_id=aid)
+    handle = registry.submit(job, kind=workflow.KIND_EXEC_SUMMARY, assessment_id=aid)
     return TaskStatusRead(task_id=handle.id, status=handle.status, progress=0.0, detail="")

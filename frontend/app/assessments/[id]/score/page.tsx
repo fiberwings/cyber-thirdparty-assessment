@@ -7,6 +7,7 @@ import { AssessmentShell } from "@/components/AssessmentShell";
 import { ScoreHeatmap } from "@/components/ScoreHeatmap";
 import { ScoreExplanation } from "@/components/ScoreExplanation";
 import { ExecutiveSummaryPanel } from "@/components/ExecutiveSummaryPanel";
+import { PrerequisitesBanner } from "@/components/PrerequisitesBanner";
 import {
   SEVERITY_ORDER,
   SEVERITY_STYLES,
@@ -45,6 +46,8 @@ export default function ScorePage({ params }: { params: Promise<{ id: string }> 
         The executive summary surfaces what matters most; the sections below carry the full detail.
         All scores are deterministic — edit anything in the scenario drawer and they recalculate instantly.
       </p>
+
+      <PrerequisitesBanner assessmentId={aid} />
 
       {isLoading || !report ? (
         <div className="text-sm text-ink-500">Loading…</div>

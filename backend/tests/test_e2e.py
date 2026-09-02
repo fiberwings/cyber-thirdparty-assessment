@@ -38,17 +38,8 @@ def patched_client(monkeypatch, fresh_db):
             "summary_so_far": "SaaS billing vendor processing EU PII over public APIs.",
         }
     )
-    # Per-document weakness extraction (auto-fired on SOC upload). Empty list
-    # — clean SOC report. With no extracted weaknesses, the auto-fired
-    # cross-correlation step sees nothing to do and exits without a call.
-    fake.push_json({"weaknesses": []})
-    # Attestation profile (fast call, fired for soc/iso/pentest uploads).
-    fake.push_json({
-        "doc_type": "soc2_type2", "doc_type_quote": "SOC 2 Type 2 report",
-        "period_start": {"value": "2025-01-01", "quote": "period 1 January 2025"},
-        "period_end": {"value": "2025-12-31", "quote": "to 31 December 2025"},
-        "opinion": {"value": "unqualified", "quote": "in our opinion, controls were suitably designed"},
-    })
+    # Workflow order: scoping → scenarios → evidence → cross-correlate → gap
+    # analysis → narratives. The canned responses are queued in that order.
     # Scenario generation — phase 1 (skeletons)
     fake.push_json(
         {
@@ -72,6 +63,17 @@ def patched_client(monkeypatch, fresh_db):
             ]
         }
     )
+    # Per-document weakness extraction (auto-fired on SOC upload). Empty list
+    # — clean SOC report. With no extracted weaknesses, the cross-correlate
+    # step sees nothing to do and exits without a call.
+    fake.push_json({"weaknesses": []})
+    # Attestation profile (fast call, fired for soc/iso/pentest uploads).
+    fake.push_json({
+        "doc_type": "soc2_type2", "doc_type_quote": "SOC 2 Type 2 report",
+        "period_start": {"value": "2025-01-01", "quote": "period 1 January 2025"},
+        "period_end": {"value": "2025-12-31", "quote": "to 31 December 2025"},
+        "opinion": {"value": "unqualified", "quote": "in our opinion, controls were suitably designed"},
+    })
     # Gap analysis (whole-bundle mode): 2 controls in ONE batched response
     fake.push_json({"controls": [
         {
@@ -141,28 +143,18 @@ def test_full_flow(patched_client):
     assert r.status_code == 200
     assert r.json()["is_sufficient"] is True
 
-    # 4. Upload a SOC 2 PDF — auto-triggers per-document weakness extraction.
+    # Evidence upload is gated on scenarios: the workflow is strictly
+    # sequential and the backend is the authority (409 with a reason).
     pdf_bytes = _make_pdf("body")
     r = client.post(
         f"/api/assessments/{aid}/documents",
         data={"kind": "soc"},
         files={"file": ("soc2.pdf", pdf_bytes, "application/pdf")},
     )
-    assert r.status_code == 201, r.text
-    assert r.json()["filename"] == "soc2.pdf"
-    # Wait for the auto-fired extraction task before moving on so that the
-    # background task doesn't race with subsequent test steps for fake-LLM
-    # canned responses.
-    weakness_task_id = r.json().get("weakness_task_id")
-    assert weakness_task_id, "expected weakness_task_id on upload response"
-    for _ in range(30):
-        s = client.get(f"/api/tasks/{weakness_task_id}").json()
-        if s["status"] in {"done", "error"}:
-            break
-        import time; time.sleep(0.2)
-    assert s["status"] == "done", s
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["missing"][0]["step"] == "scenarios"
 
-    # 5. Generate scenarios (background task)
+    # 4. Generate scenarios (background task)
     r = client.post(f"/api/assessments/{aid}/scenarios/generate")
     assert r.status_code == 200
     task_id = r.json()["task_id"]
@@ -174,25 +166,42 @@ def test_full_flow(patched_client):
         import time; time.sleep(0.2)
     assert s["status"] == "done", s
 
-    # 6. List scenarios
+    # 5. List scenarios
     r = client.get(f"/api/assessments/{aid}/scenarios")
     assert r.status_code == 200
     scenarios = r.json()
     assert len(scenarios) == 1
     assert scenarios[0]["code"] == "DATA_LEAK"
 
-    # 7. Run gap analysis
-    r = client.post(f"/api/assessments/{aid}/gap-analysis/run")
-    assert r.status_code == 200
-    task_id = r.json()["task_id"]
-    for _ in range(40):
-        s = client.get(f"/api/tasks/{task_id}").json()
+    # 6. Upload a SOC 2 PDF — auto-triggers per-document weakness extraction.
+    r = client.post(
+        f"/api/assessments/{aid}/documents",
+        data={"kind": "soc"},
+        files={"file": ("soc2.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["filename"] == "soc2.pdf"
+    assert r.json()["extraction_state"] in {"running", "done"}
+    # Wait for the auto-fired extraction task before moving on so that the
+    # background task doesn't race with subsequent test steps for fake-LLM
+    # canned responses.
+    weakness_task_id = r.json().get("weakness_task_id")
+    assert weakness_task_id, "expected weakness_task_id on upload response"
+    for _ in range(30):
+        s = client.get(f"/api/tasks/{weakness_task_id}").json()
         if s["status"] in {"done", "error"}:
             break
         import time; time.sleep(0.2)
     assert s["status"] == "done", s
+    r = client.get(f"/api/assessments/{aid}/documents")
+    assert r.json()[0]["extraction_state"] == "done"
 
-    # 8. Weakness synthesis
+    # Gap analysis consumes cross-correlation output: refused until it ran.
+    r = client.post(f"/api/assessments/{aid}/gap-analysis/run")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["missing"][0]["step"] == "correlation"
+
+    # 7. Cross-correlate (the `synthesize` alias)
     r = client.post(f"/api/assessments/{aid}/weaknesses/synthesize")
     assert r.status_code == 200
     task_id = r.json()["task_id"]
@@ -202,6 +211,21 @@ def test_full_flow(patched_client):
             break
         import time; time.sleep(0.2)
     assert s["status"] == "done", s
+
+    # 8. Run gap analysis
+    r = client.post(f"/api/assessments/{aid}/gap-analysis/run")
+    assert r.status_code == 200, r.text
+    task_id = r.json()["task_id"]
+    for _ in range(40):
+        s = client.get(f"/api/tasks/{task_id}").json()
+        if s["status"] in {"done", "error"}:
+            break
+        import time; time.sleep(0.2)
+    assert s["status"] == "done", s
+    phases = client.get(f"/api/assessments/{aid}").json()["phases"]
+    assert phases["correlation"]["state"] == "done"
+    assert phases["analysis"]["state"] == "done"
+    assert phases["score"]["ready"] is True
 
     # 9. Recalculate
     r = client.post(f"/api/assessments/{aid}/recalculate")

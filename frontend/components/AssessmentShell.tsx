@@ -23,6 +23,7 @@ export function AssessmentShell({ id, children }: { id: number; children: React.
           assessmentId={id}
           vendorName={assessment.vendor_name}
           currentPhase={assessment.current_phase}
+          phases={assessment.phases}
         />
         <main className="flex-1 min-w-0">
           <header className="px-8 py-4 border-b border-ink-200 bg-white flex items-center justify-between gap-4">

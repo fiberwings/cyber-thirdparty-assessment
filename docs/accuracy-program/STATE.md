@@ -22,6 +22,20 @@
 - 2026-08-30 · Delete partial assessment #12 on the backend (orphan of aborted run 6)? Harmless to keep.
 
 ## Decisions taken
+- 2026-09-02 · Sequential workflow enforcement (post-program hardening, user-approved plan): canonical order scoping →
+  scenarios → evidence (upload + per-doc extraction) → cross-correlate → gap analysis → recalculate → narratives
+  (+ exec summary) → report; the UI analysis page was in the wrong order (gap before correlate) and is renumbered.
+  Backend is the authority — every job/mutator endpoint checks prerequisites and refuses with a structured 409
+  (`app/workflow.py`); the UI only mirrors `ready` / `blocked_by`. Nav stays free, actions are gated.
+  Stale-on-write: any upstream re-run or input change stamps downstream completed steps `stale` (cause kept,
+  progression blocked until re-run); exec-summary fingerprint kept as the fine-grained signal.
+  Settings staleness scope: standards profile → stale from scenarios; `as_of_date` → stale from correlation only —
+  per-document extraction is **not** re-run on a date change (accepted gap; the stale reason says so).
+  A gap analysis that completed with failed controls (warning) still satisfies narratives (consistent with
+  01-inputs trade-off #2; the UI repeats the warning on the narratives row). `DELETE /documents/{id}` is gated
+  only on no job in flight, not on evidence readiness (cleanup must stay possible). Resaving an identical
+  description is a no-op (no stale stamp, no scoping reset). Downstream requests during an upstream run get
+  `prerequisite_running`, not `run_in_flight`. (user)
 - 2026-08-31 · Phase 6: salvage option B (globaltalent r2 + verifypro r2); VP-G6 golden removed — it contradicted the
   case's own stated refresh standard; the evidence (and the deterministic check) wins over the case narrative (user)
 - 2026-08-31 · Phase 5 bands reviewed and approved; uplift gate kept as-is (option a: a17 −1 accepted); "rule B"
@@ -40,6 +54,7 @@
 - 2026-08-30 · classifier prompt frozen at fc-2 (33/40 agreement with the manual classification on the canary)
 
 ## Log (newest first; one line per stopping point: date · phase/step · run id or stage · key numbers · next action)
+- 2026-09-02 · Sequential workflow enforcement implemented (0 LLM tokens) · `app/workflow.py` guards + stale stamps on every mutator, evidence phase derived from per-document extraction (persisted `weakness_task_id` / `weakness_error`, retry in UI), analysis page reordered correlate → gap → narratives, 409 reasons rendered on disabled buttons, score/report prerequisites banner · tests 152 pass, tsc + next build clean · **next: user manual smoke test (README order) + orbitclear canary via `bench` to confirm no stage 409s → commit**
 - 2026-08-31 · Phase 6 closed, program complete · runs 18–21: bands 6/6 within one (floor met), dup 0.42 (met), signal median 78 % (mean 74 %, target miss), cost ≈ 54 % (near miss), union recall 32/37 (qualified floor miss, sign-off open) · rule B rejected on data · fixes en route: merge/scenario/extraction truncation robustness · follow-ups listed in phases/06 · **next: user sign-off on recall floor; backlog items 1–4**
 - 2026-08-31 · Phase 5 closed after review (option a; rule B deferred to Phase 6; half-up rounding fixed) · committed · **next: Phase 6 full validation on user go**
 - 2026-08-31 · Phase 5 implemented (0 LLM tokens) · engine: state-based downgrades, +1 bounded uplift, auditor-tested ceiling, meta→confidence, weighted-mean aggregation · rescore (DB copy): 6/6 within one band (was 0/6 discrimination), 0 floor violations · tests 85 pass, tsc clean · **next: user reviews band table → commit → Phase 6 (full validation)**

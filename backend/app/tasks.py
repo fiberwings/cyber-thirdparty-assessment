@@ -118,6 +118,21 @@ class TaskRegistry:
         except Exception:
             return None
 
+    def active(self, assessment_id: int, *, exclude_kinds: tuple[str, ...] = ()) -> list[TaskHandle]:
+        """Live pending/running tasks of this process for one assessment.
+
+        The in-memory dict is the truth for the single-process deployment;
+        tasks from a previous process are reconciled to `error` at startup, so
+        there is nothing durable to add here. Used by the workflow guards for
+        assessment-level mutual exclusion."""
+        return [
+            t
+            for t in self._tasks.values()
+            if t.assessment_id == assessment_id
+            and t.status in ("pending", "running")
+            and t.kind not in exclude_kinds
+        ]
+
     def submit(self, fn: JobFn, *, kind: str = "", assessment_id: int | None = None) -> TaskHandle:
         task = TaskHandle(id=str(uuid.uuid4()), kind=kind, assessment_id=assessment_id)
         self._tasks[task.id] = task
@@ -163,7 +178,7 @@ def reconcile_interrupted_tasks() -> int:
     previous process and can never finish. Mark it errored and fail the
     phase that owns it so the UI offers a re-run. Returns the count."""
     from app.db import SessionLocal
-    from app.models import Assessment, TaskRecord
+    from app.models import Assessment, Document, TaskRecord
 
     n = 0
     with SessionLocal() as db:
@@ -177,6 +192,16 @@ def reconcile_interrupted_tasks() -> int:
             row.error = "interrupted by server restart — re-run the step"
             row.detail = row.error
             n += 1
+            # Per-document extraction: surface the interruption on the document
+            # so the evidence phase shows a retryable error, not a silent gap.
+            for doc in (
+                db.query(Document)
+                .filter(Document.weakness_task_id == row.id)
+                .all()
+            ):
+                doc.weakness_task_id = None
+                if doc.weakness_extracted_at is None:
+                    doc.weakness_error = "interrupted by server restart — retry extraction"
             if row.assessment_id is None:
                 continue
             a = db.get(Assessment, row.assessment_id)
@@ -204,6 +229,8 @@ def reconcile_interrupted_tasks() -> int:
 # narratives) calls mark_phase_started at submit time and mark_phase_done /
 # mark_phase_error from inside the job. Survives server restarts so the UI
 # can render "running / done / failed" without relying on volatile React state.
+# The entry may also carry `stale` (see app.workflow.invalidate_downstream);
+# starting a run clears it — the new run is, by definition, current.
 
 
 def _now_iso() -> str:
@@ -224,6 +251,7 @@ def mark_phase_started(assessment_id: int, phase: str, task_id: str) -> None:
             "completed_at": None,
             "task_id": task_id,
             "error": None,
+            "stale": None,
         }
         a.phase_state = state
         db.commit()
@@ -272,5 +300,26 @@ def mark_phase_error(assessment_id: int, phase: str, err: str) -> None:
         existing["task_id"] = None
         existing["error"] = err[:500]
         state[phase] = existing
+        a.phase_state = state
+        db.commit()
+
+
+def update_failed_targets(assessment_id: int, failed: list[str], warning: str | None) -> None:
+    """Keep gap_analysis.failed_targets in step after a per-control re-run or
+    a control deletion. No-op when the phase never completed."""
+    from app.db import SessionLocal
+    from app.models import Assessment
+
+    with SessionLocal() as db:
+        a = db.get(Assessment, assessment_id)
+        if a is None:
+            return
+        state = dict(a.phase_state or {})
+        entry = dict(state.get("gap_analysis") or {})
+        if not entry.get("completed_at"):
+            return
+        entry["failed_targets"] = failed
+        entry["warning"] = warning
+        state["gap_analysis"] = entry
         a.phase_state = state
         db.commit()

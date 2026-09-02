@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app import workflow
 from app.ai.agents import scenarios as scenarios_agent
 from app.api.deps import db_session, get_assessment, get_control, get_scenario
 from app.api.serializers import serialize_scenario
@@ -29,24 +30,20 @@ def list_scenarios(assessment_id: int, db: Session = Depends(db_session)):
 
 @router.post("/assessments/{assessment_id}/scenarios/generate", response_model=TaskStatusRead)
 async def generate_scenarios(assessment_id: int, db: Session = Depends(db_session)):
+    """Generate inherent-risk scenarios + expected controls from the scoped
+    description. Requires scoping to be done; a second request while a
+    generation is already running re-attaches to it (two concurrent runs
+    interleave destructively — each clears and reinserts the
+    description-sourced scenarios). Starting a run stamps correlation and
+    everything after it stale: they were computed against the old scenario
+    set."""
     a = get_assessment(assessment_id, db)
-    if a.description is None or not a.description.text.strip():
-        raise HTTPException(status_code=400, detail="Set the service description first.")
-
-    # Concurrency guard: at most one generation run per assessment. Two
-    # concurrent runs interleave destructively (each clears and reinserts the
-    # description-sourced scenarios, and phase-2 control writes then attach to
-    # the other run's rows). A second request re-attaches to the run in flight.
-    existing_id = ((a.phase_state or {}).get("scenarios_generation") or {}).get("task_id")
-    if existing_id:
-        existing = registry.get(existing_id)
-        if existing is not None and existing.status in ("pending", "running"):
-            return TaskStatusRead(
-                task_id=existing.id,
-                status=existing.status,
-                progress=existing.progress,
-                detail=existing.detail,
-            )
+    workflow.require_step_ready(a, "scenarios")
+    live = workflow.require_no_run_in_flight(a, reattach_kind=workflow.KIND_SCENARIOS)
+    if live is not None:
+        return workflow.reattach_response(live)
+    workflow.invalidate_downstream(a, "correlation", reason="Scenarios regenerated")
+    db.commit()
     summary = (a.description.sufficiency_json or {}).get("summary_so_far") or a.description.text
 
     aid = a.id
@@ -64,18 +61,30 @@ async def generate_scenarios(assessment_id: int, db: Session = Depends(db_sessio
                 await scenarios_agent.generate(
                     inner, assessment, summary, on_progress=on_progress
                 )
-                assessment.current_phase = "evidence"
                 inner.commit()
             mark_phase_done(aid, "scenarios_generation")
         except Exception as e:
             mark_phase_error(aid, "scenarios_generation", str(e))
             raise
 
-    handle = registry.submit(job, kind="scenarios_generation", assessment_id=aid)
+    handle = registry.submit(job, kind=workflow.KIND_SCENARIOS, assessment_id=aid)
     mark_phase_started(aid, "scenarios_generation", handle.id)
-    return TaskStatusRead(
-        task_id=handle.id, status=handle.status, progress=handle.progress, detail=""
-    )
+    return workflow.reattach_response(handle)
+
+
+# ---------- Manual edits ----------
+#
+# Every edit below is refused (409) while a job runs for the assessment — a
+# gap-analysis worker may be writing the very rows being edited — and stamps
+# the steps whose output it invalidates:
+#   * scenario / control *text* feeds the gap-analysis prompt → analysis stale
+#   * a *new* control was never assessed → analysis stale, resumable with
+#     `only_failed=true` (it targets never-assessed controls)
+#   * inherent ratings, weights, deletions and verdict edits only change the
+#     deterministic score → narratives stale (recalculate is unguarded)
+
+_SCENARIO_TEXT_FIELDS = {"name", "description"}
+_CONTROL_TEXT_FIELDS = {"name", "description", "rationale"}
 
 
 @router.patch("/scenarios/{scenario_id}", response_model=ScenarioRead)
@@ -83,11 +92,18 @@ def patch_scenario(
     scenario_id: int, payload: ScenarioPatch, db: Session = Depends(db_session)
 ):
     s = get_scenario(scenario_id, db)
+    a = s.assessment
+    workflow.require_no_run_in_flight(a)
     data = payload.model_dump(exclude_none=True)
+    changed = {k for k, v in data.items() if getattr(s, k) != v}
     for k, v in data.items():
         setattr(s, k, v)
     if data:
         s.user_edited = True
+    if changed & _SCENARIO_TEXT_FIELDS:
+        workflow.invalidate_downstream(a, "analysis", reason=f"Scenario {s.code} text edited")
+    elif changed:
+        workflow.invalidate_downstream(a, "narratives", reason=f"Scenario {s.code} inherent rating edited")
     db.commit()
     db.refresh(s)
     return serialize_scenario(s)
@@ -96,6 +112,9 @@ def patch_scenario(
 @router.delete("/scenarios/{scenario_id}", status_code=204)
 def delete_scenario(scenario_id: int, db: Session = Depends(db_session)):
     s = get_scenario(scenario_id, db)
+    a = s.assessment
+    workflow.require_no_run_in_flight(a)
+    workflow.invalidate_downstream(a, "narratives", reason=f"Scenario {s.code} deleted")
     db.delete(s)
     db.commit()
 
@@ -105,9 +124,16 @@ def patch_expected_control(
     control_id: int, payload: ExpectedControlPatch, db: Session = Depends(db_session)
 ):
     ec = get_control(control_id, db)
+    a = ec.scenario.assessment
+    workflow.require_no_run_in_flight(a)
     data = payload.model_dump(exclude_none=True)
+    changed = {k for k, v in data.items() if getattr(ec, k) != v}
     for k, v in data.items():
         setattr(ec, k, v)
+    if changed & _CONTROL_TEXT_FIELDS:
+        workflow.invalidate_downstream(a, "analysis", reason=f"Control {ec.code} text edited")
+    elif changed:
+        workflow.invalidate_downstream(a, "narratives", reason=f"Control {ec.code} weight edited")
     db.commit()
     db.refresh(ec)
     return serialize_scenario(ec.scenario)
@@ -124,6 +150,8 @@ def add_expected_control(
     db: Session = Depends(db_session),
 ):
     s = get_scenario(scenario_id, db)
+    a = s.assessment
+    workflow.require_no_run_in_flight(a)
     code = payload.code.strip().upper()
     if not code:
         raise HTTPException(status_code=422, detail="Code is required")
@@ -142,6 +170,9 @@ def add_expected_control(
     )
     db.add(ec)
     s.user_edited = True
+    workflow.invalidate_downstream(
+        a, "analysis", reason=f"Control {code} added to {s.code}", resume_ok=True
+    )
     db.commit()
     db.refresh(s)
     return serialize_scenario(s)
@@ -151,9 +182,13 @@ def add_expected_control(
 def delete_expected_control(control_id: int, db: Session = Depends(db_session)):
     ec = get_control(control_id, db)
     scenario = ec.scenario
+    a = scenario.assessment
+    workflow.require_no_run_in_flight(a)
+    workflow.invalidate_downstream(
+        a, "narratives", reason=f"Control {ec.code} deleted from {scenario.code}"
+    )
     db.delete(ec)
-    if scenario is not None:
-        scenario.user_edited = True
+    scenario.user_edited = True
     db.commit()
 
 
@@ -165,11 +200,16 @@ def patch_control_assessment(
     if ca is None:
         # Create on-the-fly if user edits a never-assessed control. Look up by EC id supplied via query? Not in this signature.
         raise HTTPException(status_code=404, detail="Control assessment not found")
+    ec = ca.expected_control
+    a = ec.scenario.assessment
+    workflow.require_no_run_in_flight(a)
     data = payload.model_dump(exclude_none=True)
     for k, v in data.items():
         setattr(ca, k, v)
     if "coverage" in data or "effectiveness" in data:
         ca.is_locked_by_user = True
+    if data:
+        workflow.invalidate_downstream(a, "narratives", reason=f"Verdict for {ec.code} edited")
     db.commit()
     db.refresh(ca)
     return serialize_scenario(ca.expected_control.scenario)
@@ -181,6 +221,8 @@ def upsert_control_assessment(
 ):
     """Idempotent create-or-update of a control_assessment for user-driven editing."""
     ec = get_control(control_id, db)
+    a = ec.scenario.assessment
+    workflow.require_no_run_in_flight(a)
     ca = ec.assessment or ControlAssessment(expected_control_id=ec.id)
     data = payload.model_dump(exclude_none=True)
     for k, v in data.items():
@@ -189,6 +231,8 @@ def upsert_control_assessment(
         ca.is_locked_by_user = True
     if not ca.id:
         db.add(ca)
+    if data:
+        workflow.invalidate_downstream(a, "narratives", reason=f"Verdict for {ec.code} edited")
     db.commit()
     db.refresh(ec)
     return serialize_scenario(ec.scenario)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +24,8 @@ from app.models import (
 )
 from app.schemas.ai import DocumentWeaknessListOut
 from app.tasks import reconcile_interrupted_tasks, registry
+
+from .conftest import advance_workflow
 
 GOOD_CONTROL = {
     "control_code": "IAM.MFA",
@@ -301,25 +304,31 @@ def test_settings_endpoint_and_per_control_rerun(client, fake_client):
         db.rollback()
         db.add(s); db.flush(); ec = ExpectedControl(scenario_id=s.id, code="IAM.MFA", name="MFA"); db.add(ec)
         doc = Document(assessment_id=a.id, kind="soc", filename="soc.pdf",
-                       mime="application/pdf", sha256="abc", size_bytes=100)
+                       mime="application/pdf", sha256="abc", size_bytes=100,
+                       parsed_at=datetime.utcnow(), weakness_extracted_at=datetime.utcnow())
         db.add(doc)
         db.flush()
         db.add(Chunk(document_id=doc.id, page=7, section_path="CC6.1", ord=1,
                      text="All administrative users must authenticate with MFA."))
         db.commit()
         ec_id = ec.id
+    # Gap analysis is gated on scoping, scenarios, evidence and correlation.
+    advance_workflow(aid, "correlation")
 
     # failed run: no canned response → per-control error, phase done with warning
     r = client.post(f"/api/assessments/{aid}/gap-analysis/run")
+    assert r.status_code == 200, r.text
     tid = r.json()["task_id"]
     st = client.get(f"/api/tasks/{tid}").json()
     assert st["status"] == "error"  # every control failed → run-level failure
     a = client.get(f"/api/assessments/{aid}").json()
     assert a["phases"]["analysis"]["state"] == "error"
 
-    # per-control AI re-run succeeds (whole-bundle mode → batched shape)
+    # per-control AI re-run succeeds (whole-bundle mode → batched shape); the
+    # resume path is allowed after an errored full run.
     fake_client.push_json({"controls": [GOOD_CONTROL]})
     r = client.post(f"/api/expected-controls/{ec_id}/assess-ai")
+    assert r.status_code == 200, r.text
     tid = r.json()["task_id"]
     st = client.get(f"/api/tasks/{tid}").json()
     assert st["status"] == "done", st

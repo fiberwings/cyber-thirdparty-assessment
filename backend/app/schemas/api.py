@@ -15,6 +15,51 @@ class AssessmentCreate(BaseModel):
     vendor_name: str = Field(min_length=1, max_length=200)
 
 
+class StaleInfo(BaseModel):
+    """A completed phase whose inputs changed after it ran. The artefact is
+    kept and shown, but every later step is blocked until this one is re-run."""
+
+    at: datetime
+    reasons: list[str] = Field(default_factory=list)
+    # True only when `gap-analysis/run?only_failed=true` (never-assessed +
+    # failed controls) is a complete fix — i.e. a control was added.
+    resume_ok: bool = False
+
+
+BlockCode = Literal[
+    "missing_description",
+    "prerequisite_pending",
+    "prerequisite_running",
+    "prerequisite_error",
+    "prerequisite_stale",
+    "no_documents",
+    "extraction_incomplete",
+    "extraction_failed",
+    "run_in_flight",
+    "resume_requires_full_run",
+]
+
+
+class BlockReason(BaseModel):
+    code: BlockCode
+    step: Optional[str] = None
+    message: str
+    # run_in_flight
+    task_id: Optional[str] = None
+    kind: Optional[str] = None
+    # extraction_failed / extraction_incomplete
+    document_ids: list[int] = Field(default_factory=list)
+
+
+class WorkflowConflict(BaseModel):
+    """Body of every 409 raised by app.workflow guards."""
+
+    code: BlockCode
+    step: str
+    missing: list[BlockReason]
+    message: str
+
+
 class PhaseInfo(BaseModel):
     state: Literal["pending", "running", "done", "error"]
     started_at: Optional[datetime] = None
@@ -28,6 +73,13 @@ class PhaseInfo(BaseModel):
     # could not be assessed and are resumable individually).
     warning: Optional[str] = None
     failed_targets: list[str] = Field(default_factory=list)
+    # Workflow gating (app.workflow). `stale` is set on a done phase whose
+    # inputs changed; `ready` says whether the phase's action may be started
+    # now and `blocked_by` explains why not. The frontend reads these rather
+    # than re-deriving the rules.
+    stale: Optional[StaleInfo] = None
+    ready: bool = False
+    blocked_by: list[BlockReason] = Field(default_factory=list)
 
 
 class AssessmentSettingsPatch(BaseModel):
@@ -53,7 +105,8 @@ class AssessmentRead(BaseModel):
     as_of_date: date
     as_of_date_set: bool = False
     standards_profile: StandardsProfile = Field(default_factory=StandardsProfile)
-    # UI-facing phase tracker. Keys: scoping, scenarios, evidence, analysis, score.
+    # UI-facing phase tracker. Keys: scoping, scenarios, evidence, correlation,
+    # analysis, score (see app.workflow.UI_KEY).
     phases: dict[str, PhaseInfo] = Field(default_factory=dict)
 
     class Config:
@@ -101,9 +154,11 @@ class DocumentRead(BaseModel):
     parsed_at: Optional[datetime]
     weakness_extracted_at: Optional[datetime] = None
     attestation_profile: Optional[dict] = None
-    # Populated only on the upload response so the frontend can poll the
-    # background extraction task. Other endpoints return None.
+    # Durable extraction job state (persisted on the row): the task to poll
+    # while running, the error when it failed, and a derived summary state.
     weakness_task_id: Optional[str] = None
+    weakness_error: Optional[str] = None
+    extraction_state: Literal["pending", "running", "done", "error"] = "pending"
 
     class Config:
         from_attributes = True

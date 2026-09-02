@@ -17,12 +17,14 @@ export function DocumentFindingsSection({
   weaknesses,
   defaultOpen,
   onDelete,
+  onRetryExtraction,
   searchActive,
 }: {
   doc: DocumentRead;
   weaknesses: WeaknessRead[];
   defaultOpen: boolean;
   onDelete: (id: number) => void;
+  onRetryExtraction?: (id: number) => void;
   searchActive: boolean;
 }) {
   // Header counts reflect reported rows only; the list still shows
@@ -72,6 +74,7 @@ export function DocumentFindingsSection({
                 queued
               </span>
             )}
+            <ExtractionChip doc={doc} />
           </div>
           <div className="text-[11px] text-ink-500 mt-0.5">
             {(doc.size_bytes / 1024).toFixed(1)} KB
@@ -88,6 +91,19 @@ export function DocumentFindingsSection({
             )}
           </div>
         </div>
+        {doc.extraction_state === "error" && onRetryExtraction && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onRetryExtraction(doc.id);
+            }}
+            className="text-[11px] text-amber-700 hover:text-amber-900 shrink-0 font-medium"
+          >
+            retry extraction
+          </button>
+        )}
         <button
           type="button"
           onClick={(e) => {
@@ -100,6 +116,11 @@ export function DocumentFindingsSection({
           delete
         </button>
       </summary>
+      {doc.extraction_state === "error" && doc.weakness_error && (
+        <div className="mx-4 mb-3 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800">
+          {doc.weakness_error}
+        </div>
+      )}
       {doc.attestation_profile && <AttestationProfileCard profile={doc.attestation_profile} />}
 
       {!empty && (
@@ -111,6 +132,29 @@ export function DocumentFindingsSection({
       )}
     </details>
   );
+}
+
+// Per-document weakness extraction state — the evidence step is done only
+// when every document is "done".
+function ExtractionChip({ doc }: { doc: DocumentRead }) {
+  switch (doc.extraction_state) {
+    case "running":
+    case "pending":
+      return (
+        <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-amber-700 bg-amber-50 rounded px-1.5 py-0.5">
+          <span className="h-2 w-2 rounded-full border border-amber-500 border-t-transparent animate-spin" />
+          extracting
+        </span>
+      );
+    case "error":
+      return (
+        <span className="text-[10px] uppercase tracking-wider text-white bg-risk-high rounded px-1.5 py-0.5" title={doc.weakness_error ?? undefined}>
+          extraction failed
+        </span>
+      );
+    default:
+      return null;
+  }
 }
 
 function SeverityCounts({ counts }: { counts: Record<WeaknessRead["severity"], number> }) {

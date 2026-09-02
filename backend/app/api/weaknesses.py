@@ -3,9 +3,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app import workflow
 from app.ai.agents import cross_correlation as corr_agent
 from app.api.deps import db_session, get_assessment
 from app.db import SessionLocal
+from app.models import Assessment
 from app.schemas.api import TaskStatusRead, WeaknessRead
 from app.tasks import mark_phase_done, mark_phase_error, mark_phase_started, registry
 
@@ -36,6 +38,22 @@ async def synthesize(assessment_id: int, db: Session = Depends(db_session)):
     cross-correlation over already-extracted weaknesses.
     """
     a = get_assessment(assessment_id, db)
+    return submit_correlation(db, a)
+
+
+def submit_correlation(db: Session, a: Assessment) -> TaskStatusRead:
+    """Shared by `/cross-correlate` and `/weaknesses/synthesize`.
+
+    Requires scoping, scenarios and evidence extraction to be done and current;
+    re-attaches to a correlation already in flight. Starting a run stamps gap
+    analysis and narratives stale — correlation rewrites the confirmed
+    weakness set they were computed from."""
+    workflow.require_step_ready(a, "correlation")
+    live = workflow.require_no_run_in_flight(a, reattach_kind=workflow.KIND_CORRELATION)
+    if live is not None:
+        return workflow.reattach_response(live)
+    workflow.invalidate_downstream(a, "analysis", reason="Cross-correlation re-run")
+    db.commit()
     aid = a.id
 
     async def job(handle):
@@ -52,8 +70,6 @@ async def synthesize(assessment_id: int, db: Session = Depends(db_session)):
             mark_phase_error(aid, "cross_correlation", str(e))
             raise
 
-    handle = registry.submit(job, kind="cross_correlation", assessment_id=aid)
+    handle = registry.submit(job, kind=workflow.KIND_CORRELATION, assessment_id=aid)
     mark_phase_started(aid, "cross_correlation", handle.id)
-    return TaskStatusRead(
-        task_id=handle.id, status=handle.status, progress=0.0, detail=""
-    )
+    return workflow.reattach_response(handle)

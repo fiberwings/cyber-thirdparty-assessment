@@ -3,6 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app import workflow
+from app.ai.context import standards_profile
 from app.ai.router import validate_model_capability
 from app.api.deps import db_session, get_assessment
 from app.api.serializers import serialize_assessment, serialize_description
@@ -51,13 +53,19 @@ def set_description(
     assessment_id: int, payload: DescriptionSet, db: Session = Depends(db_session)
 ):
     a = get_assessment(assessment_id, db)
+    workflow.require_no_run_in_flight(a)
     if a.description is None:
         d = ServiceDescription(assessment_id=a.id, text=payload.text)
         db.add(d)
-    else:
+    elif payload.text != a.description.text:
         a.description.text = payload.text
         a.description.is_sufficient = False
         a.description.sufficiency_json = {}
+        # A changed description reopens scoping: the earlier force-continue
+        # applied to the old text, and every scenario derived from it is stale.
+        # Resaving identical text changes no input and is a no-op.
+        a.force_continued = False
+        workflow.invalidate_downstream(a, "scenarios", reason="Service description edited")
     db.commit()
     db.refresh(a)
     return serialize_description(a.description)
@@ -93,16 +101,36 @@ def patch_settings(
 ):
     """Assessment-level inputs (R7): analysis date and assessor standards.
 
-    Changing either does not re-run anything; stages run afterwards use the
-    new values, and the executive summary fingerprint marks itself stale.
+    Nothing is re-run here, but completed steps that consumed the old values
+    are stamped stale so the assessment cannot progress on a mix of old and
+    new inputs. The frontend resends the full profile, so the old and new
+    values are diffed — an unchanged payload stamps nothing:
+
+    * assessor standards feed scenario generation and every downstream agent
+      → stale from scenarios
+    * the analysis date feeds attestation checks, correlation and gap
+      analysis → stale from correlation. Per-document extraction also reads
+      it (for the evidence-age header) but is deliberately not invalidated:
+      re-extracting every document for a date change is disproportionate,
+      and correlation re-judges age against the new date anyway.
     """
     a = get_assessment(assessment_id, db)
+    workflow.require_no_run_in_flight(a)
+    old_date, old_standards = a.as_of_date, standards_profile(a)
     if payload.clear_as_of_date:
         a.as_of_date = None
     elif payload.as_of_date is not None:
         a.as_of_date = payload.as_of_date.isoformat()
     if payload.standards_profile is not None:
         a.standards_profile = payload.standards_profile.model_dump(exclude_none=True)
+    if standards_profile(a) != old_standards:
+        workflow.invalidate_downstream(a, "scenarios", reason="Assessor standards changed")
+    if a.as_of_date != old_date:
+        workflow.invalidate_downstream(
+            a,
+            "correlation",
+            reason="Analysis date changed (document extraction is not re-run)",
+        )
     db.commit()
     db.refresh(a)
     return serialize_assessment(a)

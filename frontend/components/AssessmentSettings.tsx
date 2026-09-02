@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { EMPTY_STANDARDS, StandardsProfile } from "@/lib/types";
 
 // Assessment-level inputs (R7): the analysis date every freshness judgement
@@ -150,7 +150,7 @@ export function AssessmentSettings({ assessmentId }: { assessmentId: number }) {
           </div>
 
           <div className="flex items-center justify-end gap-3">
-            {save.isError && <span className="text-xs text-risk-high">{String(save.error)}</span>}
+            {save.isError && <span className="text-xs text-risk-high">{describeError(save.error)}</span>}
             {save.isSuccess && <span className="text-xs text-emerald-700">Saved</span>}
             <button
               onClick={() => save.mutate()}

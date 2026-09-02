@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { use } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
+import { PrerequisitesBanner } from "@/components/PrerequisitesBanner";
 import {
   SEVERITY_ORDER,
   SEVERITY_STYLES,
@@ -49,6 +50,10 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         >
           Print
         </button>
+      </div>
+
+      <div className="mt-6 print:hidden">
+        <PrerequisitesBanner assessmentId={aid} />
       </div>
 
       {!report ? (

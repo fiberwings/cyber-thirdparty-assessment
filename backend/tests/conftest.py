@@ -109,3 +109,112 @@ class FakeOpenRouterClient:
 def fake_client():
     return FakeOpenRouterClient()
 
+
+# ---------- Workflow helpers ----------
+#
+# The workflow guards (app.workflow) refuse a step until every upstream step
+# is done and current. Tests that target one endpoint stamp the durable state
+# a real run leaves behind instead of replaying the whole pipeline.
+
+WORKFLOW_STEPS = ("scoping", "scenarios", "evidence", "correlation", "analysis", "narratives")
+
+
+def advance_workflow(aid: int, through: str, *, with_document: bool = True) -> None:
+    """Bring assessment `aid` to the state where every step up to and
+    including `through` is done and current.
+
+    scoping     description sufficient + force_continued
+    scenarios   one description-sourced scenario with one control, phase done
+    evidence    one parsed + extracted document (unless with_document=False)
+    correlation / analysis / narratives   phase markers done
+    """
+    from datetime import datetime
+
+    from app.db import SessionLocal
+    from app.models import Assessment, Document, ExpectedControl, Scenario, ServiceDescription
+    from app.tasks import mark_phase_done
+
+    if through not in WORKFLOW_STEPS:
+        raise ValueError(f"unknown step {through!r}")
+    upto = WORKFLOW_STEPS.index(through)
+    with SessionLocal() as db:
+        a = db.get(Assessment, aid)
+        assert a is not None
+        if a.description is None:
+            db.add(ServiceDescription(assessment_id=aid, text="SaaS vendor processing PII."))
+            db.flush()
+            db.refresh(a)
+        a.description.is_sufficient = True
+        a.force_continued = True
+        if upto >= 1 and not a.scenarios:
+            s = Scenario(
+                assessment_id=aid,
+                code="DATA_LEAK",
+                name="Data leakage",
+                description="Vendor mishandles PII.",
+                source="description",
+                inherent_impact=3,
+                inherent_likelihood=3,
+                residual_impact=3,
+                residual_likelihood=3,
+                score_band="High",
+            )
+            db.add(s)
+            db.flush()
+            db.add(
+                ExpectedControl(
+                    scenario_id=s.id,
+                    code="ENC.REST",
+                    name="Encryption at rest",
+                    description="",
+                    weight=1.0,
+                    rationale="",
+                )
+            )
+        if upto >= 2 and with_document and not a.documents:
+            db.add(
+                Document(
+                    assessment_id=aid,
+                    kind="policy",
+                    filename="policy.txt",
+                    mime="text/plain",
+                    sha256="0" * 64,
+                    size_bytes=10,
+                    parsed_at=datetime.utcnow(),
+                    weakness_extracted_at=datetime.utcnow(),
+                )
+            )
+        db.commit()
+    if upto >= 1:
+        mark_phase_done(aid, "scenarios_generation")
+    if upto >= 3:
+        mark_phase_done(aid, "cross_correlation")
+    if upto >= 4:
+        mark_phase_done(aid, "gap_analysis")
+    if upto >= 5:
+        mark_phase_done(aid, "narratives")
+
+
+def seed_running_task(aid: int, kind: str, task_id: str, *, phase: str | None = None) -> None:
+    """A running task record (plus, for phase-tracked kinds, the phase marker
+    pointing at it) — the durable state a click leaves behind while its job
+    is executing. `registry.get()` resolves it from the table."""
+    from app.db import SessionLocal
+    from app.models import TaskRecord
+    from app.tasks import mark_phase_started
+
+    with SessionLocal() as db:
+        db.add(
+            TaskRecord(
+                id=task_id,
+                kind=kind,
+                assessment_id=aid,
+                status="running",
+                progress=0.2,
+                detail="running",
+                error="",
+            )
+        )
+        db.commit()
+    if phase:
+        mark_phase_started(aid, phase, task_id)

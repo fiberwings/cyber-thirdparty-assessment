@@ -31,13 +31,13 @@ class StageError(Exception):
 
 
 # Maps runner stage names to the durable phase keys in AssessmentRead.phases
-# (five UI phases: scoping, scenarios, evidence, analysis, score — see
-# backend serializers.compute_phase_status). Used as a fallback when the
+# (six UI phases: scoping, scenarios, evidence, correlation, analysis, score —
+# see backend serializers.compute_phase_status). Used as a fallback when the
 # in-memory task registry loses a task (404).
 STAGE_TO_PHASE = {
     "scenarios": "scenarios",
     "extraction": "evidence",
-    "cross_correlate": "evidence",
+    "cross_correlate": "correlation",
     "gap_analysis": "analysis",
     "narratives": "score",
 }

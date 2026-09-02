@@ -1,4 +1,52 @@
-import { Assessment, ScenarioRead, DescriptionRead, DocumentRead, ChunkRead, AggregateScoreRead, ScenarioScoreRead, ReportOut, ModelProfile, WeaknessRead, MetaIssueRead, StandardsProfile } from "./types";
+import { Assessment, ScenarioRead, DescriptionRead, DocumentRead, ChunkRead, AggregateScoreRead, ScenarioScoreRead, ReportOut, ModelProfile, WeaknessRead, MetaIssueRead, StandardsProfile, WorkflowConflictDetail } from "./types";
+
+// Every non-2xx response. `detail` is the parsed JSON `detail` when the body
+// was JSON (FastAPI's shape), otherwise the raw text.
+export class ApiError extends Error {
+  status: number;
+  detail: unknown;
+  constructor(status: number, detail: unknown, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+async function raise(r: Response): Promise<never> {
+  const text = await r.text();
+  let detail: unknown = text;
+  try {
+    detail = JSON.parse(text)?.detail ?? text;
+  } catch {
+    /* not JSON */
+  }
+  const message =
+    typeof detail === "string"
+      ? detail
+      : detail && typeof detail === "object" && "message" in detail && typeof (detail as { message: unknown }).message === "string"
+        ? (detail as { message: string }).message
+        : `HTTP ${r.status}: ${text}`;
+  throw new ApiError(r.status, detail, message);
+}
+
+// The workflow guards answer 409 with a structured body (see
+// backend app.workflow); null for any other error.
+export function conflictDetail(e: unknown): WorkflowConflictDetail | null {
+  if (!(e instanceof ApiError) || e.status !== 409) return null;
+  const d = e.detail as Partial<WorkflowConflictDetail> | null;
+  if (!d || typeof d !== "object" || !Array.isArray(d.missing) || typeof d.message !== "string") return null;
+  return d as WorkflowConflictDetail;
+}
+
+// Human-readable line for any thrown error (workflow 409s come through as
+// their reason; everything else as its message).
+export function describeError(e: unknown): string {
+  const c = conflictDetail(e);
+  if (c) return c.message;
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
 
 async function http<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   const r = await fetch(input, {
@@ -8,10 +56,7 @@ async function http<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
       ...(init?.headers || {}),
     },
   });
-  if (!r.ok) {
-    const text = await r.text();
-    throw new Error(`HTTP ${r.status}: ${text}`);
-  }
+  if (!r.ok) await raise(r);
   if (r.status === 204) return undefined as unknown as T;
   return (await r.json()) as T;
 }
@@ -53,10 +98,13 @@ export const api = {
     fd.append("kind", kind);
     fd.append("file", file);
     const r = await fetch(`/api/assessments/${id}/documents`, { method: "POST", body: fd });
-    if (!r.ok) throw new Error(`Upload failed: ${r.status} ${await r.text()}`);
+    if (!r.ok) await raise(r);
     return r.json();
   },
   deleteDocument: (id: number) => http<void>(`/api/documents/${id}`, { method: "DELETE" }),
+  // Retry path for a failed / interrupted per-document extraction.
+  extractWeaknesses: (docId: number) =>
+    http<{ task_id: string; status: string }>(`/api/documents/${docId}/extract-weaknesses`, { method: "POST" }),
   documentChunks: (id: number, q?: string) =>
     http<ChunkRead[]>(`/api/documents/${id}/chunks${q ? `?q=${encodeURIComponent(q)}` : ""}`),
   getChunk: (id: number) => http<ChunkRead>(`/api/chunks/${id}`),

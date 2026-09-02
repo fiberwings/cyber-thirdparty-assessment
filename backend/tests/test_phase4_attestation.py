@@ -13,6 +13,8 @@ from app.models import Assessment, Chunk, Document, Weakness
 from app.schemas.attestation import AttestationProfileOut
 from app.schemas.standards import StandardsProfile
 
+from .conftest import advance_workflow
+
 AS_OF = date(2026, 5, 1)
 EMPTY = StandardsProfile()
 
@@ -159,6 +161,7 @@ async def test_upload_job_survives_profile_failure(fresh_db, fake_client, monkey
     with TestClient(main_mod.app) as client:
         r = client.post("/api/assessments", json={"vendor_name": "Acme"})
         aid = r.json()["id"]
+        advance_workflow(aid, "scenarios", with_document=False)  # upload is gated on scenarios
         fake_client.push_json({"weaknesses": []})
         fake_client.push_json({"doc_type": ["not", "a", "string"], "period_end": "garbage"})  # invalid twice
         fake_client.push_json({"doc_type": ["still"], "period_end": "garbage"})

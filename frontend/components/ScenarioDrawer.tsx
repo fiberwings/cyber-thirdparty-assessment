@@ -2,7 +2,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ScenarioRead } from "@/lib/types";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { ControlEditor } from "./ControlEditor";
 import { useState } from "react";
 import { bandColor, bandLabel } from "@/lib/utils";
@@ -21,9 +21,12 @@ export function ScenarioDrawer({
   const [inherentI, setInherentI] = useState(scenario.inherent_impact);
   const [inherentL, setInherentL] = useState(scenario.inherent_likelihood);
 
+  // Edits stamp downstream steps stale (and are refused while a job runs),
+  // so the assessment's phases are refreshed alongside the scores.
   const invalidateScores = () => {
     qc.invalidateQueries({ queryKey: ["scenarios", assessmentId] });
     qc.invalidateQueries({ queryKey: ["report", assessmentId] });
+    qc.invalidateQueries({ queryKey: ["assessment", assessmentId] });
   };
 
   const patch = useMutation({
@@ -43,6 +46,7 @@ export function ScenarioDrawer({
       onClose();
     },
   });
+  const editError = patch.isError ? describeError(patch.error) : remove.isError ? describeError(remove.error) : null;
 
   const onDeleteScenario = () => {
     const ok = window.confirm(
@@ -85,6 +89,7 @@ export function ScenarioDrawer({
         >
           {patch.isPending ? "Saving…" : "Save & recalculate"}
         </button>
+        {editError && <div className="mt-2 text-xs text-risk-high">{editError}</div>}
       </header>
 
       <div className="flex-1 overflow-y-auto p-5 space-y-3">
@@ -161,10 +166,11 @@ function AddControlForm({
       await api.recalculate(assessmentId);
       qc.invalidateQueries({ queryKey: ["scenarios", assessmentId] });
       qc.invalidateQueries({ queryKey: ["report", assessmentId] });
+      qc.invalidateQueries({ queryKey: ["assessment", assessmentId] });
       reset();
       setOpen(false);
     },
-    onError: (e: Error) => setError(e.message),
+    onError: (e: unknown) => setError(describeError(e)),
   });
 
   if (!open) {

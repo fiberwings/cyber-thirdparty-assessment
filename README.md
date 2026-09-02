@@ -5,8 +5,8 @@ AI-assisted, fully cited TPRM workflow:
 1. Describe the vendor service (AI loops Q&A until sufficient — or you force-continue).
 2. AI proposes inherent risk scenarios + the controls each scenario expects.
 3. Upload vendor evidence (questionnaire, SOC 2, ISO 27001, pen test, policies — PDF / XLSX / DOCX).
-4. Gap analysis: every expected control is matched against retrieved evidence; coverage and effectiveness tracked separately, every claim cited with page/section + verbatim quote.
-5. Weakness synthesizer surfaces emergent scenarios from pen-test findings or questionnaire negatives.
+4. Cross-correlation: per-document findings are correlated across the evidence bundle, mapped onto scenario controls, and emergent scenarios are spawned from pen-test findings or questionnaire negatives.
+5. Gap analysis: every expected control (including those of emergent scenarios) is matched against retrieved evidence; coverage and effectiveness tracked separately, every claim cited with page/section + verbatim quote.
 6. Deterministic scoring (4×4 impact × likelihood) with meta-issue uplift for vague answers and missing docs.
 7. Edit any AI assessment → score recalculates instantly.
 
@@ -64,10 +64,16 @@ The e2e test (`tests/test_e2e.py`) walks the full workflow end-to-end with a fak
 3. Type a 2-sentence description, press **Submit description**.
 4. Press **Start scoping** — the AI asks a question. Either answer it or click **Force continue**.
 5. Click **2. Inherent risk** in the left nav, then **Generate scenarios**.
-6. Click **3. Evidence** and upload at least one PDF or XLSX.
-7. Click **4. Gap analysis** and run all three steps in order.
+6. Click **3. Evidence** and upload at least one PDF or XLSX; wait for per-document extraction to finish.
+7. Click **4. Analysis** and run the three steps in order: cross-correlate, gap analysis, narratives & summary.
 8. Click **5. Residual score** — every band, every cited piece of evidence is visible.
 9. Open any scenario and edit a control's effectiveness from "strong" to "weak"; the band re-renders within a second.
+
+The steps are strictly sequential and the backend enforces the order: an action whose prerequisites are
+not met (or while another job is running) is refused with a 409 and the reason is shown next to the
+disabled button. Changing an input after a step has run — editing the description or settings, uploading
+or deleting a document, regenerating scenarios, editing a scenario or control — marks every downstream
+step **stale** (kept visible, with the cause) and blocks progression until those steps are re-run.
 
 ## Project layout
 

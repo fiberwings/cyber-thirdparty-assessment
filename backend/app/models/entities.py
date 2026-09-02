@@ -35,8 +35,12 @@ class Assessment(Base):
     model_overrides: Mapped[dict] = mapped_column(JSON, default=dict)
     # Per-phase run state for the four long-running orchestrators
     # (scenarios_generation, cross_correlation, gap_analysis, narratives).
-    # Shape per phase: {started_at, completed_at, task_id, error}.
-    # Other phases (scoping, evidence, score) are derived from data presence.
+    # Shape per phase: {started_at, completed_at, task_id, error, warning?,
+    # failed_targets?, stale?}. `stale` = {at, reasons[], resume_ok} is stamped
+    # by app.workflow.invalidate_downstream when an upstream input changes and
+    # cleared by the next mark_phase_started; a stale phase blocks every later
+    # step until it is re-run. Other phases (scoping, evidence) are derived
+    # from data presence.
     phase_state: Mapped[dict] = mapped_column(JSON, default=dict)
     # Persisted AI executive summary:
     # {generated_at, model_id, fingerprint, summary: ExecutiveSummaryOut dump}.
@@ -128,6 +132,12 @@ class Document(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     parsed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     weakness_extracted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Durable handle on the per-document extraction job so the evidence phase
+    # can be derived from documents alone (running / failed / done) and a
+    # failed extraction is visible and retryable instead of leaving the
+    # document silently unextracted.
+    weakness_task_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    weakness_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Typed attestation profile (SOC / ISO / pen-test docs only; Phase 4).
     # Shape: schemas.attestation.AttestationProfileOut dump — every field
     # carries the verbatim quote it came from.

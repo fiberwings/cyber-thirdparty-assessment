@@ -15,10 +15,11 @@ from app.api.serializers import serialize_document
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Chunk, Document
+from app import workflow
 from app.parsing import parse_document
-from app.schemas.api import ChunkRead, DocumentRead
+from app.schemas.api import ChunkRead, DocumentRead, TaskStatusRead
 from app.storage.files import signed_token, store_file, verify_token
-from app.tasks import registry
+from app.tasks import TaskHandle, registry
 
 router = APIRouter(prefix="/api", tags=["documents"])
 
@@ -45,6 +46,10 @@ async def upload_document(
     if kind not in _VALID_KINDS:
         raise HTTPException(status_code=400, detail=f"Invalid kind. Allowed: {_VALID_KINDS}")
     a = get_assessment(assessment_id, db)
+    # Evidence follows scenarios; uploads may proceed while another document
+    # is still extracting (same step) but not while any other job runs.
+    workflow.require_step_ready(a, "evidence")
+    workflow.require_no_run_in_flight(a, allow_kinds=(workflow.KIND_EXTRACTION,))
 
     max_bytes = settings.max_upload_mb * 1024 * 1024
     data = await file.read(max_bytes + 1)
@@ -83,56 +88,82 @@ async def upload_document(
             )
         )
     doc.parsed_at = datetime.utcnow()
+    # A new document changes the evidence bundle: correlation and everything
+    # after it must be re-run before the assessment can progress.
+    workflow.invalidate_downstream(a, "correlation", reason=f"Document uploaded: {doc.filename}")
     db.commit()
     db.refresh(doc)
 
-    # Auto-fire per-document weakness extraction. After extraction completes,
-    # if every document in this assessment has weakness_extracted_at set, also
-    # fire cross-correlation so emergent scenarios + score impact are reflected
-    # without requiring an extra click. The user gets a single task id to poll.
-    doc_id = doc.id
-    assessment_id = a.id
+    # Auto-fire per-document weakness extraction. The task id is persisted on
+    # the row so the evidence phase and the document list can report it.
+    _submit_extraction(db, doc)
+    return serialize_document(doc)
+
+
+def _set_extraction_error(doc_id: int, message: str) -> None:
+    with SessionLocal() as inner:
+        d = inner.get(Document, doc_id)
+        if d is None:
+            return
+        d.weakness_error = message[:500]
+        inner.commit()
+
+
+def _submit_extraction(db: Session, doc: Document) -> TaskHandle:
+    """Start per-document weakness extraction (+ best-effort attestation
+    profile) and persist the task id on the document. Extraction only:
+    confirmation against the whole bundle, merge and cross-correlation run in
+    the explicit cross-correlate step (R3) — doing them per upload would judge
+    candidates against a partial bundle."""
+    doc_id, assessment_id = doc.id, doc.assessment_id
 
     async def job(handle):
         await handle.update(progress=0.05, detail="Extracting weaknesses...")
 
         async def extract_progress(p: float, detail: str):
-            # Reserve [0.0, 0.85] for extraction; [0.85, 1.0] for the optional
-            # cross-correlation step.
+            # Reserve [0.0, 0.85] for extraction; the rest for the profile.
             await handle.update(progress=min(p * 0.85, 0.85), detail=detail)
 
-        with SessionLocal() as inner:
-            await docw_agent.extract(
-                inner, doc_id, on_progress=extract_progress
-            )
-            # Typed attestation profile for assurance documents (fast, cheap).
-            # Best-effort: a failed profile never fails the extraction job —
-            # the document simply has no profile (deterministic checks stay
-            # silent) and the profile can be re-extracted via the API.
-            profile_warning = ""
-            try:
-                await attestation_agent.extract_profile(inner, doc_id)
-            except Exception as e:
-                profile_warning = f" — attestation profile failed (re-run available): {str(e)[:150]}"
-        # Extraction only. Confirmation against the whole bundle, merge and
-        # cross-correlation run in the explicit cross-correlate step (R3):
-        # doing them per upload would judge candidates against a partial
-        # bundle. The evidence phase therefore stays "pending" until that
-        # step is run (analysis page, step 2).
+        try:
+            with SessionLocal() as inner:
+                await docw_agent.extract(inner, doc_id, on_progress=extract_progress)
+                # Typed attestation profile for assurance documents (fast, cheap).
+                # Best-effort: a failed profile never fails the extraction job —
+                # the document simply has no profile (deterministic checks stay
+                # silent) and the profile can be re-extracted via the API.
+                profile_warning = ""
+                try:
+                    await attestation_agent.extract_profile(inner, doc_id)
+                except Exception as e:
+                    profile_warning = f" — attestation profile failed (re-run available): {str(e)[:150]}"
+        except Exception as e:
+            # Surface on the row: the evidence phase turns "error" with this
+            # document listed and the UI offers a retry. Never leave a silent
+            # NULL weakness_extracted_at behind.
+            _set_extraction_error(doc_id, f"Extraction failed: {str(e)[:400]}")
+            raise
         await handle.update(progress=1.0, detail="Extracted candidates" + profile_warning)
 
-    handle = registry.submit(job, kind="cross_correlation", assessment_id=assessment_id)
-    # Attach the task id to the response so the frontend can poll
-    # /api/tasks/{id} for extraction progress.
-    doc.weakness_task_id = handle.id  # transient field on ORM instance
-    return serialize_document(doc)
+    handle = registry.submit(job, kind=workflow.KIND_EXTRACTION, assessment_id=assessment_id)
+    doc.weakness_task_id = handle.id
+    doc.weakness_error = None
+    db.commit()
+    return handle
+
+
+def _get_document_with_assessment(db: Session, document_id: int) -> Document:
+    d = db.get(Document, document_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return d
 
 
 @router.delete("/documents/{document_id}", status_code=204)
 def delete_document(document_id: int, db: Session = Depends(db_session)):
-    d = db.get(Document, document_id)
-    if d is None:
-        raise HTTPException(status_code=404)
+    d = _get_document_with_assessment(db, document_id)
+    a = d.assessment
+    workflow.require_no_run_in_flight(a)
+    workflow.invalidate_downstream(a, "correlation", reason=f"Document deleted: {d.filename}")
     db.delete(d)
     db.commit()
 
@@ -205,11 +236,36 @@ def download_document(
 async def rerun_attestation_profile(document_id: int, db: Session = Depends(db_session)):
     """(Re)extract the typed attestation profile for one assurance document
     (synchronous — one fast-profile call)."""
-    d = db.get(Document, document_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Document not found")
+    d = _get_document_with_assessment(db, document_id)
     if d.kind not in attestation_agent.ATTESTATION_KINDS:
         raise HTTPException(status_code=400, detail="Not an assurance document (soc/iso/pentest)")
+    a = d.assessment
+    workflow.require_no_run_in_flight(a)
+    # The profile feeds the deterministic attestation checks in correlation.
+    workflow.invalidate_downstream(
+        a, "correlation", reason=f"Attestation profile re-extracted: {d.filename}"
+    )
+    db.commit()
     await attestation_agent.extract_profile(db, document_id)
     db.refresh(d)
     return serialize_document(d)
+
+
+@router.post("/documents/{document_id}/extract-weaknesses", response_model=TaskStatusRead)
+async def extract_weaknesses(document_id: int, db: Session = Depends(db_session)):
+    """(Re)run weakness extraction for one document — the retry path for a
+    failed or interrupted extraction. Re-attaches when this document's own
+    extraction is still running."""
+    d = _get_document_with_assessment(db, document_id)
+    a = d.assessment
+    if d.weakness_task_id:
+        live = registry.get(d.weakness_task_id)
+        if live is not None and live.status in ("pending", "running"):
+            return workflow.reattach_response(live)
+    workflow.require_no_run_in_flight(a, allow_kinds=(workflow.KIND_EXTRACTION,))
+    workflow.invalidate_downstream(
+        a, "correlation", reason=f"Weaknesses re-extracted: {d.filename}"
+    )
+    db.commit()
+    handle = _submit_extraction(db, d)
+    return workflow.reattach_response(handle)

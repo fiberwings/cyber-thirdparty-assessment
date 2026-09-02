@@ -1,52 +1,25 @@
-"""Per-document weakness extraction + cross-correlation endpoints."""
+"""Per-document weakness listing, cross-correlation and findings endpoints.
+
+Extraction itself (`POST /documents/{id}/extract-weaknesses`) lives in
+app.api.documents next to the upload path that auto-fires it, so both share
+one submit helper and one persisted task-state contract.
+"""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.ai.agents import cross_correlation as corr_agent
-from app.ai.agents import document_weaknesses as docw_agent
 from app.api.deps import db_session, get_assessment
-from app.db import SessionLocal
+from app.api.weaknesses import submit_correlation
 from app.models import Document, Weakness
 from app.schemas.api import (
     FindingRead,
     TaskStatusRead,
     WeaknessRead,
 )
-from app.tasks import registry
 
 router = APIRouter(prefix="/api", tags=["document-weaknesses"])
-
-
-@router.post(
-    "/documents/{document_id}/extract-weaknesses",
-    response_model=TaskStatusRead,
-)
-async def extract_weaknesses(
-    document_id: int, db: Session = Depends(db_session)
-):
-    d = db.get(Document, document_id)
-    if d is None:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    async def job(handle):
-        await handle.update(progress=0.05, detail="Loading document...")
-
-        async def on_progress(p: float, detail: str):
-            await handle.update(progress=p, detail=detail)
-
-        # Each task gets its own session.
-        with SessionLocal() as inner:
-            await docw_agent.extract(
-                inner, document_id, on_progress=on_progress
-            )
-
-    handle = registry.submit(job, kind="document_extraction", assessment_id=d.assessment_id)
-    return TaskStatusRead(
-        task_id=handle.id, status=handle.status, progress=0.0, detail=""
-    )
 
 
 @router.get(
@@ -75,23 +48,11 @@ def list_document_weaknesses(
 async def cross_correlate(
     assessment_id: int, db: Session = Depends(db_session)
 ):
+    """Correlate extracted weaknesses across the evidence bundle. Same job as
+    `/weaknesses/synthesize`: guarded, re-attaching, and writing the
+    cross_correlation phase markers."""
     a = get_assessment(assessment_id, db)
-
-    async def job(handle):
-        await handle.update(progress=0.05, detail="Correlating weaknesses...")
-
-        async def on_progress(p: float, detail: str):
-            await handle.update(progress=p, detail=detail)
-
-        with SessionLocal() as inner:
-            await corr_agent.run(
-                inner, a.id, on_progress=on_progress
-            )
-
-    handle = registry.submit(job, kind="cross_correlation", assessment_id=a.id)
-    return TaskStatusRead(
-        task_id=handle.id, status=handle.status, progress=0.0, detail=""
-    )
+    return submit_correlation(db, a)
 
 
 @router.get(

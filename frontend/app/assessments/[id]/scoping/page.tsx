@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, pollTask } from "@/lib/api";
+import { api, describeError, pollTask } from "@/lib/api";
 import { use, useState } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
 import { AssessmentSettings } from "@/components/AssessmentSettings";
@@ -28,27 +28,31 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
   const [answer, setAnswer] = useState("");
   const [progress, setProgress] = useState<{ status: string; progress: number; detail: string } | null>(null);
 
+  // Description / scoping changes reopen scoping and stamp every later step
+  // stale (and are refused while a job runs), so the phases are refreshed too.
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["description", aid] });
+    qc.invalidateQueries({ queryKey: ["assessment", aid] });
+  };
   const setDescription = useMutation({
     mutationFn: (text: string) => api.setDescription(aid, text),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["description", aid] }),
+    onSettled: refresh,
   });
   const turn = useMutation({
     mutationFn: async (answer?: string) => {
       const { task_id } = await api.scopingTurn(aid, answer);
       await pollTask(task_id, setProgress, 800);
     },
-    onSuccess: () => {
-      setAnswer("");
-      qc.invalidateQueries({ queryKey: ["description", aid] });
+    onSuccess: () => setAnswer(""),
+    onSettled: () => {
+      setProgress(null);
+      refresh();
     },
-    onSettled: () => setProgress(null),
   });
   const force = useMutation({
     mutationFn: () => api.forceContinue(aid),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["description", aid] });
-      router.push(`/assessments/${aid}/scenarios`);
-    },
+    onSuccess: () => router.push(`/assessments/${aid}/scenarios`),
+    onSettled: refresh,
   });
 
   const hasDesc = !!desc && desc.text;
@@ -84,7 +88,7 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
             </button>
           </div>
           {setDescription.isError && (
-            <div className="mt-2 text-xs text-risk-high">{String(setDescription.error)}</div>
+            <div className="mt-2 text-xs text-risk-high">{describeError(setDescription.error)}</div>
           )}
         </div>
       )}
@@ -144,10 +148,10 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
                   </div>
                 )}
                 {turn.isError && (
-                  <div className="mt-2 text-xs text-risk-high">{String(turn.error)}</div>
+                  <div className="mt-2 text-xs text-risk-high">{describeError(turn.error)}</div>
                 )}
                 {force.isError && (
-                  <div className="mt-2 text-xs text-risk-high">{String(force.error)}</div>
+                  <div className="mt-2 text-xs text-risk-high">{describeError(force.error)}</div>
                 )}
               </div>
             )}

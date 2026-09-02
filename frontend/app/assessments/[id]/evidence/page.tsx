@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { use, useMemo, useState } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
 import { DocumentFindingsSection } from "@/components/DocumentFindingsSection";
@@ -10,7 +10,8 @@ import {
   SeverityFilter,
 } from "@/components/TransversalFindingsSection";
 import { groupWeaknessesByDocument, matchesQuery } from "@/lib/utils";
-import { WeaknessRead } from "@/lib/types";
+import { DocumentRead, WeaknessRead } from "@/lib/types";
+import { useWorkflow } from "@/lib/useWorkflow";
 import { useRouter } from "next/navigation";
 import clsx from "clsx";
 
@@ -37,10 +38,20 @@ export default function EvidencePage({ params }: { params: Promise<{ id: string 
   const qc = useQueryClient();
   const router = useRouter();
 
+  // Poll while any document's extraction is running: the evidence step is
+  // done only once every document reports "done", and that gates the
+  // Continue button and cross-correlation.
   const { data: docs } = useQuery({
     queryKey: ["documents", aid],
     queryFn: () => api.listDocuments(aid),
+    refetchInterval: (q) => {
+      const d = q.state.data as DocumentRead[] | undefined;
+      return d?.some((x) => x.extraction_state === "running" || x.extraction_state === "pending") ? 1500 : false;
+    },
   });
+  const { step } = useWorkflow(aid);
+  const evidence = step("evidence");
+  const correlation = step("correlation");
   const { data: weaknesses } = useQuery({
     queryKey: ["weaknesses", aid],
     // The evidence page shows every extracted candidate with its review
@@ -58,25 +69,54 @@ export default function EvidencePage({ params }: { params: Promise<{ id: string 
   const [query, setQuery] = useState("");
   const [severity, setSeverity] = useState<SeverityFilter>("all");
 
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [docError, setDocError] = useState<string | null>(null);
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["documents", aid] });
+    qc.invalidateQueries({ queryKey: ["weaknesses", aid] });
+    qc.invalidateQueries({ queryKey: ["assessment", aid] });
+  };
+
   const del = useMutation({
     mutationFn: (id: number) => api.deleteDocument(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["documents", aid] });
-      qc.invalidateQueries({ queryKey: ["weaknesses", aid] });
+    onMutate: () => setDocError(null),
+    onSuccess: refresh,
+    onError: (e) => {
+      setDocError(describeError(e));
+      qc.invalidateQueries({ queryKey: ["assessment", aid] });
     },
+  });
+
+  // Retry a failed / interrupted per-document extraction.
+  const retry = useMutation({
+    mutationFn: (id: number) => api.extractWeaknesses(id),
+    onMutate: () => setDocError(null),
+    onSettled: refresh,
+    onError: (e) => setDocError(describeError(e)),
   });
 
   async function upload() {
     if (!file) return;
     setUploading(true);
+    setUploadError(null);
     try {
       await api.uploadDocument(aid, kind, file);
       setFile(null);
-      qc.invalidateQueries({ queryKey: ["documents", aid] });
+      refresh();
+    } catch (e) {
+      setUploadError(describeError(e));
+      qc.invalidateQueries({ queryKey: ["assessment", aid] });
     } finally {
       setUploading(false);
     }
   }
+
+  // Uploads are gated on scenarios being done and current (the backend is
+  // the authority; this mirrors its `ready` flag). Uploading while another
+  // document extracts is allowed, so a running evidence step does not block.
+  const uploadBlocked = !uploading && !evidence.canRun && !evidence.isRunning ? evidence.blockedReason : null;
+  const canContinue = correlation.canRun || correlation.isRunning || correlation.info?.state === "done";
 
   const trimmedQuery = query.trim();
   const filterActive = trimmedQuery.length > 0 || severity !== "all";
@@ -135,13 +175,28 @@ export default function EvidencePage({ params }: { params: Promise<{ id: string 
           />
           <button
             onClick={upload}
-            disabled={!file || uploading}
+            disabled={!file || uploading || !!uploadBlocked}
+            title={uploadBlocked ?? undefined}
             className="rounded bg-ink-900 text-white text-sm font-medium px-4 py-2 hover:bg-ink-700 disabled:opacity-40"
           >
             {uploading ? "Uploading…" : "Upload"}
           </button>
         </div>
+        {uploadBlocked && <div className="mt-2 text-xs text-ink-500 italic">{uploadBlocked}</div>}
+        {uploadError && (
+          <div className="mt-2 rounded border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700">{uploadError}</div>
+        )}
       </div>
+
+      {docError && (
+        <div className="mb-4 max-w-3xl rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{docError}</div>
+      )}
+      {evidence.info?.state === "error" && (
+        <div className="mb-4 max-w-3xl rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          Weakness extraction did not complete for {evidence.info.failed_targets?.join(", ") || "some documents"}.
+          Retry the extraction or delete the document — cross-correlation is blocked until every document is extracted.
+        </div>
+      )}
 
       {(docs?.length ?? 0) > 0 && (
         <div className="mb-5 max-w-3xl flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -224,6 +279,7 @@ export default function EvidencePage({ params }: { params: Promise<{ id: string 
                   defaultOpen={false}
                   searchActive={filterActive}
                   onDelete={(id) => del.mutate(id)}
+                  onRetryExtraction={(id) => retry.mutate(id)}
                 />
               ))}
             </div>
@@ -240,13 +296,18 @@ export default function EvidencePage({ params }: { params: Promise<{ id: string 
         </div>
       )}
 
-      <div className="mt-8 flex justify-end max-w-3xl">
+      <div className="mt-8 flex flex-col items-end gap-1 max-w-3xl">
         <button
           onClick={() => router.push(`/assessments/${aid}/analysis`)}
-          className="rounded bg-ink-900 text-white text-sm font-medium px-4 py-2 hover:bg-ink-700"
+          disabled={!canContinue}
+          title={!canContinue ? correlation.blockedReason ?? undefined : undefined}
+          className="rounded bg-ink-900 text-white text-sm font-medium px-4 py-2 hover:bg-ink-700 disabled:opacity-40"
         >
-          Continue to gap analysis →
+          Continue to analysis →
         </button>
+        {!canContinue && correlation.blockedReason && (
+          <div className="text-xs text-ink-500 italic">{correlation.blockedReason}</div>
+        )}
       </div>
     </AssessmentShell>
   );

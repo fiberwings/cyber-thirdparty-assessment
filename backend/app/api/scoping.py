@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app import workflow
 from app.ai.agents import scoping as scoping_agent
 from app.api.deps import db_session, get_assessment
 from app.api.serializers import serialize_description
@@ -19,11 +20,15 @@ async def scoping_turn(
     payload: TurnInput | None = None,
     db: Session = Depends(db_session),
 ):
+    """One scoping Q&A turn. Requires a description; refused while any job
+    runs. A turn rewrites the scoping summary that scenario generation
+    consumes, so completed scenarios (and everything after) are stamped
+    stale."""
     a = get_assessment(assessment_id, db)
-    if a.description is None:
-        raise HTTPException(
-            status_code=400, detail="Set the initial description before running scoping."
-        )
+    workflow.require_step_ready(a, "scoping")
+    workflow.require_no_run_in_flight(a)
+    workflow.invalidate_downstream(a, "scenarios", reason="Scoping answers changed")
+    db.commit()
     answer = (payload.answer if payload else None)
     aid = a.id
 
@@ -38,7 +43,7 @@ async def scoping_turn(
             await scoping_agent.run_turn(inner, assessment, answer)
             await handle.update(progress=0.95, detail="Saving")
 
-    handle = registry.submit(job, kind="scoping_turn", assessment_id=aid)
+    handle = registry.submit(job, kind=workflow.KIND_SCOPING_TURN, assessment_id=aid)
     return TaskStatusRead(
         task_id=handle.id, status=handle.status, progress=0.0, detail=""
     )
@@ -47,12 +52,10 @@ async def scoping_turn(
 @router.post("/{assessment_id}/scoping/force-continue", response_model=DescriptionRead)
 def force_continue(assessment_id: int, db: Session = Depends(db_session)):
     a = get_assessment(assessment_id, db)
-    if a.description is None:
-        raise HTTPException(status_code=400, detail="No description.")
+    workflow.require_step_ready(a, "scoping")
+    workflow.require_no_run_in_flight(a)
     a.force_continued = True
     a.description.is_sufficient = True
-    if a.current_phase == "scoping":
-        a.current_phase = "scenarios"
     db.commit()
     db.refresh(a)
     return serialize_description(a.description)

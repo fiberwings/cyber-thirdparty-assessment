@@ -77,6 +77,9 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("weakness", "review", "JSON"),
     # Accuracy program Phase 4 (thin R2)
     ("document", "attestation_profile", "JSON"),
+    # Sequential workflow enforcement: durable per-document extraction state
+    ("document", "weakness_task_id", "VARCHAR(36)"),
+    ("document", "weakness_error", "TEXT"),
 ]
 
 _POST_MIGRATION_INDEXES: list[str] = [
@@ -116,21 +119,10 @@ def _backfill_phase_state() -> None:
     instead of "all pending". Idempotent: only touches rows whose phase_state
     is empty.
     """
-    PHASE_ORDER = [
-        "scoping",
-        "scenarios_generation",
-        "cross_correlation",
-        "gap_analysis",
-        "narratives",
-    ]
-    PHASES_BY_CURRENT = {
-        "scoping": [],
-        "scenarios": ["scoping"],
-        "evidence": ["scoping", "scenarios_generation"],
-        "analysis": ["scoping", "scenarios_generation", "cross_correlation", "gap_analysis"],
-        "score": PHASE_ORDER,
-        "report": PHASE_ORDER,
-    }
+    # Ordering comes from app.workflow (the single source of truth); stale
+    # stamps live in the same entries and are never backfilled.
+    from app.workflow import LEGACY_PHASES_BY_CURRENT as PHASES_BY_CURRENT
+
     import json as _json
     with _engine.begin() as conn:
         rows = conn.exec_driver_sql(

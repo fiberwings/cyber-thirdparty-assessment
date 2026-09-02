@@ -6,6 +6,45 @@ export type Band = "Low" | "Moderate" | "High" | "VeryHigh";
 
 export type PhaseState = "pending" | "running" | "done" | "error";
 
+// A completed step whose inputs changed afterwards. The result stays visible
+// but blocks every downstream step until the stamped step is re-run.
+export interface StaleInfo {
+  at: string;
+  reasons: string[];
+  // Whether "re-run failed only" / per-control re-assess can still address it
+  // (true only when controls were added).
+  resume_ok: boolean;
+}
+
+export type BlockCode =
+  | "missing_description"
+  | "prerequisite_pending"
+  | "prerequisite_running"
+  | "prerequisite_error"
+  | "prerequisite_stale"
+  | "no_documents"
+  | "extraction_incomplete"
+  | "extraction_failed"
+  | "run_in_flight"
+  | "resume_requires_full_run";
+
+export interface BlockReason {
+  code: BlockCode;
+  step: string | null;
+  message: string;
+  task_id?: string | null;
+  kind?: string | null;
+  document_ids?: number[];
+}
+
+// Body of every 409 raised by the backend workflow guards.
+export interface WorkflowConflictDetail {
+  code: BlockCode;
+  step: string;
+  missing: BlockReason[];
+  message: string;
+}
+
 export interface PhaseInfo {
   state: PhaseState;
   started_at: string | null;
@@ -17,6 +56,11 @@ export interface PhaseInfo {
   // done-with-partial-failures (gap analysis): resumable per control
   warning?: string | null;
   failed_targets?: string[];
+  // Workflow: set on a done step whose inputs changed afterwards.
+  stale?: StaleInfo | null;
+  // Workflow: whether the step may be (re)started now, and why not.
+  ready?: boolean;
+  blocked_by?: BlockReason[];
 }
 
 export interface VulnSla {
@@ -46,6 +90,9 @@ export const EMPTY_STANDARDS: StandardsProfile = {
 
 export const PHASE_KEYS = ["scoping", "scenarios", "evidence", "analysis", "score"] as const;
 export type PhaseKey = (typeof PHASE_KEYS)[number];
+// Every key in AssessmentRead.phases, in workflow order.
+export const WORKFLOW_KEYS = ["scoping", "scenarios", "evidence", "correlation", "analysis", "score"] as const;
+export type WorkflowKey = (typeof WORKFLOW_KEYS)[number];
 
 export const PHASE_LABELS: Record<PhaseKey, string> = {
   scoping: "Scoping",
@@ -68,9 +115,9 @@ export interface Assessment {
   as_of_date: string;
   as_of_date_set: boolean;
   standards_profile: StandardsProfile;
-  // "correlation" is a sixth, non-nav key: the pure cross-correlation phase
-  // (the composite "evidence" key also folds per-document extraction in).
-  phases: Partial<Record<PhaseKey | "correlation", PhaseInfo>>;
+  // "correlation" is a sixth, non-nav key: the cross-correlation step that
+  // sits between evidence and gap analysis (surfaced on the analysis page).
+  phases: Partial<Record<WorkflowKey, PhaseInfo>>;
 }
 
 export interface Turn { id: number; role: string; content: string; created_at: string; }
@@ -88,6 +135,12 @@ export interface DocumentRead {
   mime: string;
   size_bytes: number;
   parsed_at: string | null;
+  // Per-document weakness extraction (the evidence step is done once every
+  // document reports "done").
+  weakness_extracted_at?: string | null;
+  weakness_task_id?: string | null;
+  weakness_error?: string | null;
+  extraction_state?: "pending" | "running" | "done" | "error";
   // Typed attestation profile (SOC / ISO / pen-test docs); every field
   // carries the quote it came from. Shape mirrors backend AttestationProfileOut.
   attestation_profile?: Record<string, any> | null;

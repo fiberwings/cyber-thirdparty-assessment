@@ -3,7 +3,7 @@ because of nested/JSON shapes)."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.models import (
@@ -24,6 +24,7 @@ from app.schemas.api import (
     ExpectedControlRead,
     PhaseInfo,
     ScenarioRead,
+    StaleInfo,
     TurnRead,
 )
 from app.ai.context import analysis_date, standards_profile
@@ -127,12 +128,29 @@ def _live_detail(task_id: Optional[str]) -> tuple[Optional[str], Optional[float]
     return (handle.detail or None), handle.progress
 
 
-def compute_phase_status(a: Assessment) -> dict[str, PhaseInfo]:
-    """Five UI phases: scoping, scenarios, evidence, analysis, score.
+def _stale_info(entry: dict) -> Optional[StaleInfo]:
+    raw = entry.get("stale") or None
+    if not raw:
+        return None
+    at = _parse_iso(raw.get("at")) or datetime.now(timezone.utc)
+    return StaleInfo(
+        at=at,
+        reasons=[str(r) for r in (raw.get("reasons") or [])],
+        resume_ok=bool(raw.get("resume_ok")),
+    )
+
+
+def compute_phase_status(a: Assessment, *, annotate: bool = True) -> dict[str, PhaseInfo]:
+    """UI phases: scoping, scenarios, evidence, correlation, analysis, score
+    (see app.workflow.UI_KEY for the step ↔ key mapping).
 
     Each phase resolves to one of pending / running / done / error by combining
     persistent timestamps in `Assessment.phase_state` with already-existing
-    data signals (description sufficiency, document parse timestamps, etc.).
+    data signals (description sufficiency, document extraction stamps, etc.).
+    A done phase may additionally carry `stale` when an upstream input changed
+    after it ran. With `annotate` (the default) `ready` / `blocked_by` are
+    filled from the workflow rules; the guards pass `annotate=False` because
+    they only need the states.
     """
     state: dict = a.phase_state or {}
 
@@ -177,6 +195,7 @@ def compute_phase_status(a: Assessment) -> dict[str, PhaseInfo]:
                 error=None,
                 warning=entry.get("warning") or None,
                 failed_targets=list(entry.get("failed_targets") or []),
+                stale=_stale_info(entry),
             )
         if error:
             return PhaseInfo(state="error", started_at=started_at, error=error)
@@ -193,54 +212,14 @@ def compute_phase_status(a: Assessment) -> dict[str, PhaseInfo]:
         "scenarios_generation", completed_when=scenarios_done_data
     )
 
-    # Evidence: cross_correlation acts as the terminal signal — if it completed,
-    # the per-document extractions that fed it are by definition complete and
-    # the phase is done. If cross_correlation hasn't run yet, fall back to
-    # showing live extraction progress.
-    docs = list(a.documents)
-    cc_entry = _phase_entry(state, "cross_correlation")
-    cc_completed_at = _parse_iso(cc_entry.get("completed_at"))
-    cc_task = cc_entry.get("task_id")
-    cc_error = cc_entry.get("error")
-    if cc_completed_at is not None:
-        evidence = PhaseInfo(state="done", completed_at=cc_completed_at)
-    elif cc_task:
-        handle = registry.get(cc_task)
-        if handle is None:
-            evidence = PhaseInfo(
-                state="error",
-                error="Task lost on server restart — re-run the step.",
-            )
-        else:
-            evidence = PhaseInfo(
-                state="running",
-                started_at=_parse_iso(cc_entry.get("started_at")),
-                task_id=cc_task,
-                detail=handle.detail or None,
-                progress=handle.progress,
-            )
-    elif cc_error:
-        evidence = PhaseInfo(state="error", error=cc_error)
-    elif docs:
-        done_n = sum(1 for d in docs if d.weakness_extracted_at is not None)
-        if done_n < len(docs):
-            evidence = PhaseInfo(
-                state="running",
-                detail=f"{done_n} of {len(docs)} documents extracted",
-                progress=done_n / len(docs),
-            )
-        else:
-            # All extracted but cross-correlation never fired (e.g. user uploaded
-            # docs while the auto-fire path is between extraction and correlation,
-            # or the manual synthesise endpoint is the next click).
-            evidence = PhaseInfo(state="pending")
-    else:
-        evidence = PhaseInfo(state="pending")
+    # Evidence: document-derived — upload + per-document weakness extraction.
+    # Cross-correlation is its own step (below), so it no longer stands in as
+    # the terminal signal here. Any document whose extraction did not complete
+    # and has no live task is an error the user must retry or delete: a silent
+    # gap here would let correlation run over a partial evidence bundle.
+    evidence = _evidence_phase(list(a.documents))
 
-    # Correlation: the pure cross_correlation phase, exposed as its own key so
-    # the analysis page's "cross-correlate" sub-step never shows per-document
-    # extraction progress (the composite "evidence" key above folds both in
-    # for the nav).
+    # Correlation: the pure cross_correlation phase.
     correlation = info_from_phase_state("cross_correlation", completed_when=False)
 
     # Analysis: gap_analysis phase only.
@@ -249,7 +228,7 @@ def compute_phase_status(a: Assessment) -> dict[str, PhaseInfo]:
     # Score: narratives phase only.
     score = info_from_phase_state("narratives", completed_when=False)
 
-    return {
+    phases = {
         "scoping": scoping,
         "scenarios": scenarios,
         "evidence": evidence,
@@ -257,14 +236,54 @@ def compute_phase_status(a: Assessment) -> dict[str, PhaseInfo]:
         "analysis": analysis,
         "score": score,
     }
+    if annotate:
+        from app import workflow  # local: workflow imports this module lazily too
+
+        workflow.annotate_readiness(a, phases)
+    return phases
+
+
+def _evidence_phase(docs: list[Document]) -> PhaseInfo:
+    from app.workflow import document_extraction_state
+
+    if not docs:
+        return PhaseInfo(state="pending")
+    states = [(d, *document_extraction_state(d)) for d in docs]
+    done = [d for d, s, _ in states if s == "done"]
+    running = [d for d, s, _ in states if s in ("running", "pending")]
+    failed = [d for d, s, _ in states if s == "error"]
+    if running:
+        live = next((d.weakness_task_id for d in running if d.weakness_task_id), None)
+        detail, progress = _live_detail(live)
+        return PhaseInfo(
+            state="running",
+            task_id=live,
+            detail=f"{len(done)} of {len(docs)} documents extracted"
+            + (f" · {detail}" if detail else ""),
+            progress=len(done) / len(docs),
+        )
+    if failed:
+        names = [d.filename for d in failed]
+        return PhaseInfo(
+            state="error",
+            error=f"Extraction incomplete for {len(failed)} of {len(docs)} document(s) — retry or delete them.",
+            failed_targets=names,
+        )
+    completed = [d.weakness_extracted_at for d in done if d.weakness_extracted_at]
+    return PhaseInfo(state="done", completed_at=max(completed) if completed else None)
 
 
 def serialize_assessment(a: Assessment) -> AssessmentRead:
+    from app.workflow import current_step
+
+    phases = compute_phase_status(a)
     return AssessmentRead(
         id=a.id,
         vendor_name=a.vendor_name,
         status=a.status,
-        current_phase=a.current_phase,
+        # Derived from the phases, not the legacy column: the first step that
+        # is not done-and-current (or "report" when everything is).
+        current_phase=current_step(phases),
         force_continued=a.force_continued,
         model_overrides=a.model_overrides or {},
         created_at=a.created_at,
@@ -272,9 +291,15 @@ def serialize_assessment(a: Assessment) -> AssessmentRead:
         as_of_date=analysis_date(a),
         as_of_date_set=bool(a.as_of_date),
         standards_profile=standards_profile(a),
-        phases=compute_phase_status(a),
+        phases=phases,
     )
 
 
 def serialize_document(d: Document) -> DocumentRead:
-    return DocumentRead.model_validate(d)
+    from app.workflow import document_extraction_state
+
+    out = DocumentRead.model_validate(d)
+    state, error = document_extraction_state(d)
+    out.extraction_state = state
+    out.weakness_error = error
+    return out

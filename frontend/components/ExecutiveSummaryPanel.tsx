@@ -1,9 +1,10 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, pollTask } from "@/lib/api";
+import { api, describeError, pollTask } from "@/lib/api";
 import { ExecutiveSummaryRead } from "@/lib/types";
 import { relativeTime } from "@/lib/utils";
+import { useWorkflow } from "@/lib/useWorkflow";
 import clsx from "clsx";
 
 const PRIORITY_STYLES: Record<string, { label: string; badge: string }> = {
@@ -22,12 +23,21 @@ export function ExecutiveSummaryPanel({
   onScenarioClick?: (code: string) => void;
 }) {
   const qc = useQueryClient();
+  // The summary synthesises the scored state: it needs gap analysis done and
+  // current (same prerequisite as narratives) and no other job running.
+  const { step, anyRunning } = useWorkflow(assessmentId);
+  const score = step("score");
+  const canGenerate = score.info?.ready === true && !anyRunning;
+  const blockedReason = !canGenerate ? (anyRunning ? "A job is running — wait for it to finish." : score.blockedReason) : null;
   const regenerate = useMutation({
     mutationFn: async () => {
       const { task_id } = await api.runExecutiveSummary(assessmentId);
       await pollTask(task_id, undefined, 800);
     },
-    onSettled: () => qc.invalidateQueries({ queryKey: ["report", assessmentId] }),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["report", assessmentId] });
+      qc.invalidateQueries({ queryKey: ["assessment", assessmentId] });
+    },
   });
 
   if (!summary) {
@@ -40,13 +50,17 @@ export function ExecutiveSummaryPanel({
         </p>
         <button
           onClick={() => regenerate.mutate()}
-          disabled={regenerate.isPending}
+          disabled={regenerate.isPending || !canGenerate}
+          title={blockedReason ?? undefined}
           className="mt-3 rounded bg-ink-900 text-white text-xs font-medium px-3 py-1.5 hover:bg-ink-700 disabled:opacity-40"
         >
           {regenerate.isPending ? "Generating…" : "Generate summary"}
         </button>
+        {blockedReason && !regenerate.isPending && (
+          <div className="mt-1.5 text-xs text-ink-500 italic">{blockedReason}</div>
+        )}
         {regenerate.isError && (
-          <div className="mt-2 text-xs text-risk-high">{String(regenerate.error)}</div>
+          <div className="mt-2 text-xs text-risk-high">{describeError(regenerate.error)}</div>
         )}
       </div>
     );
@@ -71,12 +85,16 @@ export function ExecutiveSummaryPanel({
             </span>
             <button
               onClick={() => regenerate.mutate()}
-              disabled={regenerate.isPending}
+              disabled={regenerate.isPending || !canGenerate}
+              title={blockedReason ?? undefined}
               className="rounded bg-amber-600 text-white font-medium px-2.5 py-1 hover:bg-amber-700 disabled:opacity-40 shrink-0"
             >
               {regenerate.isPending ? "Regenerating…" : "Regenerate"}
             </button>
           </div>
+        )}
+        {regenerate.isError && (
+          <div className="mt-2 text-xs text-risk-high">{describeError(regenerate.error)}</div>
         )}
 
         <p className="mt-3 text-sm text-ink-800 leading-relaxed">{summary.verdict}</p>

@@ -14,7 +14,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from .conftest import FakeOpenRouterClient
+from .conftest import FakeOpenRouterClient, seed_running_task
 
 RUNNING_TASK_ID = "11111111-1111-1111-1111-111111111111"
 
@@ -36,30 +36,16 @@ def _mk_assessment(client) -> int:
         json={"text": "SaaS billing vendor processing EU PII via REST APIs."},
     )
     assert r.status_code == 200
+    # Scenario generation requires scoping to be done (workflow guard).
+    r = client.post(f"/api/assessments/{aid}/scoping/force-continue")
+    assert r.status_code == 200
     return aid
 
 
 def _simulate_run_in_flight(aid: int) -> None:
     """A running task record plus the persistent phase marker pointing at it —
     the durable state a click leaves behind while its job is executing."""
-    from app.db import SessionLocal
-    from app.models import TaskRecord
-    from app.tasks import mark_phase_started
-
-    with SessionLocal() as db:
-        db.add(
-            TaskRecord(
-                id=RUNNING_TASK_ID,
-                kind="scenarios_generation",
-                assessment_id=aid,
-                status="running",
-                progress=0.2,
-                detail="Generated 10 scenario skeletons; selecting controls...",
-                error="",
-            )
-        )
-        db.commit()
-    mark_phase_started(aid, "scenarios_generation", RUNNING_TASK_ID)
+    seed_running_task(aid, "scenarios_generation", RUNNING_TASK_ID, phase="scenarios_generation")
 
 
 def test_second_generate_reattaches_to_running_task(guarded_client):

@@ -2,7 +2,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ExpectedControlRead, Coverage, Effectiveness } from "@/lib/types";
-import { api, pollTask } from "@/lib/api";
+import { api, describeError, pollTask } from "@/lib/api";
 import { CitationChip } from "./CitationChip";
 import { useState, useEffect } from "react";
 
@@ -35,6 +35,14 @@ export function ControlEditor({
     effectiveness !== (ca?.effectiveness || "unknown") ||
     rationale !== (ca?.rationale || "");
 
+  // Every edit here stamps the narratives stale (and is refused while a job
+  // runs), so the assessment's phases are refreshed with the scores.
+  const invalidateAll = () => {
+    qc.invalidateQueries({ queryKey: ["scenarios", assessmentId] });
+    qc.invalidateQueries({ queryKey: ["report", assessmentId] });
+    qc.invalidateQueries({ queryKey: ["assessment", assessmentId] });
+  };
+
   const save = useMutation({
     mutationFn: () =>
       ca
@@ -42,8 +50,7 @@ export function ControlEditor({
         : api.upsertControlAssessment(control.id, { coverage, effectiveness, rationale }),
     onSuccess: async () => {
       await api.recalculate(assessmentId);
-      qc.invalidateQueries({ queryKey: ["scenarios", assessmentId] });
-      qc.invalidateQueries({ queryKey: ["report", assessmentId] });
+      invalidateAll();
     },
   });
 
@@ -53,21 +60,17 @@ export function ControlEditor({
       await pollTask(task_id, undefined, 800);
       await api.recalculate(assessmentId);
     },
-    onSettled: () => {
-      qc.invalidateQueries({ queryKey: ["scenarios", assessmentId] });
-      qc.invalidateQueries({ queryKey: ["assessment", assessmentId] });
-      qc.invalidateQueries({ queryKey: ["report", assessmentId] });
-    },
+    onSettled: invalidateAll,
   });
 
   const remove = useMutation({
     mutationFn: () => api.deleteExpectedControl(control.id),
     onSuccess: async () => {
       await api.recalculate(assessmentId);
-      qc.invalidateQueries({ queryKey: ["scenarios", assessmentId] });
-      qc.invalidateQueries({ queryKey: ["report", assessmentId] });
+      invalidateAll();
     },
   });
+  const editError = save.isError ? describeError(save.error) : remove.isError ? describeError(remove.error) : null;
 
   const onDelete = () => {
     const ok = window.confirm(
@@ -116,8 +119,9 @@ export function ControlEditor({
             </div>
           )}
           {rerunAI.isError && (
-            <div className="mt-1 text-[11px] text-risk-high">{String(rerunAI.error)}</div>
+            <div className="mt-1 text-[11px] text-risk-high">{describeError(rerunAI.error)}</div>
           )}
+          {editError && <div className="mt-1 text-[11px] text-risk-high">{editError}</div>}
           {control.description && (
             <div className="text-[11px] text-ink-500 mt-0.5">{control.description}</div>
           )}
