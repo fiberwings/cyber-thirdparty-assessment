@@ -236,6 +236,10 @@ async def test_dev_cache_serves_second_identical_call(fresh_db, fake_client, mon
     assert len(fake_client.calls) == 2
     assert [r.cached for r in rows] == [False, True, False]
     assert rows[1].input_tokens == 0 and rows[1].output_tokens == 0
+    # A cache hit spent nothing — cost and provider-cache tokens stay at zero too.
+    assert rows[1].cost_usd == 0 and rows[1].cached_tokens == 0 and rows[1].reasoning_tokens == 0
+    assert rows[0].cost_usd == pytest.approx(0.0123)
+    assert (rows[0].input_tokens, rows[0].cached_tokens, rows[0].reasoning_tokens) == (100, 40, 10)
 
 
 # ---------------- durable task registry ----------------

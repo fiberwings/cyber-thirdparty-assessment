@@ -1,96 +1,127 @@
 {% extends "base.html" %}
-{% block title %}Run #{{ meta.id }} · TPRM Benchmark{% endblock %}
+{% import "_macros.html" as ui %}
+{% set nav = 'runs' %}
+{% set s = d.summary %}
+{% set compare_href = '/compare?runs=' ~ s.id %}
+{% block title %}Run #{{ s.id }} · TPRM Benchmark{% endblock %}
 {% block content %}
-<h1>Run #{{ meta.id }} <span class="badge {{ meta.status }}">{{ meta.status }}</span></h1>
 
-<div class="card">
-  <dl class="meta-grid">
-    <div><dt>Started</dt><dd>{{ (meta.started_at or '')[:19] | replace('T', ' ') }}</dd></div>
-    <div><dt>Finished</dt><dd>{{ (meta.finished_at or '')[:19] | replace('T', ' ') }}</dd></div>
-    <div><dt>App version</dt><dd class="mono">{{ meta.app_version }} @ {{ meta.full_sha }}{% if meta.app_git_dirty %} (dirty){% endif %}</dd></div>
-    <div><dt>Backend</dt><dd class="mono">{{ meta.backend_url }}</dd></div>
-    <div><dt>Models</dt><dd class="small">{{ meta.model_label }}</dd></div>
-    <div><dt>Judge</dt><dd class="mono">{{ meta.judge_model }} ({{ meta.judge_prompts | tojson }})</dd></div>
-  </dl>
-  <details>
-    <summary>Full run config &amp; model snapshot</summary>
-    <pre>{{ meta.config | tojson(indent=2) }}
-{{ meta.models | tojson(indent=2) }}</pre>
-  </details>
+<div class="breadcrumb"><a href="/">Runs</a> › run #{{ s.id }}</div>
+<div class="page-head">
+  <div>
+    <h1>Run #{{ s.id }} <span class="muted" style="font-weight:400">{{ s.started_at | dt }}</span> {{ ui.mode_badge(s) }} {{ ui.run_badge(s.status) }}</h1>
+    <div class="sub">{% if s.notes %}{{ s.notes }}{% else %}<span class="muted">no notes</span>{% endif %}</div>
+  </div>
+  <div class="actions">
+    {% if d.prev_id %}<a class="btn small" href="/runs/{{ d.prev_id }}">← #{{ d.prev_id }}</a><a class="btn small" href="/compare?runs={{ d.prev_id }},{{ s.id }}">compare with #{{ d.prev_id }}</a>{% endif %}
+    <a class="btn small primary" href="/compare?runs={{ s.id }}">findings matrix</a>
+    {% if d.next_id %}<a class="btn small" href="/runs/{{ d.next_id }}">#{{ d.next_id }} →</a>{% endif %}
+  </div>
 </div>
 
 <div class="kpi-row">
-  <div class="stat-tile"><div class="label">Cases ok</div><div class="value">{{ meta.n_ok }}/{{ meta.n_cases }}</div></div>
-  <div class="stat-tile"><div class="label">Mean findings F1</div><div class="value">{{ '%.3f' % meta.mean_f1 if meta.mean_f1 is not none else '—' }}</div></div>
-  <div class="stat-tile"><div class="label">Mean exec score</div><div class="value">{{ '%.0f' % meta.mean_exec if meta.mean_exec is not none else '—' }}</div></div>
-</div>
-
-<div class="grid-2">
-  <div class="card">
-    <h3>Findings accuracy per case</h3>
-    <div class="chart-wrap"><canvas id="findings-bars"></canvas></div>
-  </div>
-  <div class="card">
-    <h3>Exec summary subscores per case</h3>
-    <div class="chart-wrap"><canvas id="exec-bars"></canvas></div>
-  </div>
+  <div class="stat-tile"><span class="label">Cases</span><span class="value">{{ s.n_ok }}<span class="muted" style="font-size:14px">/{{ s.n_cases }}</span></span><span class="sub">{{ s.vendors | selectattr('present') | list | length }} vendors × {{ s.n_reps }} rep{{ '' if s.n_reps == 1 else 's' }}{% if s.n_error %} · <span style="color:var(--status-critical)">{{ s.n_error }} error{{ '' if s.n_error == 1 else 's' }}</span>{% endif %}</span></div>
+  <div class="stat-tile"><span class="label">Goldens identified</span><span class="value">{{ s.goldens_identified }}<span class="muted" style="font-size:14px">/{{ s.goldens_required }}</span></span><span class="sub">required, over graded cases</span></div>
+  <div class="stat-tile"><span class="label">Recall · precision</span><span class="value">{{ s.mean_recall | pct }} <span class="muted" style="font-size:14px">· {{ s.mean_precision | pct }}</span></span><span class="sub">F1 {{ s.mean_f1 | num }}{% if s.mean_exec is not none %} · exec {{ s.mean_exec | num(0) }}{% endif %}</span></div>
+  <div class="stat-tile stat-tile--primary"><span class="label">Assessment cost</span><span class="value">{{ s.assess_cost | money }}</span><span class="sub">{% if s.mode == 'grade' %}re-grades assessment #{{ s.assessment_ids | join(', #') }}{% else %}what the app under test spent{% endif %}</span></div>
+  <div class="stat-tile stat-tile--primary"><span class="label">Assessment time</span><span class="value">{{ s.assess_time_s | secs }}</span><span class="sub">{% if s.mode == 'grade' %}no pipeline run{% else %}pipeline stages, summed{% if s.wallclock_s %} · {{ s.wallclock_s | secs }} wall-clock{% endif %}{% endif %}</span></div>
+  <div class="stat-tile stat-tile--muted"><span class="label">Judge cost · time</span><span class="value">{{ s.judge_cost | money }} · {{ s.judge_time_s | secs }}</span><span class="sub">benchmark overhead</span></div>
 </div>
 
 <div class="card">
-  <table>
-    <thead>
-      <tr>
-        <th>Case</th><th>Rep</th><th>Status</th><th>Band</th>
-        <th class="num">P</th><th class="num">R</th><th class="num">F1</th>
-        <th class="num">Sev =</th><th class="num">Sev MAE</th>
-        <th class="num" title="reported weaknesses">n</th>
-        <th class="num" title="(TP+TP_OPT+LEGIT_UNKEYED+JUDGE_FN)/n">Signal</th>
-        <th class="num" title="DUP_OF_TP per golden hit">Dup/G</th>
-        <th class="num" title="app band rank − expected band rank">ΔBand</th>
-        <th class="num">Cov</th><th class="num">Faith</th><th class="num">Viol</th><th class="num">Exec</th>
-        <th class="num">Time (s)</th><th class="num">Cost ($)</th><th></th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for r in rows %}
-      <tr>
-        <td>{{ r.case_id }}</td>
-        <td class="num">{{ r.repetition }}</td>
-        <td><span class="badge {{ r.status }}">{{ r.status }}</span>
-          {% if r.error_stage %}<div class="small muted">{{ r.error_stage }}: {{ r.error_detail[:120] }}</div>{% endif %}
-        </td>
-        <td>{{ r.band or '—' }}</td>
-        <td class="num">{{ '%.2f' % r.precision if r.precision is not none else '—' }}</td>
-        <td class="num">{{ '%.2f' % r.recall if r.recall is not none else '—' }}</td>
-        <td class="num">{{ '%.2f' % r.f1 if r.f1 is not none else '—' }}</td>
-        <td class="num">{{ '%.2f' % r.severity_exact if r.severity_exact is not none else '—' }}</td>
-        <td class="num">{{ '%.2f' % r.severity_mae if r.severity_mae is not none else '—' }}</td>
-        <td class="num">{{ r.n_weaknesses if r.n_weaknesses is not none else '—' }}</td>
-        <td class="num">{{ '%.0f%%' % (100 * r.signal_share) if r.signal_share is not none else '—' }}</td>
-        <td class="num">{{ '%.2f' % r.dup_per_golden if r.dup_per_golden is not none else '—' }}</td>
-        <td class="num {% if r.band_error %}delta-neg{% endif %}">{{ '%+d' % r.band_error if r.band_error is not none else '—' }}</td>
-        <td class="num">{{ '%.2f' % r.exec_coverage if r.exec_coverage is not none else '—' }}</td>
-        <td class="num">{{ '%.2f' % r.exec_faithfulness if r.exec_faithfulness is not none else '—' }}</td>
-        <td class="num">{{ '%.2f' % r.exec_violation if r.exec_violation is not none else '—' }}</td>
-        <td class="num">{{ '%.0f' % r.exec_overall if r.exec_overall is not none else '—' }}</td>
-        <td class="num">{{ r.duration_s if r.duration_s is not none else '—' }}</td>
-        <td class="num">{{ '%.3f' % r.cost_usd if r.cost_usd is not none else '—' }}</td>
-        <td><a href="/runs/{{ meta.id }}/cases/{{ r.id }}">detail</a></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <dl class="meta-grid">
+    <div><dt>App build</dt><dd><span class="mono">{{ s.full_sha or '—' }}</span>{% if s.app_git_dirty %} <span class="badge partial" title="working tree had uncommitted changes">dirty</span>{% endif %}{% if s.app_version %} · v{{ s.app_version }}{% endif %}</dd></div>
+    <div><dt>Backend</dt><dd class="mono">{{ d.backend_url or '—' }}</dd></div>
+    <div><dt>Models</dt><dd>{% for name, model in s.models %}<b>{{ name }}</b> <span class="mono">{{ model }}</span>{% if not loop.last %}<br>{% endif %}{% else %}—{% endfor %}</dd></div>
+    <div><dt>Judge</dt><dd><span class="mono">{{ s.judge_model }}</span>{% if s.judge_prompts %}<br><span class="small muted">prompts {% for k, v in s.judge_prompts.items() %}{{ k }}={{ v }}{% if not loop.last %} · {% endif %}{% endfor %}</span>{% endif %}</dd></div>
+    <div><dt>Timing</dt><dd>{{ s.started_at | dt }} → {{ s.finished_at | dt }}{% if s.wallclock_s %} <span class="muted">({{ s.wallclock_s | secs }})</span>{% endif %}</dd></div>
+    <div><dt>Vendors</dt><dd><div class="vendors">{% for chip in s.vendors %}{{ ui.vendor_chip(chip, s.id) }}{% endfor %}</div></dd></div>
+  </dl>
+  <details style="margin-top:10px"><summary class="small muted">raw config</summary><pre class="small">{{ d.config | tojson(indent=2) }}</pre>{% if d.models_json %}<pre class="small">{{ d.models_json | tojson(indent=2) }}</pre>{% endif %}</details>
 </div>
 
+{% for v in d.vendors %}
+<div class="card vendor-card slot-{{ v.slot }}">
+  <div class="card-head">
+    <h2><span class="vdot"></span>{{ v.vendor_name }} <span class="mono muted" style="font-weight:400">{{ v.case_id }}</span>{% if v.expected_band %} <span class="muted small" style="font-weight:400">expected band {{ v.expected_band }}</span>{% endif %}</h2>
+    {% if v.load_error %}<span class="small" style="color:var(--status-critical)" title="{{ v.load_error }}">answer key failed to load</span>{% endif %}
+  </div>
+  <div class="reps-grid">
+    {% for r in v.reps %}{% set sm = r.summary %}
+    <div class="rep">
+      <div class="rep-head">
+        <span class="title">rep {{ sm.repetition }}</span>
+        {{ ui.run_badge(sm.status) }}
+        {% if sm.assessment_id %}<span class="muted small">assessment #{{ sm.assessment_id }}{% if sm.assessment_deleted %} <span title="assessment no longer exists in the app">†deleted</span>{% endif %}{% if r.summary.costs.reused %} · <span class="money-reused-tag">reused</span>{% endif %}</span>{% endif %}
+        <a class="small" style="margin-left:auto" href="/runs/{{ s.id }}/cases/{{ sm.case_result_id }}">case detail →</a>
+      </div>
+      {% if sm.status != 'ok' %}
+      <div class="err-block"><b>{{ sm.status }}{% if sm.error_stage %} @ {{ sm.error_stage }}{% endif %}</b><br>{{ sm.error_detail or 'no detail recorded' }}</div>
+      {% endif %}
+      <div class="rep-stats">
+        <div class="s"><span class="l">band</span><span class="v">{{ ui.band(sm.band, sm.expected_band, sm.band_error) }}</span></div>
+        <div class="s"><span class="l">recall</span><span class="v">{{ sm.recall | pct }}</span></div>
+        <div class="s"><span class="l">precision</span><span class="v">{{ sm.precision | pct }}</span></div>
+        <div class="s"><span class="l">F1</span><span class="v">{{ sm.f1 | num }}</span></div>
+        <div class="s"><span class="l">reported</span><span class="v">{{ sm.n_weaknesses if sm.n_weaknesses is not none else '—' }}{% if sm.signal_share is not none %} <span class="muted small">{{ sm.signal_share | pct }} signal</span>{% endif %}</span></div>
+        <div class="s"><span class="l">exec</span><span class="v">{{ sm.exec_overall | num(0) }}</span></div>
+      </div>
+      {% if r.cells %}
+      <div class="golden-list">
+        {% for c in r.cells %}
+        <div class="golden-item">{{ ui.status_chip(c, show_scored=True) }}<span class="desc" title="{{ c.expected_description }}"><span class="gid">{{ c.golden_id }}</span>{% if c.optional %}<span class="tag-opt">opt</span> {% endif %}{{ c.expected_description }}{% if c.sev_mismatch %} <span class="small muted">(severity {{ c.actual_severity }} vs key {{ c.expected_severity }})</span>{% endif %}</span></div>
+        {% endfor %}
+        {% for c in r.retired_cells %}
+        <div class="golden-item">{{ ui.status_chip(c) }}<span class="desc" title="{{ c.expected_description }}"><span class="gid">{{ c.golden_id }}</span><span class="tag-retired">retired</span> {{ c.expected_description }}</span></div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if sm.extras.total %}
+      <div class="small muted" style="margin:6px 0 2px">{{ sm.extras.total }} unkeyed report{{ '' if sm.extras.total == 1 else 's' }}: {% for c, l, n, sh in sm.extras.segments() %}{{ l }} {{ n }}{% if not loop.last %} · {% endif %}{% endfor %}</div>
+      {{ ui.stack_bar(sm.extras.segments()) }}
+      {% endif %}
+      <div style="margin-top:12px">
+        <div class="row" style="justify-content:space-between;align-items:baseline">
+          <span class="metric-label">Assessment</span>
+          <span><b>{{ r.summary.costs.assess | money }}</b> <span class="muted">·</span> <b>{{ r.summary.costs.assess_time_s | secs }}</b></span>
+        </div>
+        {% if r.stages %}{{ ui.stage_bar(r.stages) }}{% elif s.mode == 'grade' %}<div class="small muted">no pipeline time — stored assessment re-graded</div>{% endif %}
+        {% for p in r.purposes %}
+        <div class="purpose-row">
+          <span class="name" title="{{ p.model_id }} · {{ p.calls }} calls{% if p.errors %} · {{ p.errors }} errors{% endif %} · {{ p.input_tokens }} in / {{ p.output_tokens }} out · {{ p.latency_s | secs }}">{{ p.purpose }} <span class="muted">{{ p.model_id.split('/')[-1] }}</span></span>
+          <div class="bar"><div class="bar-seg hit" style="width: {{ 100 * p.share }}%"></div></div>
+          <span class="tnum" style="text-align:right">{{ p.cost | money(4) }}</span>
+        </div>
+        {% endfor %}
+      </div>
+      <div class="judge-line">judge {{ r.summary.costs.judge | money }} · {{ r.summary.costs.judge_time_s | secs }} · {{ r.judge_calls | length }} call{{ '' if r.judge_calls | length == 1 else 's' }}{% set failed = r.judge_calls | rejectattr('ok') | list %}{% if failed %} · <span style="color:var(--status-critical)">{{ failed | length }} failed</span>{% endif %}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endfor %}
+
+{% if d.charts.labels %}
+<div class="grid-2">
+  <div class="card"><h3 style="margin-top:0">Precision · recall · F1 per case</h3><div class="chart-wrap"><canvas id="chart-prf"></canvas></div></div>
+  <div class="card"><h3 style="margin-top:0">Exec-summary rubric per case</h3><div class="chart-wrap"><canvas id="chart-exec"></canvas></div></div>
+</div>
 <script type="application/json" id="charts-data">{{ charts_json | safe }}</script>
 <script>
 window.initCharts = function () {
   const c = readJSON('charts-data');
-  if (!c || !c.labels.length) return;
-  barChart('findings-bars', c.labels,
-    { Precision: c.precision, Recall: c.recall, F1: c.f1 }, 1);
-  barChart('exec-bars', c.labels,
-    { Coverage: c.exec_coverage, Faithfulness: c.exec_faithfulness, 'No-violation': c.exec_violation }, 1);
+  if (!c) return;
+  barChart('chart-prf', c.labels, [
+    { label: 'precision', data: c.precision, slot: 0 },
+    { label: 'recall', data: c.recall, slot: 1 },
+    { label: 'F1', data: c.f1, slot: 2 },
+  ], 1);
+  barChart('chart-exec', c.labels, [
+    { label: 'coverage', data: c.exec_coverage, slot: 3 },
+    { label: 'faithfulness', data: c.exec_faithfulness, slot: 4 },
+    { label: 'no violation', data: c.exec_violation, slot: 5 },
+  ], 1);
 };
 </script>
+{% endif %}
 {% endblock %}

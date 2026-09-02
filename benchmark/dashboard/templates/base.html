@@ -10,13 +10,20 @@
 </head>
 <body>
   <header class="topbar">
-    <a href="/" class="brand">TPRM Benchmark</a>
+    <a href="/" class="brand"><span class="dot"></span>TPRM Benchmark</a>
     <nav>
-      <a href="/">Runs</a>
+      <a href="/" class="{% if nav == 'runs' %}active{% endif %}">Runs</a>
+      <a href="{{ compare_href | default('/') }}" class="{% if nav == 'compare' %}active{% endif %}">Compare</a>
     </nav>
+    <span class="spacer"></span>
+    {% block topbar_right %}{% endblock %}
   </header>
-  <main class="viz-root">
+  <main class="viz-root {% block main_class %}{% endblock %}">
     {% block content %}{% endblock %}
+    <footer class="foot">
+      <span>Results DB: <span class="mono">{{ DB_PATH }}</span></span>
+      <span>Assessment = the app under test · Judge = the benchmark's own LLM grading · ≈ estimated from list prices · ⚠ under-reported</span>
+    </footer>
   </main>
 </body>
 </html>

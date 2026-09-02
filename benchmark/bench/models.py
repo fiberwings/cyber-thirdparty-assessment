@@ -132,6 +132,11 @@ class JudgeCall(Base):
     latency_ms: Mapped[int | None] = mapped_column(nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(nullable=True)
+    cached_tokens: Mapped[int | None] = mapped_column(nullable=True)
+    reasoning_tokens: Mapped[int | None] = mapped_column(nullable=True)
+    # OpenRouter `usage.cost` (USD); cost_source: openrouter | estimated | ""
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_source: Mapped[str] = mapped_column(String(20), default="")
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     error: Mapped[str] = mapped_column(Text, default="")
     request_json: Mapped[str] = mapped_column(Text, default="")

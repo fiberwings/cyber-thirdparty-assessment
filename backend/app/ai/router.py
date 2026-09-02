@@ -357,9 +357,51 @@ def _finish_reason(response: dict[str, Any]) -> str | None:
         return None
 
 
-def _extract_usage(response: dict[str, Any]) -> tuple[int, int]:
-    usage = response.get("usage") or {}
-    return int(usage.get("prompt_tokens", 0)), int(usage.get("completion_tokens", 0))
+# OpenRouter usage accounting is always on: every non-streaming response carries
+# `usage.cost` (credits, USD-denominated), `usage.prompt_tokens_details.cached_tokens`
+# and `usage.completion_tokens_details.reasoning_tokens`. The old opt-in
+# `usage: {"include": true}` request field is deprecated and a no-op — don't add it.
+@dataclass
+class _UsageTally:
+    """Accumulates usage across every live attempt of one logical call (validation,
+    garble and truncation retries all cost real money). Dev-cache hits must not be
+    added — see the cache invariant above."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
+    cost_usd: float = 0.0
+    live_calls: int = 0
+    calls_without_cost: int = 0
+
+    def add(self, response: dict[str, Any]) -> None:
+        usage = response.get("usage") or {}
+        pdet = usage.get("prompt_tokens_details") or {}
+        cdet = usage.get("completion_tokens_details") or {}
+        self.live_calls += 1
+        self.input_tokens += int(usage.get("prompt_tokens") or 0)
+        self.output_tokens += int(usage.get("completion_tokens") or 0)
+        self.cached_tokens += int(pdet.get("cached_tokens") or 0)
+        self.reasoning_tokens += int(cdet.get("reasoning_tokens") or 0)
+        cost = usage.get("cost")
+        if cost is None:
+            self.calls_without_cost += 1
+        else:
+            self.cost_usd += float(cost)
+
+    @property
+    def cost_source(self) -> str:
+        """"openrouter" only when every live attempt was metered; "" otherwise."""
+        return "openrouter" if self.live_calls and not self.calls_without_cost else ""
+
+    def warn_if_cost_missing(self, purpose: str, model: str) -> None:
+        if self.calls_without_cost:
+            _logger.warning(
+                "OpenRouter response for %s (%s) carried no usage.cost in %d/%d "
+                "live call(s); cost_usd is under-reported",
+                purpose, model, self.calls_without_cost, self.live_calls,
+            )
 
 
 def _strip_code_fence(content: str) -> str:
@@ -413,7 +455,7 @@ async def call_structured(
     last_err: str = ""
     last_content: str = ""
     started = time.perf_counter()
-    in_tok = out_tok = 0
+    usage = _UsageTally()
     ok = False
     transport_err: OpenRouterError | None = None
 
@@ -442,9 +484,7 @@ async def call_structured(
             content = _extract_content(resp)
             last_content = content
             if not from_cache:  # a cache hit spent no tokens
-                i_tok, o_tok = _extract_usage(resp)
-                in_tok += i_tok
-                out_tok += o_tok
+                usage.add(resp)
 
             if _finish_reason(resp) == "length":
                 # Output was truncated. A truncated response must never be
@@ -514,6 +554,7 @@ async def call_structured(
         )
     finally:
         latency_ms = int((time.perf_counter() - started) * 1000)
+        usage.warn_if_cost_missing(purpose, model)
         try:
             db.add(
                 ModelCall(
@@ -523,8 +564,12 @@ async def call_structured(
                     model_id=model,
                     prompt_sha=prompt_sha,
                     latency_ms=latency_ms,
-                    input_tokens=in_tok,
-                    output_tokens=out_tok,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cached_tokens=usage.cached_tokens,
+                    reasoning_tokens=usage.reasoning_tokens,
+                    cost_usd=usage.cost_usd,
+                    cost_source=usage.cost_source,
                     ok=ok,
                     error="" if ok else (last_err or "unknown")[:2000],
                     cached=cached,
@@ -554,7 +599,7 @@ async def call_text(
     cli = client or OpenRouterClient()
     prompt_sha = _hash_prompt(messages)
     started = time.perf_counter()
-    in_tok = out_tok = 0
+    usage = _UsageTally()
     ok = False
     err = ""
     content = ""
@@ -571,9 +616,7 @@ async def call_text(
                 cached = cached or from_cache
                 content = _extract_content(resp)
                 if not from_cache:
-                    i_tok, o_tok = _extract_usage(resp)
-                    in_tok += i_tok
-                    out_tok += o_tok
+                    usage.add(resp)
                 if _finish_reason(resp) == "length":
                     # A cut-off narrative must never be persisted silently.
                     if (
@@ -596,6 +639,7 @@ async def call_text(
             raise
     finally:
         latency_ms = int((time.perf_counter() - started) * 1000)
+        usage.warn_if_cost_missing(purpose, model)
         try:
             db.add(
                 ModelCall(
@@ -605,8 +649,12 @@ async def call_text(
                     model_id=model,
                     prompt_sha=prompt_sha,
                     latency_ms=latency_ms,
-                    input_tokens=in_tok,
-                    output_tokens=out_tok,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cached_tokens=usage.cached_tokens,
+                    reasoning_tokens=usage.reasoning_tokens,
+                    cost_usd=usage.cost_usd,
+                    cost_source=usage.cost_source,
                     ok=ok,
                     error=err[:2000],
                     cached=cached,

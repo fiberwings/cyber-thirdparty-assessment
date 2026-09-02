@@ -94,10 +94,18 @@ class FakeOpenRouterClient:
                     "finish_reason": finish_reason,
                 }
             ],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+            # Mirrors OpenRouter's always-on usage accounting (cost in USD credits).
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "cost": 0.0123,
+                "prompt_tokens_details": {"cached_tokens": 40},
+                "completion_tokens_details": {"reasoning_tokens": 10},
+            },
         }
 
 
 @pytest.fixture()
 def fake_client():
     return FakeOpenRouterClient()
+

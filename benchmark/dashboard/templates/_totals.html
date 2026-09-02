@@ -1,0 +1,12 @@
+{# expects `t` (Totals) and optional `scope` label #}
+<div class="totals-strip">
+  <div class="t"><span class="l">Assessments</span><span class="v">{{ t.n_assessments }}<span class="muted small"> distinct{% if t.n_unattributed %} · +{{ t.n_unattributed }} never created{% endif %}</span></span></div>
+  <div class="t"><span class="l">Assessment cost</span><span class="v">{{ t.assess_cost | money }}</span></div>
+  <div class="t"><span class="l">Assessment time</span><span class="v">{{ t.assess_time_s | secs }}</span></div>
+  <div class="sep"></div>
+  <div class="t dim"><span class="l">Judge cost</span><span class="v">{{ t.judge_cost | money }}</span></div>
+  <div class="t dim"><span class="l">Judge time</span><span class="v">{{ t.judge_time_s | secs }}</span></div>
+  <div class="sep"></div>
+  <div class="t dim"><span class="l">Overall</span><span class="v">{{ t.overall_cost | money }} · {{ t.overall_time_s | secs }}</span></div>
+  <span class="hint">{{ scope | default('') }} Assessment spend is counted once per assessment even when it was re-graded in several runs; judge spend is counted for every call.</span>
+</div>

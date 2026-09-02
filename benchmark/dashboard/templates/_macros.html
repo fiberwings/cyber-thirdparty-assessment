@@ -1,0 +1,62 @@
+{# ---- shared rendering macros ---- #}
+
+{% macro status_chip(cell, show_scored=False) -%}
+<span class="chip-status st-{{ cell.status }}" title="{{ STATUS_LABELS[cell.status][2] }}"><span class="g">{{ cell.glyph }}</span>{{ cell.label }}{% if show_scored and cell.scored_as and cell.status in ('identified_by_judge', 'false_match', 'low_confidence', 'identified_optional', 'optional_missed') %} <span class="scored">· scored as {{ cell.scored_as }}</span>{% endif %}</span>
+{%- endmacro %}
+
+{% macro legend_chip(code) -%}
+<span class="chip-status st-{{ code }}" title="{{ STATUS_LABELS[code][2] }}"><span class="g">{{ STATUS_LABELS[code][0] }}</span>{{ STATUS_LABELS[code][1] }}</span>
+{%- endmacro %}
+
+{% macro severity(sev) -%}
+{% if sev %}<span class="sev sev-{{ sev }}">{{ sev }}</span>{% else %}<span class="muted">—</span>{% endif %}
+{%- endmacro %}
+
+{% macro run_badge(status) -%}
+<span class="badge {{ status }}">{{ status }}</span>
+{%- endmacro %}
+
+{% macro mode_badge(summary) -%}
+<span class="badge mode-{{ summary.mode }}" title="{% if summary.mode == 'grade' %}re-grades stored assessments — no pipeline was run{% else %}fresh assessments{% endif %}">{{ summary.mode }}</span>
+{%- if summary.judge_mode != 'full' %} <span class="badge judge-{{ summary.judge_mode }}" title="judge mode">judge: {{ summary.judge_mode }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro band(actual, expected, error) -%}
+{% if actual %}<span class="band off-{{ error if error is not none else 'na' }}" title="app band vs expected{% if error is not none %} (Δ {{ '%+d' % error }}){% endif %}">{{ actual }}{% if expected %} <span class="exp">/ {{ expected }}</span>{% endif %}</span>{% else %}<span class="muted">—</span>{% endif %}
+{%- endmacro %}
+
+{% macro vendor_chip(chip, run_id) -%}
+<span class="vendor-chip slot-{{ chip.slot }} {% if not chip.present %}absent{% endif %}" title="{{ chip.vendor_name }}{% if chip.present %}{% for r in chip.reps %} · rep {{ r.repetition }}: {{ r.status }}{% if r.error_stage %} ({{ r.error_stage }}){% endif %}{% endfor %}{% else %} — not in this run{% endif %}">
+  <span class="vdot"></span>{{ chip.case_id }}
+  {% if chip.present %}<span class="reps">{% for r in chip.reps %}<span class="rep-dot {{ r.status }}"></span>{% endfor %}</span>{% endif %}
+</span>
+{%- endmacro %}
+
+{% macro hit_bar(identified, required) -%}
+<div class="hit-bar" title="{{ identified }} of {{ required }} required golden findings identified (over graded cases)">
+  <span class="n">{{ identified }}<span class="muted">/{{ required }}</span></span>
+  <div class="bar"><div class="bar-seg hit" style="width: {{ (100 * identified / required) if required else 0 }}%"></div></div>
+</div>
+{%- endmacro %}
+
+{% macro stack_bar(segments, tall=False) -%}
+<div class="bar {% if tall %}tall{% endif %}">
+  {% for cls, label, n, share in segments %}<div class="bar-seg seg-{{ cls }}" style="width: {{ 100 * share }}%" title="{{ label }}: {{ n }}"></div>{% endfor %}
+</div>
+{%- endmacro %}
+
+{% macro stage_bar(stages) -%}
+<div class="bar tall">
+  {% for s in stages %}<div class="bar-seg stage-{{ loop.index }}" style="width: {{ 100 * s.share }}%" title="{{ s.name }}: {{ s.seconds | secs }}"></div>{% endfor %}
+</div>
+<div class="stage-bar-legend">
+  {% for s in stages if s.share >= 0.005 %}<span><span class="sw stage-{{ loop.index }}" style="display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px"></span>{{ s.name }} <span class="muted">{{ s.seconds | secs }}</span></span>{% endfor %}
+</div>
+{%- endmacro %}
+
+{% macro cost_time(costs, primary=True) -%}
+<div class="cell-metric {% if not primary %}judge{% endif %}">
+  <span class="big">{{ costs.assess | money }}</span>
+  <span class="sub">{{ costs.assess_time_s | secs }}</span>
+</div>
+{%- endmacro %}

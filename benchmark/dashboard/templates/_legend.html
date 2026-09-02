@@ -1,0 +1,5 @@
+{% import "_macros.html" as ui %}
+<div class="legend">
+  {% for code in STATUS_ORDER if code != 'not_assessed' %}{{ ui.legend_chip(code) }}{% endfor %}
+  <span class="hint">· ▲▼ severity rated higher / lower than the key · ² a duplicate was also reported · hover a chip for its definition, click a cell for the judge's reasoning</span>
+</div>

@@ -67,7 +67,8 @@ Module map (`bench/`):
 | `models.py` / `db.py` | SQLAlchemy schema + engine for `data/bench.sqlite` |
 | `versioning.py` | Provenance: main-repo git SHA (+dirty), backend `pyproject` version, model snapshot |
 | `collect.py` | Optional read-only token/cost collection from the app's `model_call` table |
-| `cli.py` | `bench run` / `bench list-cases` / `bench init-db` |
+| `pricing.py` | OpenRouter list pricing, for costing judge calls made before metered cost capture |
+| `cli.py` | `bench run` / `bench grade` / `bench cost` / `bench list-cases` / `bench recollect-tokens` / `bench backfill-judge-cost` / `bench init-db` |
 
 Design rules the code enforces:
 
@@ -167,6 +168,32 @@ Exit code: `0` when every case graded ok, non-zero otherwise.
 Loads and validates every case, prints a one-line summary each. Fails with a
 specific error if any case is invalid (missing docs, bad severity, duplicate
 golden ids, too-short description).
+
+### `bench cost [--run ID]`
+
+Per-run rollup of assessment-pipeline cost (from `tokens_json`) plus judge cost
+(from `judge_call`), for reconciling against the OpenRouter bill. A `~` marks a
+figure containing list-price estimates rather than metered `usage.cost`.
+
+Grading an assessment again (`bench grade`, or a re-run over a stored one) reports
+the same pipeline cost in every run that references it — the money was spent once.
+Per-run figures are as-run and mark re-reported cases `(reused)`; the grand total
+counts each assessment once, so it is the number to compare with the bill.
+
+### `bench backfill-judge-cost [--apply]`
+
+Prices judge calls recorded before metered cost capture, from current OpenRouter
+list pricing × recorded tokens (`cost_source = "estimated"`). Metered rows are
+never touched; a delisted model stays unpriced rather than being recorded as $0.
+The app-side equivalent is `backend/scripts/backfill_cost.py`.
+
+### `bench recollect-tokens [--run ID]`
+
+Re-reads the app's `model_call` rows for every stored case result whose assessment
+still exists and rewrites `tokens_json`. Use it after pricing historical calls with
+`backend/scripts/backfill_cost.py` (list pricing × tokens for rows that predate
+metered `usage.cost` capture; such rows carry `cost_source = "estimated"` and the
+dashboard shows them as `≈$`). Read-only on the app DB.
 
 ### `bench init-db`
 
@@ -341,7 +368,7 @@ under "Judge calls (raw, for audit)".
 | `judge_model`, `judge_prompt_versions_json` | Runner config + `prompts.py` versions |
 | `config_json` | Full CLI config incl. confidence threshold and exec weights |
 | Per case: `timings_json` | Wall-clock seconds per stage |
-| Per case: `tokens_json` | Best-effort read-only aggregation of the app's `model_call` rows (calls, tokens, cost, errors by purpose/model) |
+| Per case: `tokens_json` | Best-effort read-only aggregation of the app's `model_call` rows by purpose/model: calls, input/output tokens, provider-cache `cached_tokens`, `reasoning_tokens`, summed `latency_ms`, `cost_usd` (OpenRouter `usage.cost`, USD), errors, and `cost_missing` — live ok calls that recorded no cost, so a $0 total is flagged (⚠ in the dashboard) rather than read as free |
 | Per case: `report_json` | Full `ReportOut` snapshot — the graded artifact, kept for re-inspection |
 
 ## Results database schema
@@ -369,17 +396,63 @@ under "Judge calls (raw, for audit)".
 .venv/bin/uvicorn dashboard.app:app --port 8100
 ```
 
-Read-only over `data/bench.sqlite`. Chart.js is vendored
-(`dashboard/static/vendor/`) — no CDN, no build step; light/dark theme follows
-the OS.
+Read-only over `data/bench.sqlite` plus the golden keys in `cases/`. Chart.js is
+vendored (`dashboard/static/vendor/`) — no CDN, no build step; light/dark
+theme follows the OS. All derivation lives in `dashboard/viewmodel.py`
+(display-only: it never re-scores anything; cost/time rollups share
+`bench/costing.py` with `bench cost`, so the two cannot drift).
 
 | Route | Shows |
 |---|---|
-| `/` | Runs table + trend lines: per-case F1 and exec score across runs (tooltip shows app SHA + model config per point) |
-| `/runs/{id}` | Run metadata, per-case metric table, grouped bar charts (P/R/F1 and exec subscores per case) |
-| `/runs/{id}/cases/{crid}` | Matched / missed / extra findings with judge justifications; exec rubric breakdown; the app's exec summary; stage timings; model usage; raw judge I/O |
-| `/compare?a=X&b=Y` | Run metadata diff, per-case metric deltas (color-coded), newly-missed / no-longer-missed / newly-hallucinated findings between the two runs |
-| `/api/runs`, `/api/runs/{id}` | JSON for programmatic use |
+| `/` | Runs overview, newest first: vendors assessed per run (fixed colour slot per vendor, one dot per repetition: ok / error / judge error), goldens identified / required, mean recall · precision · exec, **assessment cost & time** per run, judge cost & time (muted). Trend lines of recall and F1 per vendor across runs. Tick runs → "Compare" builds `/compare?runs=…`. Runs with zero graded cases (smoke / failed) are hidden; `/?all=1` reveals them. |
+| `/compare?runs=18,20,21` | **Findings matrix**: one row per golden finding, one column per run with a sub-cell per repetition. Cell = status glyph (legend above the table); click a cell for the judge detail (expected vs reported text, severities, matcher confidence and justification, classifier category, evidence location for misses). Per-vendor summary rows: band vs expected, recall · precision, reported / signal + extras breakdown, exec score, assessment cost · time, judge (muted). Options: `vendors=orbitclear,verifypro` filter, `diff=1` show only rows whose status differs between columns, 1–8 runs. Legacy `?a=X&b=Y` redirects here. |
+| `/runs/{id}` | Run metadata (build, backend, models, judge + prompt versions, timing, vendors), KPI tiles, per-vendor cards with repetitions side by side: band, golden checklist with status chips, extras, stage-timing bar, cost by purpose; P/R/F1 and exec-subscore charts. |
+| `/runs/{id}/cases/{crid}` | One vendor × repetition: a card per golden with the full judge reasoning, reports not in the key grouped by classifier category (`LEGIT_UNKEYED` open — promotion candidates), classifier summary, exec rubric, the app's exec summary, time & cost, raw judge I/O (collapsed). |
+| `/api/runs`, `/api/runs/{id}`, `/api/compare?runs=…` | JSON. The first two keep their historical keys and add `mode`, `judge_mode`, `assess_cost_*`, `assess_time_s`, `judge_cost_usd`, `judge_time_s`, `goldens_identified`, `goldens_required`, `vendors`. |
+
+### Golden status legend
+
+Derived per golden × case result from `finding_match` and the classifier
+output (`classification_json`); first matching rule wins.
+
+| Status | Meaning | Scored as |
+|---|---|---|
+| Identified | matcher hit, counted | TP |
+| Identified (optional) | hit on an `optional: true` golden | TP (optional) |
+| Low confidence | matcher hit but `counted = false` | FN + FP |
+| False match | matcher hit that the classifier ruled `JUDGE_FP_MATCH` (matched the wrong report) | still TP — metrics are unchanged, the status is a warning |
+| Identified · matcher missed | matcher miss that the classifier ruled `JUDGE_FN` (the app did report it) | still FN |
+| Missed · fact in evidence | miss; classifier found the fact in the ingested chunks (reasoning gap) | FN |
+| Missed · not in evidence | miss; fact not in the ingested chunks (ingestion / coverage gap) | FN |
+| Missed | miss with no classifier detail | FN |
+| Optional · not found | miss on an optional golden | ignored |
+| Not in key at grading | this golden id did not exist when the run was graded (key edited since) | — |
+| Not graded | case ran with `--judge none` | — |
+| Error | case result errored (stage in tooltip) | — |
+| Not assessed | vendor not part of that run | — |
+
+Flags on a cell: ▲/▼ severity reported higher/lower than the key, ² another
+report was classified as a duplicate of this hit. Golden ids that were removed
+from a case's key but appear in historical runs are listed as *retired*.
+
+### Cost and time semantics
+
+- **Assessment** cost / time = what the app under test spent: Σ
+  `tokens_json.total_cost_usd` and Σ `timings_json` stages of the run's case
+  results. This is the number the dashboard emphasises.
+- **Judge** cost / time = the benchmark's own spend: Σ `judge_call.cost_usd`
+  and Σ `latency_ms` over every judge call, failed ones included (the time was
+  spent). Shown muted.
+- **Overall** = assessment + judge, shown smallest.
+- `mode = grade` runs re-grade a stored assessment: they show
+  *re-grades assessment #N*, no assessment time, and their assessment cost is
+  tagged *reused*. Totals (index strip, compare footer) count each
+  `assessment_id` once — "N distinct · +M never created" — so re-grading does
+  not inflate spend, matching `bench cost`.
+- `≈$x` contains list-price × tokens estimates rather than metered cost;
+  `$x ⚠` means at least one live call recorded no cost (under-reported, not
+  free); `—` means nothing was priced. These are never collapsed into a plain
+  figure.
 
 ## Authoring good cases
 
@@ -413,6 +486,9 @@ No network, no LLM cost:
   two bad answers (records preserved), via respx-mocked OpenRouter.
 - `test_app_client.py` — `wait_task` state machine (done, error, timeout,
   404 → durable-phase fallback).
+- `test_dashboard.py` — view-model derivation (golden status precedence,
+  cost/time rollups with grade-mode reuse, lenient golden loading) and every
+  dashboard route against a seeded temp DB.
 - `test_runner_integration.py` — full batch against a stubbed backend +
   stubbed judge: endpoint ordering (scenarios before documents), grading,
   persistence, cleanup policy, and error recording.
@@ -427,4 +503,5 @@ No network, no LLM cost:
 | `status=judge_error` | Pipeline succeeded but the judge failed twice (parse/structural). The report snapshot is kept; failed judge attempts are in `judge_call` for diagnosis |
 | Task 404 mid-run | Backend restarted (in-process task registry). The runner falls back to the durable `phases` state once; keep a single stable backend during a batch |
 | No tokens/cost on case results | `MAIN_DB_PATH` unset or unreadable — collection is best-effort and optional |
+| Cost shows `0.000 ⚠` | The app recorded live calls with no `usage.cost` — check the backend log for "carried no usage.cost" (a proxy `OPENROUTER_BASE_URL` that strips usage accounting is the usual cause) |
 | Stage timeouts on slow models | Raise `TIMEOUT_*` env vars; gap analysis and per-document extraction are the long poles |

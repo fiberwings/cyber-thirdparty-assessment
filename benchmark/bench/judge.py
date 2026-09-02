@@ -122,9 +122,29 @@ class JudgeCallRecord:
     output_tokens: int | None
     ok: bool
     error: str = ""
+    # OpenRouter meters every response (usage accounting is always on; the old
+    # `usage: {"include": true}` opt-in is deprecated). None = not reported.
+    cached_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cost_usd: float | None = None
+    cost_source: str = ""
 
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _usage_cost(usage: dict) -> dict:
+    """Cost / cache detail from an OpenRouter `usage` block. A response that
+    reported no cost stays None with cost_source "" — never a silent $0."""
+    pdet = usage.get("prompt_tokens_details") or {}
+    cdet = usage.get("completion_tokens_details") or {}
+    cost = usage.get("cost")
+    return {
+        "cached_tokens": pdet.get("cached_tokens"),
+        "reasoning_tokens": cdet.get("reasoning_tokens"),
+        "cost_usd": None if cost is None else float(cost),
+        "cost_source": "" if cost is None else "openrouter",
+    }
 
 
 def _strip_fences(text: str) -> str:
@@ -351,6 +371,7 @@ class Judge:
                     output_tokens=usage.get("completion_tokens"),
                     ok=parsed is not None,
                     error=error,
+                    **_usage_cost(usage),
                 )
             )
             if parsed is not None:

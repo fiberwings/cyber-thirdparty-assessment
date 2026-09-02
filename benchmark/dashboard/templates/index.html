@@ -1,63 +1,114 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
+{% set nav = 'runs' %}
+{% set compare_href = '/compare?runs=' ~ (view.default_compare | join(',')) %}
 {% block title %}Runs · TPRM Benchmark{% endblock %}
 {% block content %}
-<h1>Benchmark runs</h1>
 
-{% if summaries %}
-<div class="grid-2">
-  <div class="card">
-    <h3>Findings F1 per case, across runs</h3>
-    <div class="chart-wrap"><canvas id="trend-f1"></canvas></div>
+<div class="page-head">
+  <div>
+    <h1>Benchmark runs</h1>
+    <div class="sub">{{ view.summaries | length }} graded run{{ '' if view.summaries | length == 1 else 's' }}{% if view.hidden %} · <a class="toggle-link" href="{% if view.include_empty %}/{% else %}/?all=1{% endif %}">{% if view.include_empty %}hide{% else %}show{% endif %} {{ view.hidden }} smoke / failed run{{ '' if view.hidden == 1 else 's' }} with no graded case</a>{% endif %}</div>
   </div>
-  <div class="card">
-    <h3>Exec summary score per case, across runs</h3>
-    <div class="chart-wrap"><canvas id="trend-exec"></canvas></div>
+  <div class="actions">
+    {% for cid, name, slot in view.vendors %}<span class="vendor-chip slot-{{ slot }}" title="{{ name }}"><span class="vdot"></span>{{ cid }}</span>{% endfor %}
   </div>
 </div>
 
 <div class="card">
-  <table>
-    <thead>
-      <tr>
-        <th>Run</th><th>Date</th><th>Status</th><th>App</th><th>Models</th>
-        <th>Judge</th><th class="num">Cases ok</th><th class="num">Mean F1</th>
-        <th class="num">Mean exec</th><th>Notes</th><th></th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for s in summaries %}
-      <tr>
-        <td><a href="/runs/{{ s.id }}">#{{ s.id }}</a></td>
-        <td class="small">{{ (s.started_at or '')[:16] | replace('T', ' ') }}</td>
-        <td><span class="badge {{ s.status }}">{{ s.status }}</span></td>
-        <td class="mono">{{ s.app_version }} @ {{ s.app_git_sha }}{% if s.app_git_dirty %}+dirty{% endif %}</td>
-        <td class="small">{{ s.model_label }}</td>
-        <td class="small">{{ s.judge_model.split('/')[-1] }}</td>
-        <td class="num">{{ s.n_ok }}/{{ s.n_cases }}</td>
-        <td class="num">{{ '%.3f' % s.mean_f1 if s.mean_f1 is not none else '—' }}</td>
-        <td class="num">{{ '%.0f' % s.mean_exec if s.mean_exec is not none else '—' }}</td>
-        <td class="small muted">{{ s.notes }}</td>
-        <td class="small">
-          {% if not loop.last %}
-          <a href="/compare?a={{ summaries[loop.index].id }}&b={{ s.id }}">vs prev</a>
-          {% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  {% with t = view.totals, scope = 'All runs.' %}{% include "_totals.html" %}{% endwith %}
+</div>
+
+{% if view.trend.labels | length > 1 %}
+<div class="grid-2">
+  <div class="card">
+    <h3 style="margin-top:0">Recall per vendor <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:400">— share of required golden findings identified, mean over reps</span></h3>
+    <div class="chart-wrap"><canvas id="trend-recall"></canvas></div>
+  </div>
+  <div class="card">
+    <h3 style="margin-top:0">F1 per vendor <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:400">— recall balanced with precision</span></h3>
+    <div class="chart-wrap"><canvas id="trend-f1"></canvas></div>
+  </div>
+</div>
+{% endif %}
+
+<div class="row" style="margin: 6px 0 10px; justify-content: space-between">
+  <span class="hint">Tick runs to compare them finding-by-finding. Assessment time and cost are what the app under test spent; judge figures are the benchmark's own grading overhead.</span>
+</div>
+
+<div class="runs">
+  {% for s in view.summaries %}
+  <div class="run-row {% if s.n_ok == 0 %}empty{% endif %}" id="run-{{ s.id }}">
+    <input type="checkbox" data-run-select="{{ s.id }}" aria-label="select run {{ s.id }} for comparison">
+    <div class="col-id">
+      <div class="run-id">
+        <span class="id"><a href="/runs/{{ s.id }}">#{{ s.id }}</a></span>
+        <span class="when">{{ s.started_at | dt }}</span>
+        {{ ui.mode_badge(s) }}
+        {{ ui.run_badge(s.status) }}
+      </div>
+      <div class="run-meta">
+        {% if s.notes %}<span class="note" title="{{ s.notes }}">{{ s.notes }}</span>{% endif %}
+      </div>
+      <div class="run-models">
+        <span class="mono">{{ s.app_git_sha or '—' }}{% if s.app_git_dirty %}*{% endif %}</span>
+        {% for name, model in s.models %} · <b>{{ name }}</b> {{ model.split('/')[-1] }}{% endfor %}
+        · <b>judge</b> {{ s.judge_model.split('/')[-1] }}
+        {% if s.n_reps > 1 %} · {{ s.n_reps }} reps{% endif %}
+      </div>
+    </div>
+    <div class="col-vendors">
+      <div class="vendors">{% for chip in s.vendors %}{{ ui.vendor_chip(chip, s.id) }}{% endfor %}</div>
+    </div>
+    <div class="col-hits">
+      <span class="metric-label">Goldens identified</span>
+      {% if s.goldens_required %}
+      {{ ui.hit_bar(s.goldens_identified, s.goldens_required) }}
+      <span class="small muted tnum">recall {{ s.mean_recall | pct }} · precision {{ s.mean_precision | pct }}{% if s.mean_exec is not none %} · exec {{ s.mean_exec | num(0) }}{% endif %}</span>
+      {% else %}
+      <span class="muted">no graded case{% if s.n_error %} · {{ s.n_error }} error{{ '' if s.n_error == 1 else 's' }}{% endif %}</span>
+      {% endif %}
+    </div>
+    <div class="col-assess">
+      <span class="metric-label">Assessment cost · time</span>
+      <div class="cell-metric">
+        <span class="big">{{ s.assess_cost | money }}</span>
+        {% if s.mode == 'grade' %}
+        <span class="sub" title="re-grades stored assessments; no pipeline time was spent in this run">re-grades assessment{{ '' if s.assessment_ids | length == 1 else 's' }} #{{ s.assessment_ids | join(', #') }}</span>
+        {% else %}
+        <span class="sub">{{ s.assess_time_s | secs }} pipeline{% if s.wallclock_s %} · {{ s.wallclock_s | secs }} wall{% endif %}</span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="col-judge">
+      <span class="metric-label">Judge</span>
+      <div class="cell-metric judge">
+        <span class="big">{{ s.judge_cost | money }}</span>
+        <span class="sub">{{ s.judge_time_s | secs }}</span>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="card muted">No runs yet — <span class="mono">bench run</span> to create one.</div>
+  {% endfor %}
+</div>
+
+<div class="compare-bar" id="compare-bar" hidden>
+  <span id="compare-count">0 runs selected</span>
+  <span class="ids" id="compare-ids"></span>
+  <a class="btn primary" id="compare-go" href="/compare">Compare findings →</a>
+  <button class="btn ghost small" id="compare-clear" type="button">clear</button>
 </div>
 
 <script type="application/json" id="trend-data">{{ trend_json | safe }}</script>
+<script type="application/json" id="default-compare">{{ view.default_compare | tojson }}</script>
 <script>
 window.initCharts = function () {
-  const trend = readJSON('trend-data');
-  if (!trend || !trend.labels.length) return;
-  lineChart('trend-f1', trend.labels, trend.f1, 1);
-  lineChart('trend-exec', trend.labels, trend.exec, 100);
+  const t = readJSON('trend-data');
+  if (!t || t.labels.length < 2) return;
+  const series = (key) => t.vendors.map((v) => ({ label: v.case_id, data: t[key][v.case_id], slot: v.slot }));
+  lineChart('trend-recall', t.labels, series('recall'), 1);
+  lineChart('trend-f1', t.labels, series('f1'), 1);
 };
 </script>
-{% else %}
-<div class="card">No runs yet. Start one with <code class="mono">bench run</code>.</div>
-{% endif %}
 {% endblock %}

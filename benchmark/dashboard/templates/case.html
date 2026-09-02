@@ -1,206 +1,172 @@
 {% extends "base.html" %}
-{% block title %}Case {{ cr.case_id }} · Run #{{ run_id }}{% endblock %}
+{% import "_macros.html" as ui %}
+{% set nav = 'runs' %}
+{% set s = d.run %}
+{% set sm = d.rep.summary %}
+{% set compare_href = '/compare?runs=' ~ s.id ~ '&vendors=' ~ cr.case_id %}
+{% block title %}{{ cr.case_id }} r{{ cr.repetition }} · run #{{ s.id }} · TPRM Benchmark{% endblock %}
 {% block content %}
-<h1>
-  <a href="/runs/{{ run_id }}">Run #{{ run_id }}</a> · {{ cr.case_id }} (rep {{ cr.repetition }})
-  <span class="badge {{ cr.status }}">{{ cr.status }}</span>
-</h1>
 
-<div class="card">
-  <dl class="meta-grid">
-    <div><dt>Assessment</dt><dd>#{{ cr.assessment_id or '—' }}{% if cr.assessment_deleted %} <span class="muted">(deleted after run)</span>{% endif %}</dd></div>
-    <div><dt>Aggregate</dt><dd>{{ cr.aggregate_band or '—' }} (rank {{ cr.aggregate_rank if cr.aggregate_rank is not none else '—' }}{% if cr.band_error is not none %}, band error {{ '%+d' % cr.band_error }}{% endif %})</dd></div>
-    <div><dt>Signal / noise</dt><dd>n {{ cr.n_weaknesses if cr.n_weaknesses is not none else '—' }} · signal {{ '%.0f%%' % (100 * cr.signal_share) if cr.signal_share is not none else '—' }} · dup/golden {{ '%.2f' % cr.dup_per_golden if cr.dup_per_golden is not none else '—' }} · judge FN {{ cr.judge_fn if cr.judge_fn is not none else '—' }}</dd></div>
-    <div><dt>Findings</dt><dd>TP {{ cr.tp }} · FP {{ cr.fp }} · FN {{ cr.fn }} → P {{ '%.2f' % cr.precision if cr.precision is not none else '—' }} / R {{ '%.2f' % cr.recall if cr.recall is not none else '—' }} / F1 {{ '%.2f' % cr.f1 if cr.f1 is not none else '—' }}</dd></div>
-    <div><dt>Exec summary</dt><dd>{{ '%.0f' % cr.exec_overall if cr.exec_overall is not none else '—' }} (cov {{ '%.2f' % cr.exec_coverage if cr.exec_coverage is not none else '—' }} · faith {{ '%.2f' % cr.exec_faithfulness if cr.exec_faithfulness is not none else '—' }} · viol {{ '%.2f' % cr.exec_violation if cr.exec_violation is not none else '—' }})</dd></div>
-  </dl>
-  {% if cr.error_stage %}
-  <p><strong>Error at {{ cr.error_stage }}:</strong> <span class="mono">{{ cr.error_detail }}</span></p>
-  {% endif %}
+<div class="breadcrumb"><a href="/">Runs</a> › <a href="/runs/{{ s.id }}">run #{{ s.id }}</a> › {{ cr.case_id }} rep {{ cr.repetition }}</div>
+<div class="page-head">
+  <div>
+    <h1><span class="vdot slot-{{ d.slot }}"></span>{{ d.vendor_name }} <span class="muted" style="font-weight:400">{{ cr.case_id }} · rep {{ cr.repetition }}</span> {{ ui.run_badge(cr.status) }}</h1>
+    <div class="sub">run #{{ s.id }} · {{ s.started_at | dt }} {{ ui.mode_badge(s) }}{% if sm.assessment_id %} · assessment #{{ sm.assessment_id }}{% if sm.assessment_deleted %} <span title="assessment no longer exists in the app">†deleted</span>{% endif %}{% if d.rep.summary.costs.reused %} <span class="money-reused-tag">reused</span>{% endif %}{% endif %}</div>
+  </div>
+  <div class="actions">
+    <a class="btn small" href="/compare?runs={{ s.id }}&vendors={{ cr.case_id }}">matrix for this vendor</a>
+  </div>
 </div>
 
-<h2>Matched findings ({{ matched | length }})</h2>
-<div class="card">
-  <table>
-    <thead><tr><th>Golden</th><th>Expected (golden)</th><th>Reported by app</th><th>Class</th><th>Sev (exp / act)</th><th>Confidence</th><th>Counted</th><th>Judge justification</th></tr></thead>
-    <tbody>
-      {% for m in matched %}
-      <tr>
-        <td class="mono">{{ m.expected_id }}{% if m.expected_optional %} <span class="muted">(opt)</span>{% endif %}</td>
-        <td>{{ m.expected_description }}</td>
-        <td>{{ m.actual_description }}</td>
-        <td class="mono small" title="{{ category_by_id.get(m.actual_weakness_id, {}).get('reason', '') }}">{{ category_by_id.get(m.actual_weakness_id, {}).get('category', '—') }}</td>
-        <td>{{ m.expected_severity }} / {{ m.actual_severity }}</td>
-        <td>{{ m.confidence }}</td>
-        <td>{{ 'yes' if m.counted else 'no' }}</td>
-        <td class="small muted">{{ m.justification }}</td>
-      </tr>
-      {% else %}
-      <tr><td colspan="8" class="muted">none</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-
-<h2>Missed golden findings ({{ missed | length }})</h2>
-<div class="card">
-  <table>
-    <thead><tr><th>Golden</th><th>Expected (golden)</th><th>Severity</th><th>Counted as FN</th><th>Judge justification</th></tr></thead>
-    <tbody>
-      {% for m in missed %}
-      <tr>
-        <td class="mono">{{ m.expected_id }}{% if m.expected_optional %} <span class="muted">(opt)</span>{% endif %}</td>
-        <td>{{ m.expected_description }}</td>
-        <td>{{ m.expected_severity }}</td>
-        <td>{{ 'yes' if m.counted else 'no' }}</td>
-        <td class="small muted">{{ m.justification }}</td>
-      </tr>
-      {% else %}
-      <tr><td colspan="5" class="muted">none</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-
-<h2>Extra findings reported by the app ({{ extra | length }})</h2>
-<div class="card">
-  <p class="small muted">Reported but not in the answer key. These count as false positives —
-  review them: a defensible extra finding may deserve promotion into the golden set.</p>
-  <table>
-    <thead><tr><th>App weakness</th><th>Class</th><th>Severity</th><th>Judge justification</th></tr></thead>
-    <tbody>
-      {% for m in extra %}
-      <tr>
-        <td>{{ m.actual_description }}</td>
-        <td class="mono small" title="{{ category_by_id.get(m.actual_weakness_id, {}).get('reason', '') }}">{{ category_by_id.get(m.actual_weakness_id, {}).get('category', '—') }}{% if category_by_id.get(m.actual_weakness_id, {}).get('golden') %} <span class="muted">({{ category_by_id[m.actual_weakness_id].golden }})</span>{% endif %}</td>
-        <td>{{ m.actual_severity }}</td>
-        <td class="small muted">{{ m.justification }}</td>
-      </tr>
-      {% else %}
-      <tr><td colspan="4" class="muted">none</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-
-{% if classification %}
-<h2>Signal / noise classification</h2>
-<div class="card">
-  <p class="small muted">Every reported weakness classified by the judge against the evidence chunks
-  ({{ classification.chunk_scope }} bundle, {{ classification.n_chunks_sent }} chunks sent).
-  Signal = TP + TP_OPTIONAL + LEGIT_UNKEYED + JUDGE_FN.</p>
-  <table>
-    <thead><tr>{% for k, v in classification.counts.items() %}<th class="num">{{ k }}</th>{% endfor %}</tr></thead>
-    <tbody><tr>{% for k, v in classification.counts.items() %}<td class="num">{{ v }}</td>{% endfor %}</tr></tbody>
-  </table>
-  <h3>Per finding</h3>
-  <table>
-    <thead><tr><th>Id</th><th>Category</th><th>Golden</th><th>Reason</th></tr></thead>
-    <tbody>
-      {% for c in classification.classification %}
-      <tr><td class="mono">{{ c.id }}</td><td class="mono">{{ c.category }}</td><td class="mono">{{ c.golden or '' }}</td><td class="small">{{ c.reason }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% if classification.missed_goldens %}
-  <h3>Missed goldens — is the fact in the chunks?</h3>
-  <table>
-    <thead><tr><th>Golden</th><th>In chunks</th><th>Where</th><th>Note</th></tr></thead>
-    <tbody>
-      {% for m in classification.missed_goldens %}
-      <tr><td class="mono">{{ m.golden }}</td><td>{{ 'yes' if m.fact_in_chunks else 'no' }}</td><td class="small">{{ m.where }}</td><td class="small">{{ m.note }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-</div>
+{% if cr.status != 'ok' %}
+<div class="err-block"><b>{{ cr.status }}{% if cr.error_stage %} @ {{ cr.error_stage }}{% endif %}</b><br>{{ cr.error_detail or 'no detail recorded' }}</div>
 {% endif %}
 
-{% if rubric %}
+<div class="kpi-row">
+  <div class="stat-tile"><span class="label">Band</span><span class="value" style="font-size:18px;white-space:nowrap">{{ ui.band(sm.band, sm.expected_band, sm.band_error) }}</span><span class="sub">app / expected</span></div>
+  <div class="stat-tile"><span class="label">Goldens</span><span class="value">{{ sm.hits }}<span class="muted" style="font-size:14px">/{{ sm.goldens_total }}</span></span><span class="sub">TP {{ sm.tp if sm.tp is not none else '—' }} · FN {{ sm.fn if sm.fn is not none else '—' }} · FP {{ sm.fp if sm.fp is not none else '—' }}</span></div>
+  <div class="stat-tile"><span class="label">Recall · precision</span><span class="value">{{ sm.recall | pct }} <span class="muted" style="font-size:14px">· {{ sm.precision | pct }}</span></span><span class="sub">F1 {{ sm.f1 | num }}</span></div>
+  <div class="stat-tile"><span class="label">Reported</span><span class="value">{{ sm.n_weaknesses if sm.n_weaknesses is not none else '—' }}</span><span class="sub">{% if sm.signal_share is not none %}{{ sm.signal_share | pct }} signal{% else %}weaknesses{% endif %}</span></div>
+  <div class="stat-tile"><span class="label">Exec summary</span><span class="value">{{ cr.exec_overall | num(0) }}</span><span class="sub">cov {{ cr.exec_coverage | num }} · faith {{ cr.exec_faithfulness | num }} · viol {{ cr.exec_violation | num }}</span></div>
+  <div class="stat-tile stat-tile--primary"><span class="label">Assessment cost · time</span><span class="value">{{ d.rep.summary.costs.assess | money }}</span><span class="sub">{{ d.rep.summary.costs.assess_time_s | secs }}{% if s.mode == 'grade' %} · re-graded, no pipeline run{% endif %}</span></div>
+  <div class="stat-tile stat-tile--muted"><span class="label">Judge cost · time</span><span class="value">{{ d.rep.summary.costs.judge | money }} · {{ d.rep.summary.costs.judge_time_s | secs }}</span><span class="sub">{{ d.judge_calls | length }} call{{ '' if d.judge_calls | length == 1 else 's' }}</span></div>
+</div>
+
+<h2>Golden findings</h2>
+{% include "_legend.html" %}
+{% for c in d.rep.cells + d.rep.retired_cells %}
+<div class="finding-card {% if c.is_hit %}hit{% elif c.is_miss %}missed{% elif c.status in ('not_graded', 'not_in_key', 'error') %}neutral{% else %}warn{% endif %}">
+  <div class="fc-head">
+    {{ ui.status_chip(c, show_scored=True) }}
+    <span class="mono"><b>{{ c.golden_id }}</b></span>
+    {{ ui.severity(c.expected_severity) }}
+    {% if c.optional %}<span class="tag-opt">optional</span>{% endif %}
+    {% if c.retired %}<span class="tag-retired">retired from key</span>{% endif %}
+    {% if c.confidence %}<span class="muted small" style="margin-left:auto">matcher confidence <b>{{ c.confidence }}</b>{% if c.counted is not none %} · {{ 'counted' if c.counted else 'not counted' }}{% endif %}</span>{% endif %}
+  </div>
+  <div class="cols">
+    <div><div class="h">Expected (answer key)</div>{{ c.expected_description }}</div>
+    <div><div class="h">Reported by app{% if c.actual_weakness_id %} <span class="mono" style="text-transform:none;letter-spacing:0">#{{ c.actual_weakness_id }}</span>{% endif %}</div>
+      {% if c.actual_description %}{{ c.actual_description }} {{ ui.severity(c.actual_severity) }}{% if c.sev_mismatch %} <span class="small muted">severity {% if c.sev_mismatch == 'up' %}rated higher{% elif c.sev_mismatch == 'down' %}rated lower{% else %}differs{% endif %} than the key</span>{% endif %}{% if c.dup %} <span class="small muted">· a second report duplicates this</span>{% endif %}
+      {% else %}<span class="muted">—</span>{% endif %}</div>
+  </div>
+  {% if c.justification or c.category or c.missed_where or c.missed_note or c.error_stage %}
+  <div class="just">
+    {% if c.justification %}<div><b>Matcher:</b> {{ c.justification }}</div>{% endif %}
+    {% if c.category %}<div><b>Classifier:</b> <span class="mono">{{ c.category }}</span>{% if c.category_reason %} — {{ c.category_reason }}{% endif %}</div>{% endif %}
+    {% if c.missed_where %}<div><b>Where in evidence:</b> {{ c.missed_where }}</div>{% endif %}
+    {% if c.missed_note %}<div><b>Note:</b> {{ c.missed_note }}</div>{% endif %}
+    {% if c.error_stage %}<div><b>Error:</b> {{ c.error_stage }} {{ c.error_detail }}</div>{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% else %}
+<div class="card muted">No golden findings for this case.</div>
+{% endfor %}
+
+<h2>Reports not in the key <span class="muted" style="font-weight:400;font-size:13px">— {{ d.extras | map(attribute=2) | map('length') | sum }} extra weaknesses, grouped by classifier verdict</span></h2>
+{% for cat, label, findings in d.extras %}
+<details class="card" {% if cat == 'LEGIT_UNKEYED' %}open{% endif %} style="margin-bottom:10px">
+  <summary><span class="seg-{{ cat }} sw" style="display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px"></span><b>{{ label }}</b> <span class="muted">· {{ findings | length }}</span>{% if cat == 'LEGIT_UNKEYED' %} <span class="muted small">— candidates for promotion into the answer key</span>{% elif cat == 'JUDGE_FP_MATCH' %} <span class="muted small">— matcher counted these as hits; classifier disagrees (still scored as TP)</span>{% endif %}</summary>
+  {% for f in findings %}
+  <div class="finding-card {% if cat == 'LEGIT_UNKEYED' %}warn{% elif cat in ('BOILERPLATE', 'MISREAD') %}missed{% else %}neutral{% endif %}" style="margin-top:8px">
+    <div class="fc-head"><span class="mono"><b>#{{ f.match.actual_weakness_id }}</b></span>{{ ui.severity(f.match.actual_severity) }}{% if f.golden %}<span class="muted small">→ {{ f.golden }}</span>{% endif %}</div>
+    <div>{{ f.match.actual_description }}</div>
+    {% if f.reason or f.match.justification %}<div class="just">{% if f.reason %}<div><b>Classifier:</b> {{ f.reason }}</div>{% endif %}{% if f.match.justification %}<div><b>Matcher:</b> {{ f.match.justification }}</div>{% endif %}</div>{% endif %}
+  </div>
+  {% endfor %}
+</details>
+{% else %}
+<div class="card muted">No extra weaknesses reported.</div>
+{% endfor %}
+
+{% if d.classification %}
+<details class="card" style="margin-bottom:14px">
+  <summary><b>Classifier summary</b> <span class="muted small">— scope {{ d.classification.chunk_scope }}, {{ d.classification.n_chunks_sent }} evidence chunks sent{% if d.classification.judge_fp_match %} · judge_fp_match{% endif %}</span></summary>
+  <dl class="meta-grid" style="margin-top:10px">
+    {% for k, v in (d.classification.counts or {}).items() %}<div><dt>{{ k }}</dt><dd>{{ v }}</dd></div>{% endfor %}
+  </dl>
+</details>
+{% endif %}
+
+{% if d.rubric %}
 <h2>Executive summary rubric</h2>
 <div class="card">
-  <h3>Coverage</h3>
-  <table>
-    <thead><tr><th>Point</th><th>Status</th><th>Justification</th></tr></thead>
-    <tbody>
-      {% for c in rubric.coverage %}
-      <tr><td class="mono">{{ c.point_id }}</td><td><span class="badge {{ 'ok' if c.status == 'covered' else ('error' if c.status == 'missing' else '') }}">{{ c.status }}</span></td><td class="small">{{ c.justification }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  <h3>Forbidden claims</h3>
-  <table>
-    <thead><tr><th>Claim</th><th>Status</th><th>Justification</th></tr></thead>
-    <tbody>
-      {% for v in rubric.violations %}
-      <tr><td class="mono">{{ v.claim_id }}</td><td><span class="badge {{ 'error' if v.status == 'violated' else 'ok' }}">{{ v.status }}</span></td><td class="small">{{ v.justification }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  <h3>Faithfulness: {{ rubric.faithfulness.score }}/5</h3>
-  <p class="small">{{ rubric.faithfulness.justification }}</p>
-  {% if rubric.faithfulness.unsupported_claims %}
-  <p class="small"><strong>Unsupported claims:</strong></p>
-  <ul class="small">
-    {% for u in rubric.faithfulness.unsupported_claims %}<li>{{ u }}</li>{% endfor %}
-  </ul>
+  <div class="grid-2">
+    <div>
+      <h3 style="margin-top:0">Coverage</h3>
+      <table class="small">
+        <tbody>
+        {% for c in d.rubric.coverage %}
+        <tr><td class="mono">{{ c.point_id }}</td><td><span class="rubric-status {{ c.status }}">{{ c.status }}</span></td><td>{{ c.justification }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3 style="margin-top:0">Forbidden claims</h3>
+      <table class="small">
+        <tbody>
+        {% for v in d.rubric.violations %}
+        <tr><td class="mono">{{ v.claim_id }}</td><td><span class="rubric-status {{ v.status }}">{{ v.status }}</span></td><td>{{ v.justification }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <h3>Faithfulness {{ d.rubric.faithfulness.score }}/5</h3>
+  <p class="small">{{ d.rubric.faithfulness.justification }}</p>
+  {% if d.rubric.faithfulness.unsupported_claims %}
+  <p class="small"><b>Unsupported claims</b></p>
+  <ul class="small">{% for u in d.rubric.faithfulness.unsupported_claims %}<li>{{ u }}</li>{% endfor %}</ul>
   {% endif %}
 </div>
 {% endif %}
 
-{% if exec_summary %}
-<h2>Executive summary (as produced by the app)</h2>
+{% if d.exec_summary %}
+<h2>Executive summary <span class="muted" style="font-weight:400;font-size:13px">— as produced by the app</span></h2>
 <div class="card">
-  <p><strong>Verdict:</strong> {{ exec_summary.verdict }} <span class="muted small">(model: {{ exec_summary.model_id }}{% if exec_summary.stale %}, stale{% endif %})</span></p>
-  {% for kr in exec_summary.key_risks %}
-  <p><strong>{{ kr.title }}</strong> — {{ kr.why_it_matters }}</p>
-  {% endfor %}
-  {% if exec_summary.limitations %}
-  <p class="small"><strong>Limitations:</strong> {{ exec_summary.limitations | join(' · ') }}</p>
-  {% endif %}
+  <p><b>Verdict:</b> {{ d.exec_summary.verdict }} <span class="muted small">({{ d.exec_summary.model_id }}{% if d.exec_summary.stale %}, stale{% endif %})</span></p>
+  {% for kr in d.exec_summary.key_risks %}<p><b>{{ kr.title }}</b> — {{ kr.why_it_matters }}</p>{% endfor %}
+  {% if d.exec_summary.limitations %}<p class="small"><b>Limitations:</b> {{ d.exec_summary.limitations | join(' · ') }}</p>{% endif %}
 </div>
 {% endif %}
 
-<h2>Stage timings</h2>
+<h2>Time &amp; cost</h2>
 <div class="card">
-  <table>
-    <thead><tr><th>Stage</th><th class="num">Seconds</th></tr></thead>
-    <tbody>
-      {% for stage, secs in timings.items() %}
-      <tr><td>{{ stage }}</td><td class="num">{{ secs }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% if tokens %}
-  <h3>Model usage (from app telemetry)</h3>
-  <table>
-    <thead><tr><th>Purpose</th><th>Model</th><th class="num">Calls</th><th class="num">In tok</th><th class="num">Out tok</th><th class="num">Cost ($)</th><th class="num">Errors</th></tr></thead>
-    <tbody>
-      {% for p in tokens.by_purpose %}
-      <tr><td>{{ p.purpose }}</td><td class="mono small">{{ p.model_id }}</td><td class="num">{{ p.calls }}</td><td class="num">{{ p.input_tokens }}</td><td class="num">{{ p.output_tokens }}</td><td class="num">{{ '%.4f' % p.cost_usd }}</td><td class="num">{{ p.errors }}</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
+  <div class="grid-2">
+    <div>
+      <h3 style="margin-top:0">Assessment pipeline <span class="muted" style="font-weight:400">{{ d.rep.summary.costs.assess_time_s | secs }}</span></h3>
+      {% if d.rep.stages %}{{ ui.stage_bar(d.rep.stages) }}{% else %}<p class="muted small">No stage timings — {% if s.mode == 'grade' %}this run re-graded a stored assessment.{% else %}the pipeline did not complete.{% endif %}</p>{% endif %}
+    </div>
+    <div>
+      <h3 style="margin-top:0">Model spend by purpose <span class="muted" style="font-weight:400">{{ d.rep.summary.costs.assess | money(4) }}</span></h3>
+      {% if d.rep.purposes %}
+      <table class="small">
+        <thead><tr><th>purpose</th><th>model</th><th class="num">calls</th><th class="num">in / out tokens</th><th class="num">time</th><th class="num">cost</th></tr></thead>
+        <tbody>
+        {% for p in d.rep.purposes %}
+        <tr><td>{{ p.purpose }}</td><td class="mono">{{ p.model_id.split('/')[-1] }}</td><td class="num">{{ p.calls }}{% if p.errors %} <span style="color:var(--status-critical)">({{ p.errors }} err)</span>{% endif %}</td><td class="num">{{ '{:,}'.format(p.input_tokens) }} / {{ '{:,}'.format(p.output_tokens) }}</td><td class="num">{{ p.latency_s | secs }}</td><td class="num">{{ p.cost | money(4) }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}<p class="muted small">No model telemetry recorded for this assessment.</p>{% endif %}
+    </div>
+  </div>
+  <div class="judge-line">
+    <b>Judge</b> {{ d.rep.summary.costs.judge | money(4) }} · {{ d.rep.summary.costs.judge_time_s | secs }} —
+    {% for jc in d.judge_calls %}{{ jc.purpose }} <span class="mono">{{ jc.model_id.split('/')[-1] }}</span> {{ ((jc.latency_ms or 0) / 1000) | secs }}{% if jc.cost_usd is not none %} {{ '≈' if jc.cost_source == 'estimated' else '' }}${{ '%.4f' % jc.cost_usd }}{% endif %}{% if not jc.ok %} <span style="color:var(--status-critical)">failed</span>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}
+  </div>
 </div>
 
-<h2>Judge calls (raw, for audit)</h2>
-<div class="card">
-  {% for jc in judge_calls %}
-  <details>
-    <summary>
-      {{ jc.purpose }} · {{ jc.model_id }} · {{ jc.prompt_version }} ·
-      {{ 'ok' if jc.ok else 'FAILED' }} · {{ jc.latency_ms }}ms ·
-      {{ jc.input_tokens }}/{{ jc.output_tokens }} tok
-      {% if jc.error %} · <span class="delta-neg">{{ jc.error[:100] }}</span>{% endif %}
-    </summary>
-    <h3>Request</h3>
-    <pre>{{ jc.request_json }}</pre>
-    <h3>Raw response</h3>
-    <pre>{{ jc.response_json }}</pre>
+<details class="card" style="margin-top:14px">
+  <summary class="muted">Raw judge calls ({{ d.judge_calls | length }})</summary>
+  {% for jc in d.judge_calls %}
+  <details style="margin-top:8px">
+    <summary><span class="mono">{{ jc.purpose }}</span> · {{ jc.model_id }} · prompt {{ jc.prompt_version }} · {{ 'ok' if jc.ok else 'FAILED' }}{% if jc.error %} — {{ jc.error }}{% endif %}</summary>
+    <h4>Request</h4><pre class="small">{{ jc.request_json }}</pre>
+    <h4>Response</h4><pre class="small">{{ jc.response_json }}</pre>
   </details>
-  {% else %}
-  <p class="muted">no judge calls recorded</p>
   {% endfor %}
-</div>
+</details>
 {% endblock %}

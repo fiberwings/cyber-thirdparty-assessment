@@ -348,7 +348,14 @@ class ModelCall(Base):
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # Provider prompt-cache reads / reasoning tokens, from OpenRouter usage details.
+    cached_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # From OpenRouter `usage.cost` (credits, USD-denominated); 0 when unreported.
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    # "openrouter" = metered by the provider; "estimated" = backfilled from list
+    # pricing × tokens (scripts/backfill_cost.py); "" = unknown / not reported.
+    cost_source: Mapped[str] = mapped_column(String(20), default="")
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     error: Mapped[str] = mapped_column(Text, default="")
     # True when the response came from the dev-only LLM cache (no tokens spent).
