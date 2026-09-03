@@ -4,21 +4,25 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { use, useMemo, useState } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
-import { ScoreHeatmap } from "@/components/ScoreHeatmap";
+import { ResidualRiskMatrix } from "@/components/ResidualRiskMatrix";
 import { ScoreExplanation } from "@/components/ScoreExplanation";
 import { ExecutiveSummaryPanel } from "@/components/ExecutiveSummaryPanel";
 import { PrerequisitesBanner } from "@/components/PrerequisitesBanner";
 import {
+  BAND_ORDER,
   SEVERITY_ORDER,
   SEVERITY_STYLES,
   bandColor,
+  bandCounts,
   bandLabel,
   bandTextColor,
+  compareScenarioScoresByRisk,
   compareWeaknessesBySeverity,
   severityCounts,
 } from "@/lib/utils";
-import { Band, DocumentRead, WeaknessRead } from "@/lib/types";
+import { Band, DocumentRead, ScenarioScoreRead, WeaknessRead } from "@/lib/types";
 import { SeverityBadge } from "@/components/SeverityBadge";
+import { Info } from "lucide-react";
 import clsx from "clsx";
 
 export default function ScorePage({ params }: { params: Promise<{ id: string }> }) {
@@ -52,14 +56,16 @@ export default function ScorePage({ params }: { params: Promise<{ id: string }> 
       {isLoading || !report ? (
         <div className="text-sm text-ink-500">Loading…</div>
       ) : (
-        <div className="max-w-5xl space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-6 items-start">
+        <div className="max-w-6xl space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)] gap-6 items-start">
             <OverallCard
               band={report.aggregate.band}
               top2={report.aggregate.top2_mean_rank}
               weighted={report.aggregate.weighted_mean_rank}
+              scenarios={report.scenarios}
+              onSelect={scrollToScenario}
             />
-            <ScoreHeatmap scenarios={report.scenarios} />
+            <ResidualRiskMatrix scenarios={report.scenarios} onSelect={scrollToScenario} />
           </div>
 
           <ExecutiveSummaryPanel
@@ -82,7 +88,27 @@ export default function ScorePage({ params }: { params: Promise<{ id: string }> 
   );
 }
 
-function OverallCard({ band, top2, weighted }: { band: Band; top2: number; weighted: number }) {
+function OverallCard({
+  band,
+  top2,
+  weighted,
+  scenarios,
+  onSelect,
+}: {
+  band: Band;
+  top2: number;
+  weighted: number;
+  scenarios: ScenarioScoreRead[];
+  onSelect: (code: string) => void;
+}) {
+  const ranked = useMemo(() => [...scenarios].sort(compareScenarioScoresByRisk), [scenarios]);
+  const counts = bandCounts(scenarios);
+  const total = scenarios.length;
+  const top = ranked[0];
+  const distributionLabel = BAND_ORDER.filter((b) => counts[b] > 0)
+    .map((b) => `${counts[b]} ${bandLabel(b)}`)
+    .join(", ");
+
   return (
     <div className="overflow-hidden rounded-xl border border-ink-200 bg-white shadow-card">
       <div className={clsx("h-1.5", bandColor(band))} />
@@ -98,8 +124,53 @@ function OverallCard({ band, top2, weighted }: { band: Band; top2: number; weigh
           </span>
         </div>
 
+        <div className="mt-2 text-[11px] text-ink-500">
+          {total} scenario{total === 1 ? "" : "s"}
+          {top && (
+            <>
+              {" · top risk: "}
+              <button
+                type="button"
+                onClick={() => onSelect(top.code)}
+                title={top.name}
+                className="font-mono text-ink-700 hover:underline underline-offset-2 max-w-full truncate align-bottom"
+              >
+                {top.code}
+              </button>
+            </>
+          )}
+        </div>
+
+        {total > 0 && (
+          <>
+            <div
+              className="mt-3 flex h-2.5 w-full overflow-hidden rounded-full bg-ink-100"
+              role="img"
+              aria-label={`Band distribution: ${distributionLabel}`}
+            >
+              {BAND_ORDER.filter((b) => counts[b] > 0).map((b) => (
+                <div
+                  key={b}
+                  className={clsx("h-full", bandColor(b))}
+                  style={{ width: `${(counts[b] / total) * 100}%` }}
+                />
+              ))}
+            </div>
+            <ul className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-ink-600">
+              {BAND_ORDER.map((b) => (
+                <li key={b} className="flex items-center gap-1.5">
+                  <span className={clsx("h-2 w-2 rounded-sm", bandColor(b))} aria-hidden />
+                  {bandLabel(b)}
+                  <span className="ml-auto font-semibold tabular-nums text-ink-800">{counts[b]}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+
         <details className="mt-4 border-t border-ink-100 pt-3 group">
-          <summary className="cursor-pointer select-none text-[11px] text-ink-500 hover:text-ink-700 list-none [&::-webkit-details-marker]:hidden">
+          <summary className="cursor-pointer select-none text-[11px] text-ink-500 hover:text-ink-700 list-none [&::-webkit-details-marker]:hidden flex items-center gap-1">
+            <Info className="h-3 w-3 text-ink-400" aria-hidden />
             <span className="group-open:hidden">How the overall band is derived ▸</span>
             <span className="hidden group-open:inline">How the overall band is derived ▾</span>
           </summary>

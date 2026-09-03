@@ -66,7 +66,7 @@ The e2e test (`tests/test_e2e.py`) walks the full workflow end-to-end with a fak
 5. Click **2. Inherent risk** in the left nav, then **Generate scenarios**.
 6. Click **3. Evidence** and upload at least one PDF or XLSX; wait for per-document extraction to finish.
 7. Click **4. Analysis** and run the three steps in order: cross-correlate, gap analysis, narratives & summary.
-8. Click **5. Residual score** — every band, every cited piece of evidence is visible.
+8. Click **5. Residual score** — every band, every cited piece of evidence is visible. Every scenario has a numbered marker on the matrix and a row in the register; hovering one highlights the other, and **Inherent → residual** draws the movement arrows.
 9. Open any scenario and edit a control's effectiveness from "strong" to "weak"; the band re-renders within a second.
 
 The steps are strictly sequential and the backend enforces the order: an action whose prerequisites are

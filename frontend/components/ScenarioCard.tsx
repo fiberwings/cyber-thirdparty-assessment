@@ -1,10 +1,8 @@
 "use client";
 
 import { ScenarioRead } from "@/lib/types";
-import { bandColor, bandLabel } from "@/lib/utils";
+import { LEVEL_ABBR, bandColor, bandLabel } from "@/lib/utils";
 import clsx from "clsx";
-
-const LEVEL_ABBR: Record<number, string> = { 1: "L", 2: "M", 3: "H", 4: "V" };
 
 export function ScenarioCard({ scenario, onOpen }: { scenario: ScenarioRead; onOpen: () => void }) {
   const evidenced = scenario.expected_controls.filter(

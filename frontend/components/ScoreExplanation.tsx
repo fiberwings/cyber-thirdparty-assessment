@@ -1,25 +1,8 @@
 "use client";
 
-import { ReportOut, ScenarioScoreRead } from "@/lib/types";
-import { bandColor, bandLabel, compareScenarioScoresByRisk, formatPercent } from "@/lib/utils";
+import { ReportOut } from "@/lib/types";
+import { bandColor, bandLabel, compareScenarioScoresByRisk, driverLine, formatPercent } from "@/lib/utils";
 import clsx from "clsx";
-
-// One human-readable line naming what actually drove the residual band.
-function driverLine(s: ScenarioScoreRead): string {
-  const parts = [
-    `Coverage ${formatPercent(s.coverage_index)} → −${s.likelihood_reduction} likelihood`,
-  ];
-  if (s.uplift > 0) {
-    parts.push(`uplift +${s.uplift} (${s.distinct_high_critical} distinct high/critical, ${s.auditor_tested_high_critical} auditor-tested)`);
-  }
-  if (s.state_downgrades.length > 0) {
-    parts.push(`${s.state_downgrades.length} control state(s) downgraded by findings`);
-  }
-  if (s.confidence !== "high") {
-    parts.push(`${s.confidence} evidence confidence`);
-  }
-  return parts.join(" · ");
-}
 
 export function ScoreExplanation({
   report,

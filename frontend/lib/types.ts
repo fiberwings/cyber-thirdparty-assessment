@@ -317,4 +317,4 @@ export interface ModelProfile {
 }
 
 export const LEVEL_NAMES = ["Low", "Moderate", "High", "VeryHigh"] as const;
-export const LEVEL_LABELS: Record<number, string> = { 1: "Low", 2: "Moderate", 3: "High", 4: "VeryHigh" };
+export const LEVEL_LABELS: Record<number, string> = { 1: "Low", 2: "Moderate", 3: "High", 4: "Very High" };

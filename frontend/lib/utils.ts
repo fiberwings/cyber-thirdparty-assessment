@@ -90,6 +90,50 @@ export function bandLabel(band: Band): string {
   return band === "VeryHigh" ? "Very High" : band;
 }
 
+// Highest band first — the order every distribution/legend reads in.
+export const BAND_ORDER: Band[] = ["VeryHigh", "High", "Moderate", "Low"];
+
+export const LEVEL_ABBR: Record<number, string> = { 1: "L", 2: "M", 3: "H", 4: "VH" };
+
+export function bandAbbr(band: Band): string {
+  return LEVEL_ABBR[bandRank(band)];
+}
+
+// Tinted matrix-cell fill: band colour at low alpha with a stronger inset ring,
+// so dark markers and text stay legible on top. Moderate is boosted because
+// #eab308 washes out at 15%.
+export function bandTint(band: Band): string {
+  switch (band) {
+    case "Low": return "bg-risk-low/15 ring-risk-low/40";
+    case "Moderate": return "bg-risk-moderate/20 ring-risk-moderate/50";
+    case "High": return "bg-risk-high/15 ring-risk-high/40";
+    case "VeryHigh": return "bg-risk-veryhigh/15 ring-risk-veryhigh/40";
+  }
+}
+
+export function bandCounts(scenarios: ScenarioScoreRead[]): Record<Band, number> {
+  const counts: Record<Band, number> = { Low: 0, Moderate: 0, High: 0, VeryHigh: 0 };
+  for (const s of scenarios) counts[s.band] += 1;
+  return counts;
+}
+
+// One human-readable line naming what actually drove the residual band.
+export function driverLine(s: ScenarioScoreRead): string {
+  const parts = [
+    `Coverage ${formatPercent(s.coverage_index)} → −${s.likelihood_reduction} likelihood`,
+  ];
+  if (s.uplift > 0) {
+    parts.push(`uplift +${s.uplift} (${s.distinct_high_critical} distinct high/critical, ${s.auditor_tested_high_critical} auditor-tested)`);
+  }
+  if (s.state_downgrades.length > 0) {
+    parts.push(`${s.state_downgrades.length} control state(s) downgraded by findings`);
+  }
+  if (s.confidence !== "high") {
+    parts.push(`${s.confidence} evidence confidence`);
+  }
+  return parts.join(" · ");
+}
+
 export function formatPercent(x: number): string {
   return `${Math.round(x * 100)}%`;
 }
