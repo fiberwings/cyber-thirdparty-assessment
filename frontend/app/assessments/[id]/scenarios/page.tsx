@@ -1,16 +1,16 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, describeError, pollTask } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { use, useEffect, useRef, useState } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
+import { AiActivity } from "@/components/AiActivity";
 import { ScenarioCard } from "@/components/ScenarioCard";
 import { ScenarioDrawer } from "@/components/ScenarioDrawer";
 import { compareScenariosByRisk } from "@/lib/utils";
 import { staleLine, useWorkflow } from "@/lib/useWorkflow";
+import { useTask } from "@/lib/useTask";
 import { useRouter } from "next/navigation";
-
-type Progress = { status: string; progress: number; detail: string };
 
 export default function ScenariosPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -27,7 +27,6 @@ export default function ScenariosPage({ params }: { params: Promise<{ id: string
   const { assessment, step } = useWorkflow(aid);
   const scenariosStep = step("scenarios");
 
-  const [progress, setProgress] = useState<Progress | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [taskError, setTaskError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -42,40 +41,21 @@ export default function ScenariosPage({ params }: { params: Promise<{ id: string
   useEffect(() => {
     if (phase?.state === "running" && phase.task_id && !taskId && !finishedTasks.current.has(phase.task_id)) {
       setTaskId(phase.task_id);
-      setProgress({
-        status: "running",
-        progress: phase.progress ?? 0,
-        detail: phase.detail ?? "",
-      });
     }
-  }, [phase?.state, phase?.task_id, phase?.progress, phase?.detail, taskId]);
+  }, [phase?.state, phase?.task_id, taskId]);
 
-  // Single polling loop driven by taskId; survives whichever way the task id
-  // arrived (button click or recovery above).
+  // One polled query driven by taskId (lib/useTask); survives whichever way
+  // the id arrived (button click or recovery above). Cancelling ends it with
+  // the backend's "cancelled by user" error and the step becomes re-runnable.
+  const { task, cancel: cancelGeneration } = useTask(taskId);
   useEffect(() => {
-    if (!taskId) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        await pollTask(taskId, (p) => {
-          if (!cancelled) setProgress(p);
-        });
-        if (cancelled) return;
-        setProgress(null);
-      } catch (e) {
-        if (cancelled) return;
-        setProgress(null);
-        setTaskError(e instanceof Error ? e.message : String(e));
-      }
-      finishedTasks.current.add(taskId);
-      setTaskId(null);
-      qc.invalidateQueries({ queryKey: ["scenarios", aid] });
-      qc.invalidateQueries({ queryKey: ["assessment", aid] });
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [taskId, aid, qc]);
+    if (!taskId || !task || (task.status !== "done" && task.status !== "error")) return;
+    finishedTasks.current.add(taskId);
+    if (task.status === "error") setTaskError(task.detail || task.error || "Generation failed");
+    setTaskId(null);
+    qc.invalidateQueries({ queryKey: ["scenarios", aid] });
+    qc.invalidateQueries({ queryKey: ["assessment", aid] });
+  }, [taskId, task, aid, qc]);
 
   const generate = useMutation({
     // The backend re-attaches to an in-flight run instead of starting a second
@@ -137,14 +117,16 @@ export default function ScenariosPage({ params }: { params: Promise<{ id: string
           until this step is current.
         </div>
       )}
-      {progress && (
-        <div className="mt-4 rounded border border-ink-200 bg-white p-3 text-xs text-ink-600">
-          {progress.status} · {Math.round(progress.progress * 100)}% · {progress.detail || "…"}
-          <span className="block mt-1 text-ink-400">
-            The first step (scenario skeletons) typically takes a few minutes. You can leave this
-            page — generation continues and progress reappears when you come back.
-          </span>
-        </div>
+      {taskId && (
+        <AiActivity
+          className="mt-4"
+          variant="panel"
+          kind="scenarios_generation"
+          source={task ?? (phase?.state === "running" ? phase : undefined)}
+          onCancel={() => cancelGeneration.mutate(taskId)}
+          cancelling={cancelGeneration.isPending}
+          hint="You can leave this page — generation continues and progress reappears when you come back."
+        />
       )}
       {taskError && (
         <div className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-xs text-red-700">

@@ -60,7 +60,29 @@ class WorkflowConflict(BaseModel):
     message: str
 
 
-class PhaseInfo(BaseModel):
+class TaskProgressFields(BaseModel):
+    """Structured, observed progress of a running job (see app.tasks.TaskStats).
+    Shared by the task poll payload and the per-phase view so every AI
+    trigger renders the same indicator. `units_total == 0` means the stage
+    has no knowable unit count: clients show an indeterminate state, never a
+    percentage."""
+
+    stage: str = ""
+    stage_index: int = -1
+    stages: list[str] = Field(default_factory=list)
+    units_done: int = 0
+    units_total: int = 0
+    unit_label: str = ""
+    purpose: str = ""
+    calls_active: int = 0
+    calls_done: int = 0
+    tokens_out: int = 0
+    tokens_reasoning: int = 0
+    first_token_ms: Optional[int] = None
+    elapsed_s: Optional[float] = None
+
+
+class PhaseInfo(TaskProgressFields):
     state: Literal["pending", "running", "done", "error"]
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -69,6 +91,10 @@ class PhaseInfo(BaseModel):
     # Live detail when state == "running" (e.g. "37% · synthesizing weaknesses").
     detail: Optional[str] = None
     progress: Optional[float] = None
+    # Liveness while running: when the job last showed activity (a streamed
+    # token, a keepalive, a progress step) and how long ago that was.
+    last_activity_at: Optional[datetime] = None
+    idle_s: Optional[float] = None
     # state == "done" with partial failures (e.g. gap analysis: N controls
     # could not be assessed and are resumable individually).
     warning: Optional[str] = None
@@ -154,6 +180,7 @@ class DocumentRead(BaseModel):
     parsed_at: Optional[datetime]
     weakness_extracted_at: Optional[datetime] = None
     attestation_profile: Optional[dict] = None
+    attestation_profile_error: Optional[str] = None
     # Durable extraction job state (persisted on the row): the task to poll
     # while running, the error when it failed, and a derived summary state.
     weakness_task_id: Optional[str] = None
@@ -403,8 +430,15 @@ class ModelOverrides(BaseModel):
 
 # ---------- Tasks ----------
 
-class TaskStatusRead(BaseModel):
+class TaskStatusRead(TaskProgressFields):
     task_id: str
     status: str  # pending|running|done|error
     progress: float
     detail: str
+    kind: str = ""
+    error: str = ""
+    started_at: Optional[datetime] = None
+    # Liveness: last activity stamp and, while pending/running, seconds since.
+    # Clients wait on these instead of guessing how long a stage should take.
+    last_activity_at: Optional[datetime] = None
+    idle_s: Optional[float] = None

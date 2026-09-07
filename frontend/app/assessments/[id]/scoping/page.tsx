@@ -1,11 +1,12 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, describeError, pollTask } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { use, useState } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
 import { AssessmentSettings } from "@/components/AssessmentSettings";
-import { TaskProgress } from "@/components/TaskProgress";
+import { AiActivity } from "@/components/AiActivity";
+import { useTask, waitForTask } from "@/lib/useTask";
 import { useRouter } from "next/navigation";
 
 const DIMENSIONS = [
@@ -26,7 +27,9 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
 
   const [text, setText] = useState("");
   const [answer, setAnswer] = useState("");
-  const [progress, setProgress] = useState<{ status: string; progress: number; detail: string } | null>(null);
+  const [taskId, setTaskId] = useState<string | null>(null);
+  // Live status of the in-flight turn (one polled query, see lib/useTask).
+  const { task, cancel: cancelTurn } = useTask(taskId);
 
   // Description / scoping changes reopen scoping and stamp every later step
   // stale (and are refused while a job runs), so the phases are refreshed too.
@@ -41,14 +44,17 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
   const turn = useMutation({
     mutationFn: async (answer?: string) => {
       const { task_id } = await api.scopingTurn(aid, answer);
-      await pollTask(task_id, setProgress, 800);
+      setTaskId(task_id);
+      await waitForTask(qc, task_id);
     },
     onSuccess: () => setAnswer(""),
     onSettled: () => {
-      setProgress(null);
+      setTaskId(null);
       refresh();
     },
   });
+  // Cancelling makes the pending waitForTask reject ("cancelled by user"),
+  // which the error line below shows.
   const force = useMutation({
     mutationFn: () => api.forceContinue(aid),
     onSuccess: () => router.push(`/assessments/${aid}/scenarios`),
@@ -144,7 +150,13 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
                 </div>
                 {turn.isPending && (
                   <div className="mt-2">
-                    <TaskProgress label="Processing" detail={progress?.detail} />
+                    <AiActivity
+                      variant="panel"
+                      kind="scoping_turn"
+                      source={task}
+                      onCancel={taskId ? () => cancelTurn.mutate(taskId) : undefined}
+                      cancelling={cancelTurn.isPending}
+                    />
                   </div>
                 )}
                 {turn.isError && (

@@ -7,10 +7,21 @@ Profiles:
                 generation, gap analysis, weakness synthesis.
 
 `call_structured` does:
-    1. POST /chat/completions with response_format=json_object
+    1. POST /chat/completions (streamed) with response_format=json_object
     2. Parse JSON, validate against the supplied Pydantic model
     3. On validation failure, retry ONCE with a stricter follow-up message
     4. Persist a ModelCall row regardless of outcome
+
+Transport: completions are streamed (SSE) and reassembled into the familiar
+non-streaming response dict, so every consumer (the retry ladder, the dev
+cache, tests) sees one shape. Streaming is what makes deadlines
+liveness-based instead of duration-based: the router observes every token
+and keepalive, times out only on *inactivity* (two tiers) plus a hard
+ceiling sized in hours, pings the ambient task (app.activity) so the
+watchdog sees progress, and can be cancelled mid-generation (which stops
+billing on providers that support it). Automatic retry happens only before
+any content has arrived — never after partial output (no double billing,
+no silent fallback).
 """
 
 from __future__ import annotations
@@ -20,13 +31,14 @@ import hashlib
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
+from app import activity
 from app.config import settings
 from app.models import ModelCall
 
@@ -184,9 +196,11 @@ def _cache_get(db: Session, key: str) -> dict[str, Any] | None:
 def _cache_put(db: Session, key: str, model: str, prompt_sha: str, response: dict[str, Any]) -> None:
     from app.models import LlmCacheEntry
 
+    # Per-call transport telemetry (`_meta`) is not part of the answer.
+    stored = {k: v for k, v in response.items() if not str(k).startswith("_")}
     try:
         if db.get(LlmCacheEntry, key) is None:
-            db.add(LlmCacheEntry(key=key, model_id=model, prompt_sha=prompt_sha, response_json=response))
+            db.add(LlmCacheEntry(key=key, model_id=model, prompt_sha=prompt_sha, response_json=stored))
             db.commit()
     except Exception:
         db.rollback()
@@ -205,11 +219,10 @@ async def _chat_maybe_cached(
 ) -> tuple[dict[str, Any], bool]:
     """cli.chat() behind the dev cache. Returns (response, from_cache).
     Only complete (non-truncated), error-free responses are stored."""
-    timeout = _timeout_for_budget(max_tokens)
     if not settings.llm_dev_cache_active:
         resp = await cli.chat(
             messages, model, response_format=response_format,
-            temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+            temperature=temperature, max_tokens=max_tokens,
         )
         return resp, False
     key = _cache_key(
@@ -218,10 +231,11 @@ async def _chat_maybe_cached(
     )
     hit = _cache_get(db, key)
     if hit is not None:
+        activity.touch()  # a replay is progress too
         return hit, True
     resp = await cli.chat(
         messages, model, response_format=response_format,
-        temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        temperature=temperature, max_tokens=max_tokens,
     )
     if _finish_reason(resp) != "length":
         _cache_put(db, key, model, prompt_sha, resp)
@@ -236,6 +250,8 @@ class OpenRouterError(RuntimeError):
         transient: bool = False,
         upstream_code: int | None = None,
         truncated: bool = False,
+        partial: bool = False,
+        output_head: str = "",
     ):
         super().__init__(message)
         self.transient = transient
@@ -243,19 +259,36 @@ class OpenRouterError(RuntimeError):
         # True when the model hit max_tokens — callers can fall back to a
         # two-phase strategy instead of just bubbling up.
         self.truncated = truncated
+        # True when output tokens had already arrived when the call failed.
+        # Such a call is never retried automatically (it would bill twice and
+        # hide a provider fault); `output_head` keeps what was received for
+        # forensics (ModelCall.output_head).
+        self.partial = partial
+        self.output_head = output_head
 
 
 _TRANSIENT_HTTP_CODES = {408, 429, 500, 502, 503, 504, 524}
+_OUTPUT_HEAD_CHARS = 8000
 
 
-def _timeout_for_budget(tokens: int) -> float:
-    """Per-attempt HTTP timeout sized for a non-streaming response of up to
-    `tokens` output tokens: nothing arrives until generation completes, so the
-    read timeout must cover the whole generation."""
-    return min(
-        settings.llm_timeout_max_s,
-        settings.llm_timeout_base_s + tokens / settings.llm_assumed_output_tps,
-    )
+@dataclass
+class _StreamState:
+    """What one streamed attempt has received so far — read by the retry loop
+    to decide partial/transient and to salvage the output head."""
+
+    got_data: bool = False
+    parts: list[str] = field(default_factory=list)
+    first_token_ms: int | None = None
+    t0: float = field(default_factory=time.monotonic)
+    last_content_mono: float = field(default_factory=time.monotonic)
+    usage: dict[str, Any] | None = None  # the trailing usage chunk, when it arrived
+
+    @property
+    def partial(self) -> bool:
+        return bool(self.parts)
+
+    def head(self) -> str:
+        return "".join(self.parts)[:_OUTPUT_HEAD_CHARS]
 
 
 class OpenRouterClient:
@@ -283,64 +316,240 @@ class OpenRouterClient:
         response_format: dict[str, Any] | None = None,
         temperature: float = 0.2,
         max_tokens: int | None = None,
-        timeout: float | None = None,
     ) -> dict[str, Any]:
+        """Streamed chat completion, returned in the non-streaming response
+        shape: ``{"choices": [{"message": {"content"}, "finish_reason"}],
+        "usage": {...}, "_meta": {"first_token_ms", "stream_ms"}}``.
+
+        Deadlines are liveness-based (see Settings): a dead socket
+        (LLM_STREAM_IDLE_S), a live socket with no output or reasoning token
+        (LLM_CONTENT_SILENCE_S — off by default, hidden reasoning is
+        indistinguishable from a stall), and a hard ceiling (LLM_CALL_MAX_S).
+        Transient failures are retried once, but only while no output token
+        has arrived; after that the error is raised with ``partial=True``.
+        Cancelling the awaiting task closes the stream, which stops
+        generation and billing on providers that support it.
+        """
         if max_tokens is None:
             max_tokens = settings.llm_budget_small
-        if timeout is None:
-            timeout = _timeout_for_budget(max_tokens)
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "stream": True,
         }
         if response_format:
             body["response_format"] = response_format
+        timeout = httpx.Timeout(
+            connect=settings.llm_connect_timeout_s,
+            read=settings.llm_stream_idle_s,
+            write=30.0,
+            pool=settings.llm_connect_timeout_s,
+        )
 
         last_err: OpenRouterError | None = None
-        for attempt in range(2):
-            try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    resp = await client.post(
-                        f"{self.base_url}/chat/completions",
-                        headers=self._headers(),
-                        json=body,
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for attempt in range(2):
+                state = _StreamState()
+                try:
+                    async with asyncio.timeout(settings.llm_call_max_s):
+                        return await self._stream_once(client, body, state)
+                except TimeoutError:
+                    # asyncio.timeout expired: the hard ceiling. Never retried.
+                    raise OpenRouterError(
+                        f"OpenRouter call exceeded LLM_CALL_MAX_S="
+                        f"{settings.llm_call_max_s:.0f}s (model {model}, "
+                        f"{len(state.parts)} content chunks received) — raise the "
+                        "ceiling or split the work",
+                        partial=state.partial,
+                        output_head=state.head(),
                     )
-            except (httpx.TimeoutException, httpx.TransportError) as e:
-                last_err = OpenRouterError(
-                    f"Network error talking to OpenRouter: {type(e).__name__}: {e}",
-                    transient=True,
-                )
-            else:
-                if resp.status_code >= 400:
-                    last_err = OpenRouterError(
-                        f"OpenRouter {resp.status_code}: {resp.text[:500]}",
-                        transient=resp.status_code in _TRANSIENT_HTTP_CODES,
-                        upstream_code=resp.status_code,
-                    )
-                else:
-                    data = resp.json()
-                    err = data.get("error") if isinstance(data, dict) else None
-                    if err:
-                        # OpenRouter sometimes returns 200 with an `error` envelope when an
-                        # upstream provider fails (e.g. 504 "operation aborted").
-                        code = err.get("code") if isinstance(err, dict) else None
-                        msg = err.get("message") if isinstance(err, dict) else str(err)
-                        last_err = OpenRouterError(
-                            f"OpenRouter upstream error {code}: {msg}",
-                            transient=isinstance(code, int) and code in _TRANSIENT_HTTP_CODES,
-                            upstream_code=code if isinstance(code, int) else None,
+                except httpx.TimeoutException as e:
+                    if state.partial:
+                        raise OpenRouterError(
+                            f"OpenRouter stream stalled after output started: no bytes "
+                            f"for LLM_STREAM_IDLE_S={settings.llm_stream_idle_s:.0f}s "
+                            f"({type(e).__name__})",
+                            partial=True,
+                            output_head=state.head(),
                         )
-                    else:
-                        return data
+                    waited = time.monotonic() - state.t0
+                    _logger.warning(
+                        "OpenRouter read timeout before any output token after %.0fs "
+                        "(model %s, attempt %d) — LLM_STREAM_IDLE_S=%.0f",
+                        waited, model, attempt + 1, settings.llm_stream_idle_s,
+                    )
+                    last_err = OpenRouterError(
+                        f"Network timeout talking to OpenRouter before any output "
+                        f"({type(e).__name__} after {waited:.0f}s)",
+                        transient=True,
+                    )
+                except httpx.TransportError as e:
+                    if state.partial:
+                        raise OpenRouterError(
+                            f"OpenRouter connection dropped mid-stream: "
+                            f"{type(e).__name__}: {e}",
+                            partial=True,
+                            output_head=state.head(),
+                        )
+                    last_err = OpenRouterError(
+                        f"Network error talking to OpenRouter: {type(e).__name__}: {e}",
+                        transient=True,
+                    )
+                except OpenRouterError as e:
+                    last_err = e
 
-            if not last_err.transient or attempt == 1:
-                raise last_err
-            await asyncio.sleep(1.5)
+                if not last_err.transient or last_err.partial or attempt == 1:
+                    raise last_err
+                await asyncio.sleep(1.5)
+        raise last_err  # pragma: no cover — loop always returns or raises
 
-        # Unreachable, but keep mypy happy.
-        raise last_err  # type: ignore[misc]
+    async def _stream_once(
+        self, client: httpx.AsyncClient, body: dict[str, Any], state: _StreamState
+    ) -> dict[str, Any]:
+        """One streamed attempt: parse the SSE stream, reassemble the message.
+
+        Wire facts (OpenRouter docs): ``data: {json}`` events, keepalive
+        comment lines ``: OPENROUTER PROCESSING`` at an undocumented cadence,
+        ``data: [DONE]`` sentinel; ``finish_reason`` on the last content chunk
+        and again on the trailing usage chunk (which carries one choice with an
+        empty delta); usage always on that final chunk; a mid-stream failure
+        arrives as a chunk with a top-level ``error`` and ``finish_reason:
+        "error"`` after which ``[DONE]`` may never come.
+        """
+        url = f"{self.base_url}/chat/completions"
+        try:
+            return await self._stream_body(client, url, body, state)
+        finally:
+            # Observation only: fold this attempt's streamed-token estimate
+            # into the ambient task (exact when the usage chunk arrived).
+            activity.attempt_finished(state.usage)
+
+    async def _stream_body(
+        self, client: httpx.AsyncClient, url: str, body: dict[str, Any], state: _StreamState
+    ) -> dict[str, Any]:
+        finish: str | None = None
+        usage: dict[str, Any] | None = None
+        resp_id: str | None = None
+        resp_model: str | None = None
+        async with client.stream("POST", url, headers=self._headers(), json=body) as resp:
+            if resp.status_code >= 400:
+                text = (await resp.aread()).decode("utf-8", "replace")[:500]
+                raise OpenRouterError(
+                    f"OpenRouter {resp.status_code}: {text}",
+                    transient=resp.status_code in _TRANSIENT_HTTP_CODES,
+                    upstream_code=resp.status_code,
+                )
+            async for raw in resp.aiter_lines():
+                now = time.monotonic()
+                activity.touch()
+                silence = now - state.last_content_mono
+                if silence > settings.llm_content_silence_s:
+                    raise OpenRouterError(
+                        f"OpenRouter stream produced no output or reasoning token for "
+                        f"{silence:.0f}s (LLM_CONTENT_SILENCE_S={settings.llm_content_silence_s:.0f}; "
+                        f"model {body.get('model')}) — the generation looks stuck (a model that "
+                        "reasons hidden can look like this; raise the limit or the ceiling)",
+                        partial=state.partial,
+                        output_head=state.head(),
+                    )
+                line = raw.strip()
+                if not line or line.startswith(":"):
+                    continue  # event delimiter / keepalive comment
+                if not line.startswith("data:"):
+                    continue  # event:/id:/retry: fields are not used
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError as e:
+                    raise OpenRouterError(
+                        f"Malformed SSE chunk from OpenRouter: {e}; got: {payload[:200]}",
+                        transient=not state.partial,
+                        partial=state.partial,
+                        output_head=state.head(),
+                    )
+                state.got_data = True
+                if not isinstance(chunk, dict):
+                    continue
+                err = chunk.get("error")
+                if err:
+                    code = err.get("code") if isinstance(err, dict) else None
+                    msg = err.get("message") if isinstance(err, dict) else str(err)
+                    raise OpenRouterError(
+                        f"OpenRouter upstream error {code}: {msg}",
+                        transient=(
+                            isinstance(code, int)
+                            and code in _TRANSIENT_HTTP_CODES
+                            and not state.partial
+                        ),
+                        upstream_code=code if isinstance(code, int) else None,
+                        partial=state.partial,
+                        output_head=state.head(),
+                    )
+                resp_id = chunk.get("id") or resp_id
+                resp_model = chunk.get("model") or resp_model
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+                    state.usage = usage
+                for choice in chunk.get("choices") or []:
+                    if not isinstance(choice, dict):
+                        continue
+                    delta = choice.get("delta") or {}
+                    text = delta.get("content") if isinstance(delta, dict) else None
+                    if text:
+                        if state.first_token_ms is None:
+                            state.first_token_ms = int((now - state.t0) * 1000)
+                            activity.note_first_token(state.first_token_ms)
+                        state.parts.append(text)
+                        state.last_content_mono = now
+                        activity.note_delta(len(text))
+                    elif isinstance(delta, dict) and (
+                        delta.get("reasoning") or delta.get("reasoning_details")
+                    ):
+                        # A thinking model that streams its reasoning is
+                        # working, not stuck — count it for the silence tier
+                        # (never as content).
+                        state.last_content_mono = now
+                        r = delta.get("reasoning")
+                        activity.note_delta(len(r) if isinstance(r, str) else 1, reasoning=True)
+                    fr = choice.get("finish_reason")
+                    if fr:
+                        finish = fr
+                    if fr == "error":
+                        # Provider fault without an error envelope (seen on
+                        # glm-5.3-flash, 0 tokens after 8 s): safe to retry
+                        # once while nothing has been consumed.
+                        raise OpenRouterError(
+                            "OpenRouter provider reported finish_reason=error",
+                            transient=not state.partial,
+                            partial=state.partial,
+                            output_head=state.head(),
+                        )
+        if not state.got_data:
+            raise OpenRouterError(
+                "OpenRouter returned an empty stream (no chunks before [DONE])",
+                transient=True,
+            )
+        return {
+            "id": resp_id,
+            "model": resp_model,
+            "object": "chat.completion",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "".join(state.parts)},
+                    "finish_reason": finish,
+                }
+            ],
+            "usage": usage,
+            "_meta": {
+                "first_token_ms": state.first_token_ms,
+                "stream_ms": int((time.monotonic() - state.t0) * 1000),
+            },
+        }
 
 
 def _extract_content(response: dict[str, Any]) -> str:
@@ -422,12 +631,30 @@ def _looks_garbled(content: str, data: Any, schema: type[BaseModel]) -> bool:
     garbled response (`{"control_codevote": ": "}`) is the model going off
     the rails; feeding it back keeps the model in that mode, so it must be
     retried with fresh context instead. Garbled = not JSON-object-shaped at
-    all, or a dict whose keys barely overlap the schema's fields.
+    all, or a dict with no recognisable schema field.
+
+    Anything that names at least one schema field is a schema miss, however
+    sparse or however many extra fields it carries: schemas whose fields are
+    mostly optional (the attestation profile — a pen test legitimately states
+    none of the SOC-only fields) yield sparse answers, and fast models pad
+    such answers with invented fields. Both are coherent and must reach the
+    corrective retry that shows the validator error.
     """
     if not isinstance(data, dict):
         return not content.lstrip().startswith("{")
-    expected = set(schema.model_fields)
-    return len(expected & set(data)) <= len(expected) // 3
+    known: set[str] = set(schema.model_fields)
+    for f in schema.model_fields.values():
+        if f.alias:
+            known.add(f.alias)
+    keys = set(data)
+    if not keys:
+        return True
+    if keys & known:
+        return False
+    # A single foreign key wrapping an object ({"profile": {...}}) is a
+    # coherent shape miss the corrective retry unwraps; anything else with
+    # no recognisable field is garble.
+    return not (len(keys) == 1 and isinstance(next(iter(data.values())), dict))
 
 
 async def call_structured(
@@ -454,6 +681,8 @@ async def call_structured(
 
     last_err: str = ""
     last_content: str = ""
+    output_head: str = ""
+    first_token_ms: int | None = None
     started = time.perf_counter()
     usage = _UsageTally()
     ok = False
@@ -465,6 +694,7 @@ async def call_structured(
     tokens = max_tokens
     cached = False
 
+    activity.call_started(purpose)
     try:
         while True:
             try:
@@ -479,12 +709,21 @@ async def call_structured(
             except OpenRouterError as e:
                 last_err = str(e)
                 transport_err = e
+                output_head = e.output_head[:_OUTPUT_HEAD_CHARS]
+                if e.partial:
+                    # Tokens were generated and (possibly) billed but no usage
+                    # chunk arrived: count an unmetered live attempt so the
+                    # cost-missing warning fires instead of hiding the spend.
+                    usage.add({})
                 break
 
             content = _extract_content(resp)
             last_content = content
             if not from_cache:  # a cache hit spent no tokens
                 usage.add(resp)
+                meta = resp.get("_meta") or {}
+                if first_token_ms is None and meta.get("first_token_ms") is not None:
+                    first_token_ms = int(meta["first_token_ms"])
 
             if _finish_reason(resp) == "length":
                 # Output was truncated. A truncated response must never be
@@ -501,6 +740,7 @@ async def call_structured(
                     )
                     tokens = min(tokens * 2, settings.llm_truncation_cap)
                     continue
+                output_head = content[:_OUTPUT_HEAD_CHARS]
                 raise OpenRouterError(
                     f"Structured call '{purpose}' output truncated at max_tokens={tokens} "
                     "even after retrying with a larger budget — the requested output may "
@@ -516,6 +756,7 @@ async def call_structured(
                 return obj
             except (json.JSONDecodeError, ValidationError) as e:
                 last_err = f"{type(e).__name__}: {e}"
+                output_head = content[:_OUTPUT_HEAD_CHARS]
                 if _looks_garbled(content, data, schema):
                     if garble_retried:
                         # Garbled twice: fail loudly. Never feed garbage into
@@ -552,7 +793,12 @@ async def call_structured(
         raise OpenRouterError(
             f"Structured call '{purpose}' failed validation after retry: {last_err}"
         )
+    except asyncio.CancelledError:
+        last_err = "cancelled"
+        output_head = output_head or last_content[:_OUTPUT_HEAD_CHARS]
+        raise
     finally:
+        activity.call_finished()
         latency_ms = int((time.perf_counter() - started) * 1000)
         usage.warn_if_cost_missing(purpose, model)
         try:
@@ -564,6 +810,7 @@ async def call_structured(
                     model_id=model,
                     prompt_sha=prompt_sha,
                     latency_ms=latency_ms,
+                    first_token_ms=first_token_ms,
                     input_tokens=usage.input_tokens,
                     output_tokens=usage.output_tokens,
                     cached_tokens=usage.cached_tokens,
@@ -572,6 +819,7 @@ async def call_structured(
                     cost_source=usage.cost_source,
                     ok=ok,
                     error="" if ok else (last_err or "unknown")[:2000],
+                    output_head=None if ok else (output_head or None),
                     cached=cached,
                 )
             )
@@ -603,7 +851,10 @@ async def call_text(
     ok = False
     err = ""
     content = ""
+    output_head: str = ""
+    first_token_ms: int | None = None
     cached = False
+    activity.call_started(purpose)
     try:
         try:
             tokens = max_tokens
@@ -617,6 +868,9 @@ async def call_text(
                 content = _extract_content(resp)
                 if not from_cache:
                     usage.add(resp)
+                    meta = resp.get("_meta") or {}
+                    if first_token_ms is None and meta.get("first_token_ms") is not None:
+                        first_token_ms = int(meta["first_token_ms"])
                 if _finish_reason(resp) == "length":
                     # A cut-off narrative must never be persisted silently.
                     if (
@@ -626,6 +880,7 @@ async def call_text(
                         truncation_retries += 1
                         tokens = min(tokens * 2, settings.llm_truncation_cap)
                         continue
+                    output_head = content[:_OUTPUT_HEAD_CHARS]
                     raise OpenRouterError(
                         f"Text call '{purpose}' output truncated at max_tokens={tokens} "
                         "even after retrying with a larger budget — re-run or reduce "
@@ -636,8 +891,15 @@ async def call_text(
                 return content
         except OpenRouterError as e:
             err = str(e)
+            output_head = output_head or e.output_head[:_OUTPUT_HEAD_CHARS]
+            if e.partial:
+                usage.add({})  # unmetered live attempt → cost-missing warning
+            raise
+        except asyncio.CancelledError:
+            err = "cancelled"
             raise
     finally:
+        activity.call_finished()
         latency_ms = int((time.perf_counter() - started) * 1000)
         usage.warn_if_cost_missing(purpose, model)
         try:
@@ -649,6 +911,7 @@ async def call_text(
                     model_id=model,
                     prompt_sha=prompt_sha,
                     latency_ms=latency_ms,
+                    first_token_ms=first_token_ms,
                     input_tokens=usage.input_tokens,
                     output_tokens=usage.output_tokens,
                     cached_tokens=usage.cached_tokens,
@@ -657,6 +920,7 @@ async def call_text(
                     cost_source=usage.cost_source,
                     ok=ok,
                     error=err[:2000],
+                    output_head=None if ok else (output_head or None),
                     cached=cached,
                 )
             )

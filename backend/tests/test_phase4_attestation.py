@@ -79,6 +79,45 @@ def test_required_attestations_matching():
     assert all(f.kind == "weakness" and f.severity == "high" for f in out)
 
 
+def test_uploaded_assurance_doc_counts_as_supplied_without_profile():
+    """A pen test whose profile extraction failed is still a supplied pen
+    test: the requirement check must not report it as missing (run 23 on
+    veltrix produced exactly that false high-severity weakness)."""
+    from app.attestation_checks import missing_profile_note
+
+    st = StandardsProfile(required_attestations=["SOC 2 Type 2", "annual penetration test"])
+    out = check_required_attestations({"soc.pdf": _soc()}, st, supplied_kinds={"soc", "pentest"})
+    assert out == []
+    # Still missing when neither a profile nor an upload evidences it.
+    out = check_required_attestations({}, st, supplied_kinds={"pentest"})
+    assert [f.code for f in out] == ["required_attestation_missing:soc 2 type 2"]
+    assert "pentest (upload kind)" in out[0].description
+    note = missing_profile_note("pt.pdf", "pentest", "garbled output twice: ValidationError")
+    assert note.kind == "evidence_note" and note.code == "attestation_profile_missing"
+    assert "still counts as supplied" in note.description and "garbled output twice" in note.description
+
+
+def test_sibling_quote_encoding_is_folded_but_quote_still_required():
+    """`report_date` + `report_date_quote` (the doc_type convention generalised)
+    is the same information as {value, quote}; a scalar with no sibling quote
+    still fails — the quote floor is unchanged."""
+    p = AttestationProfileOut.model_validate({
+        "doc_type": "pentest", "doc_type_quote": "Penetration Test Report",
+        "report_date": "2025-11-28", "report_date_quote": "Report date: 28 November 2025",
+        "scope": "Web application", "scope_quote": "In scope: the web application",
+        "bridge_letter": False,
+        "methodology": "OWASP", "methodology_quote": "ignored extra field",
+    })
+    assert p.report_date.value == "2025-11-28" and p.report_date.quote.startswith("Report date")
+    assert p.scope.value == "Web application"
+    assert p.bridge_letter.value is False  # False needs no quote
+    with pytest.raises(Exception):
+        AttestationProfileOut.model_validate({"doc_type": "pentest", "report_date": "2025-11-28"})
+    with pytest.raises(Exception):
+        AttestationProfileOut.model_validate({"doc_type": "pentest", "report_date": "2025-11-28",
+                                              "report_date_quote": ""})
+
+
 def test_profile_field_without_quote_is_rejected():
     with pytest.raises(Exception):
         AttestationProfileOut.model_validate({"doc_type": "soc2_type2", "period_end": {"value": "2025-06-30", "quote": ""}})
@@ -126,6 +165,45 @@ async def test_extract_profile_persists_and_apply_checks_creates_reviewed_rows(f
         counts2 = attestation.apply_checks(db, a.id)
         assert counts2 == counts
         assert db.query(Weakness).filter(Weakness.assessment_id == a.id).count() == 2
+
+
+def test_apply_checks_reports_missing_profile_as_note_not_missing_attestation(fresh_db):
+    """Run 23 (veltrix): the pen test profile failed on a fast-model formatting
+    slip and the required-attestation check then reported the pen test as not
+    supplied — a false high. Now: no such weakness; one evidence note that
+    says the document was supplied but not machine-checked."""
+    from app.attestation_checks import missing_profile_note  # noqa: F401  (documented pairing)
+
+    with SessionLocal() as db:
+        a = Assessment(vendor_name="Acme", as_of_date="2026-09-02",
+                       standards_profile={"required_attestations": ["Independent penetration test report, annually"]})
+        db.add(a)
+        db.flush()
+        doc = Document(assessment_id=a.id, kind="pentest", filename="pt.pdf", mime="x", sha256="p", size_bytes=1,
+                       attestation_profile=None, attestation_profile_error="garbled output twice: ValidationError …")
+        db.add(doc)
+        db.flush()
+        db.add(Chunk(document_id=doc.id, section_path="1", ord=0, text="Penetration test report, 28 November 2025."))
+        db.commit()
+
+        counts = attestation.apply_checks(db, a.id)
+        assert counts == {"weakness": 0, "evidence_note": 1}
+        rows = db.query(Weakness).filter(Weakness.assessment_id == a.id).all()
+        assert not any("required_attestation_missing" in (r.dedupe_key or "") for r in rows)
+        (note,) = rows
+        assert note.status == "evidence_note" and note.source_document_id == doc.id
+        assert "still counts as supplied" in note.description
+        assert "garbled output twice" in note.description
+
+        # Once a profile exists the note disappears and the real checks run.
+        doc.attestation_profile = {"doc_type": "pentest",
+                                   "test_end_date": {"value": "2025-11-28", "quote": "28 November 2025"}}
+        doc.attestation_profile_error = None
+        db.commit()
+        counts = attestation.apply_checks(db, a.id)
+        assert counts["evidence_note"] == 0
+        assert not any("attestation_profile_missing" in (r.dedupe_key or "") for r in
+                       db.query(Weakness).filter(Weakness.assessment_id == a.id).all())
 
 
 @pytest.mark.asyncio
@@ -176,9 +254,15 @@ async def test_upload_job_survives_profile_failure(fresh_db, fake_client, monkey
         assert st["status"] == "done", st
         assert "attestation profile failed" in st["detail"]
         doc_id = r.json()["id"]
+        # The failure is persisted on the row, not only in the transient task detail.
+        d = client.get(f"/api/assessments/{aid}/documents").json()
+        (row,) = [x for x in d if x["id"] == doc_id]
+        assert row["attestation_profile"] is None
+        assert row["attestation_profile_error"], row
         # re-run endpoint recovers once the model answers sanely
         fake_client.push_json({"doc_type": "SOC 2 Type II",
                                "period_end": {"value": "2025-06-30", "quote": "to 30 Jun 2025"}})
         r = client.post(f"/api/documents/{doc_id}/attestation-profile")
         assert r.status_code == 200
         assert r.json()["attestation_profile"]["doc_type"] == "soc2_type2"
+        assert r.json()["attestation_profile_error"] is None

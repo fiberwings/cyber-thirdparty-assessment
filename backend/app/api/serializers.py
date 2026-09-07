@@ -28,7 +28,7 @@ from app.schemas.api import (
     TurnRead,
 )
 from app.ai.context import analysis_date, standards_profile
-from app.tasks import registry
+from app.tasks import registry, task_progress_fields
 
 
 def serialize_evidence(ev: ControlEvidence) -> CitationRead:
@@ -119,13 +119,8 @@ def _phase_entry(state: dict, key: str) -> dict:
     return state.get(key) or {}
 
 
-def _live_detail(task_id: Optional[str]) -> tuple[Optional[str], Optional[float]]:
-    if not task_id:
-        return None, None
-    handle = registry.get(task_id)
-    if handle is None:
-        return None, None
-    return (handle.detail or None), handle.progress
+def _live_handle(task_id: Optional[str]):
+    return registry.get(task_id) if task_id else None
 
 
 def _stale_info(entry: dict) -> Optional[StaleInfo]:
@@ -178,6 +173,9 @@ def compute_phase_status(a: Assessment, *, annotate: bool = True) -> dict[str, P
                     task_id=task_id,
                     detail=handle.detail or None,
                     progress=handle.progress,
+                    last_activity_at=handle.last_activity_at,
+                    idle_s=round(handle.idle_s, 1),
+                    **task_progress_fields(handle),
                 )
             if handle.status == "error":
                 return PhaseInfo(
@@ -254,13 +252,17 @@ def _evidence_phase(docs: list[Document]) -> PhaseInfo:
     failed = [d for d, s, _ in states if s == "error"]
     if running:
         live = next((d.weakness_task_id for d in running if d.weakness_task_id), None)
-        detail, progress = _live_detail(live)
+        handle = _live_handle(live)
+        detail = (handle.detail or None) if handle else None
         return PhaseInfo(
             state="running",
             task_id=live,
             detail=f"{len(done)} of {len(docs)} documents extracted"
             + (f" · {detail}" if detail else ""),
             progress=len(done) / len(docs),
+            last_activity_at=handle.last_activity_at if handle else None,
+            idle_s=round(handle.idle_s, 1) if handle and handle.live else None,
+            **(task_progress_fields(handle) if handle else {}),
         )
     if failed:
         names = [d.filename for d in failed]

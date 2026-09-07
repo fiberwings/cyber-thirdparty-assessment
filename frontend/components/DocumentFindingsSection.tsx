@@ -2,6 +2,8 @@
 
 import { DocumentRead, WeaknessRead } from "@/lib/types";
 import { SEVERITY_ORDER, SEVERITY_STYLES, severityCounts } from "@/lib/utils";
+import { useTask } from "@/lib/useTask";
+import { AiActivity } from "./AiActivity";
 import { FindingRow } from "./FindingRow";
 import clsx from "clsx";
 
@@ -18,6 +20,8 @@ export function DocumentFindingsSection({
   defaultOpen,
   onDelete,
   onRetryExtraction,
+  onRerunProfile,
+  profileRunningSince,
   searchActive,
 }: {
   doc: DocumentRead;
@@ -25,6 +29,10 @@ export function DocumentFindingsSection({
   defaultOpen: boolean;
   onDelete: (id: number) => void;
   onRetryExtraction?: (id: number) => void;
+  onRerunProfile?: (id: number) => void;
+  // Client clock (ms) when a synchronous profile re-run started for this
+  // document; null when none is in flight.
+  profileRunningSince?: number | null;
   searchActive: boolean;
 }) {
   // Header counts reflect reported rows only; the list still shows
@@ -121,6 +129,35 @@ export function DocumentFindingsSection({
           {doc.weakness_error}
         </div>
       )}
+      {doc.attestation_profile_error && !doc.attestation_profile && (
+        <div className="mx-4 mb-3 flex items-start gap-3 rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800">
+          <div className="min-w-0 flex-1">
+            <span className="font-semibold">Attestation profile not extracted</span> — the deterministic
+            freshness / scope / opinion checks did not run for this document (it still counts as supplied).
+            <div className="mt-0.5 break-words text-amber-700/90">{doc.attestation_profile_error}</div>
+          </div>
+          {profileRunningSince != null ? (
+            <AiActivity
+              variant="inline"
+              kind="attestation_profile"
+              startedAtMs={profileRunningSince}
+              className="w-56 shrink-0"
+            />
+          ) : onRerunProfile && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onRerunProfile(doc.id);
+              }}
+              className="shrink-0 font-medium text-amber-700 hover:text-amber-900"
+            >
+              re-run profile
+            </button>
+          )}
+        </div>
+      )}
       {doc.attestation_profile && <AttestationProfileCard profile={doc.attestation_profile} />}
 
       {!empty && (
@@ -137,15 +174,13 @@ export function DocumentFindingsSection({
 // Per-document weakness extraction state — the evidence step is done only
 // when every document is "done".
 function ExtractionChip({ doc }: { doc: DocumentRead }) {
+  const live = doc.extraction_state === "running" || doc.extraction_state === "pending";
+  // Attach to the document's own extraction task for stage + window counts.
+  const { task } = useTask(live ? doc.weakness_task_id : null);
   switch (doc.extraction_state) {
     case "running":
     case "pending":
-      return (
-        <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-amber-700 bg-amber-50 rounded px-1.5 py-0.5">
-          <span className="h-2 w-2 rounded-full border border-amber-500 border-t-transparent animate-spin" />
-          extracting
-        </span>
-      );
+      return <AiActivity variant="chip" kind="document_extraction" source={task} />;
     case "error":
       return (
         <span className="text-[10px] uppercase tracking-wider text-white bg-risk-high rounded px-1.5 py-0.5" title={doc.weakness_error ?? undefined}>

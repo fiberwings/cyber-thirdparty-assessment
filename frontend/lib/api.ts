@@ -1,4 +1,4 @@
-import { Assessment, ScenarioRead, DescriptionRead, DocumentRead, ChunkRead, AggregateScoreRead, ScenarioScoreRead, ReportOut, ModelProfile, WeaknessRead, MetaIssueRead, StandardsProfile, WorkflowConflictDetail } from "./types";
+import { Assessment, ScenarioRead, DescriptionRead, DocumentRead, ChunkRead, AggregateScoreRead, ScenarioScoreRead, ReportOut, ModelProfile, WeaknessRead, MetaIssueRead, StandardsProfile, WorkflowConflictDetail, TaskStatus } from "./types";
 
 // Every non-2xx response. `detail` is the parsed JSON `detail` when the body
 // was JSON (FastAPI's shape), otherwise the raw text.
@@ -105,6 +105,9 @@ export const api = {
   // Retry path for a failed / interrupted per-document extraction.
   extractWeaknesses: (docId: number) =>
     http<{ task_id: string; status: string }>(`/api/documents/${docId}/extract-weaknesses`, { method: "POST" }),
+  // (Re)extract the typed attestation profile of a SOC / ISO / pen-test document.
+  rerunAttestationProfile: (docId: number) =>
+    http<DocumentRead>(`/api/documents/${docId}/attestation-profile`, { method: "POST" }),
   documentChunks: (id: number, q?: string) =>
     http<ChunkRead[]>(`/api/documents/${id}/chunks${q ? `?q=${encodeURIComponent(q)}` : ""}`),
   getChunk: (id: number) => http<ChunkRead>(`/api/chunks/${id}`),
@@ -162,23 +165,10 @@ export const api = {
       body: JSON.stringify(overrides),
     }),
 
-  // tasks
-  taskStatus: (taskId: string) =>
-    http<{ task_id: string; status: string; progress: number; detail: string }>(
-      `/api/tasks/${taskId}`
-    ),
+  // tasks (polled through lib/useTask.ts — one query per live task)
+  taskStatus: (taskId: string, signal?: AbortSignal) =>
+    http<TaskStatus>(`/api/tasks/${taskId}`, signal ? { signal } : undefined),
+  // Cancel a running job: its model stream is closed and the step it owned
+  // becomes re-runnable; a pending waitForTask rejects with "cancelled by user".
+  cancelTask: (taskId: string) => http<TaskStatus>(`/api/tasks/${taskId}/cancel`, { method: "POST" }),
 };
-
-export async function pollTask(
-  taskId: string,
-  onProgress?: (p: { status: string; progress: number; detail: string }) => void,
-  intervalMs = 500,
-): Promise<void> {
-  for (;;) {
-    const s = await api.taskStatus(taskId);
-    onProgress?.(s);
-    if (s.status === "done") return;
-    if (s.status === "error") throw new Error(s.detail || "Task failed");
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-}

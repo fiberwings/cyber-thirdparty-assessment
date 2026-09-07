@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import type { Assessment, PhaseInfo, WorkflowKey } from "@/lib/types";
+import { AiGlyph } from "./AiActivity";
 
 // Nav items and the workflow keys each one summarises. The analysis page
 // hosts three steps (correlation → gap analysis → narratives); its badge
@@ -32,12 +33,24 @@ function badgeFor(phases: Assessment["phases"] | undefined, steps: WorkflowKey[]
   return "done";
 }
 
-function NavBadge({ badge }: { badge: Badge }) {
+// Stage (and unit count) of the first running step, for the badge tooltip.
+function runningTitle(phases: Assessment["phases"] | undefined, steps: WorkflowKey[]): string {
+  const info = steps.map((k) => phases?.[k]).find((p): p is PhaseInfo => !!p && p.state === "running");
+  if (!info?.stage) return "Running";
+  const units = info.units_total ? ` · ${info.units_done ?? 0}/${info.units_total} ${info.unit_label ?? ""}`.trimEnd() : "";
+  return `${info.stage}${units}`;
+}
+
+function NavBadge({ badge, title }: { badge: Badge; title?: string }) {
   switch (badge) {
     case "done":
       return <span className="text-[11px] font-bold text-emerald-600" title="Done">✓</span>;
     case "running":
-      return <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" title="Running" />;
+      return (
+        <span title={title ?? "Running"} className="inline-flex">
+          <AiGlyph size={13} />
+        </span>
+      );
     case "error":
       return <span className="text-[11px] font-bold text-risk-high" title="Failed">!</span>;
     case "stale":
@@ -92,7 +105,7 @@ export function LeftNav({
               )}
             >
               <span className="flex-1">{p.label}</span>
-              <NavBadge badge={badge} />
+              <NavBadge badge={badge} title={badge === "running" ? runningTitle(phases, p.steps) : undefined} />
               {isCurrent && !active && badge !== "running" && <span className="h-1.5 w-1.5 rounded-full bg-ink-900" />}
             </Link>
           );

@@ -15,6 +15,7 @@ from app.tasks import (
     mark_phase_error,
     mark_phase_started,
     registry,
+    task_status_read,
     update_failed_targets,
 )
 
@@ -54,8 +55,15 @@ async def run_gap_analysis(
             with SessionLocal() as inner:
                 assessment = inner.get(Assessment, aid)
 
+                handle.stage("Assessing controls")
+
                 def on_progress(done: int, total: int, label: str):
-                    handle.set(progress=done / max(total, 1), detail=label)
+                    # The agent decides the mode (whole-bundle codes vs
+                    # per-control targets) and reports the real total with
+                    # the first completion; the stage becomes determinate then.
+                    if handle.stats.units_total != total:
+                        handle.stage("Assessing controls", units_total=total, unit_label="controls")
+                    handle.advance(done, detail=label)
 
                 result = await gap_agent.run_full(
                     inner, assessment, on_progress=on_progress, only_failed=only_failed
@@ -101,7 +109,7 @@ async def assess_control_ai(control_id: int, db: Session = Depends(db_session)):
     db.commit()
 
     async def job(handle):
-        handle.set(progress=0.1, detail=f"Assessing {label}")
+        handle.stage(f"Assessing {label}")
         with SessionLocal() as inner:
             assessment = inner.get(Assessment, aid)
             sc = inner.get(Scenario, sid)
@@ -122,7 +130,7 @@ async def assess_control_ai(control_id: int, db: Session = Depends(db_session)):
         handle.set(progress=1.0, detail=f"Assessed {label}")
 
     handle = registry.submit(job, kind=workflow.KIND_GAP_CONTROL, assessment_id=aid)
-    return TaskStatusRead(task_id=handle.id, status=handle.status, progress=0.0, detail="")
+    return task_status_read(handle)
 
 
 @router.get("/expected-controls/{control_id}/scenario", response_model=ScenarioRead)

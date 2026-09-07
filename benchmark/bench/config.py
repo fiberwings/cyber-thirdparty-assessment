@@ -46,12 +46,14 @@ class BenchSettings(BaseSettings):
     MAIN_REPO_DIR: str = str(BENCHMARK_DIR.parent)
     MAIN_DB_PATH: str = str(BENCHMARK_DIR.parent / "data" / "tprm.sqlite")
 
-    # Stage timeouts (seconds)
-    TIMEOUT_SCENARIOS: int = 600
-    TIMEOUT_EXTRACTION: int = 1800  # windowed questionnaire extraction splits on truncation and can take long
-    TIMEOUT_CORRELATE: int = 1800  # includes the R3 confirmation calls (one per document, whole bundle)
-    TIMEOUT_GAP_ANALYSIS: int = 1800
-    TIMEOUT_NARRATIVES: int = 900
+    # Liveness-based stage waits (seconds). A stage fails only when the backend
+    # task shows no activity (last_activity_at / progress / detail unchanged)
+    # for IDLE_TIMEOUT_S, or when it exceeds the MAX_STAGE_S runaway ceiling —
+    # never because a slow model took long while producing tokens. Keep
+    # IDLE_TIMEOUT_S above the backend's TASK_IDLE_TIMEOUT_S (600) so the
+    # harness records the backend's own diagnostic rather than its own.
+    IDLE_TIMEOUT_S: float = 900.0
+    MAX_STAGE_S: float = 14400.0
     POLL_INTERVAL: float = 2.0
 
     # Judge match confidence levels that count as a true positive

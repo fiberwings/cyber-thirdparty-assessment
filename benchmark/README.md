@@ -86,11 +86,15 @@ Design rules the code enforces:
   scenarios first, then uploads documents (awaiting each auto-fired
   extraction), then runs an explicit awaited cross-correlate pass
   (idempotent — the auto-fired one exposes no task id to poll).
-- **Async completion detection.** Background stages return a `task_id`; the
-  runner polls `GET /api/tasks/{id}` until `done|error` with per-stage
-  timeouts. If the task registry lost the task (backend restart → 404), it
-  falls back once to the durable `phases` state on
-  `GET /api/assessments/{id}`.
+- **Async completion detection on liveness, not wall clock.** Background
+  stages return a `task_id`; the runner polls `GET /api/tasks/{id}` until
+  `done|error`. The idle clock restarts whenever the task shows activity
+  (`last_activity_at`, advanced by every streamed token and keepalive the app
+  receives; progress/detail as a fallback), so a slow model that keeps
+  producing is never cut off — a stage fails only after `IDLE_TIMEOUT_S`
+  without activity or past the `MAX_STAGE_S` ceiling. If the task registry
+  lost the task (backend restart → 404), it falls back once to the durable
+  `phases` state on `GET /api/assessments/{id}`.
 
 ## Setup
 
@@ -217,11 +221,8 @@ environment variables or `benchmark/.env`:
 | `CASES_DIR` | `benchmark/cases` | Case directory root |
 | `MAIN_REPO_DIR` | repo root | Where `git rev-parse` runs for provenance |
 | `MAIN_DB_PATH` | `<repo>/data/tprm.sqlite` | App DB for read-only token/cost collection; unset/missing → collection silently skipped |
-| `TIMEOUT_SCENARIOS` | 600 s | Stage timeout |
-| `TIMEOUT_EXTRACTION` | 600 s | Per-document extraction timeout |
-| `TIMEOUT_CORRELATE` | 600 s | Cross-correlation timeout |
-| `TIMEOUT_GAP_ANALYSIS` | 1800 s | Gap analysis timeout (longest stage) |
-| `TIMEOUT_NARRATIVES` | 900 s | Narratives + exec summary timeout |
+| `IDLE_TIMEOUT_S` | 900 s | A stage fails after this long without task activity (keep above the app's `TASK_IDLE_TIMEOUT_S`, 600, so the app's diagnostic is what gets recorded) |
+| `MAX_STAGE_S` | 14400 s | Runaway ceiling per stage; an active stage is otherwise never cut off |
 | `POLL_INTERVAL` | 2.0 s | Task polling interval |
 | `MATCH_CONFIDENCE_THRESHOLD` | `high,medium` | Judge confidences that count a match as a true positive |
 
@@ -469,7 +470,16 @@ from a case's key but appear in historical runs are listed as *retired*.
   like code changes — commit them with a note, and prefer adding a new case
   over silently rewriting one with recorded history.
 - Aim for 5–12 expected weaknesses, 4–6 must-cover points, 2–3 forbidden
-  claims per case.
+  claims per case. A deliberately large answer key (`veltrix`, 28 goldens from
+  a 37-finding pack) is the exception; merge pack findings that a correct
+  assessment would report as one weakness, because the judge matches
+  one-to-one.
+- Engagement requirements the evidence must be judged against (contract
+  clauses, the client's security standard) belong in `standards_profile`, not
+  only in `description`: the description reaches scenario generation only,
+  while the standards block is rendered into every evidence stage. Upload the
+  client-authored engagement/context document as `kind: other` as well so its
+  facts are in the bundle (`orbitclear`, `veltrix`).
 
 ## Tests
 
@@ -504,4 +514,4 @@ No network, no LLM cost:
 | Task 404 mid-run | Backend restarted (in-process task registry). The runner falls back to the durable `phases` state once; keep a single stable backend during a batch |
 | No tokens/cost on case results | `MAIN_DB_PATH` unset or unreadable — collection is best-effort and optional |
 | Cost shows `0.000 ⚠` | The app recorded live calls with no `usage.cost` — check the backend log for "carried no usage.cost" (a proxy `OPENROUTER_BASE_URL` that strips usage accounting is the usual cause) |
-| Stage timeouts on slow models | Raise `TIMEOUT_*` env vars; gap analysis and per-document extraction are the long poles |
+| `timed out: no activity for …` | The app task went quiet (no streamed token, keepalive or progress) — usually the app's own watchdog / `LLM_CONTENT_SILENCE_S` fired first and its error is on the task; check the backend log. Slow-but-active models never hit this |

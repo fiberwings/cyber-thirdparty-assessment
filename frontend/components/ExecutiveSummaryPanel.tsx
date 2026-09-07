@@ -1,11 +1,14 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, describeError, pollTask } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { ExecutiveSummaryRead } from "@/lib/types";
 import { relativeTime } from "@/lib/utils";
+import { useTask, waitForTask } from "@/lib/useTask";
 import { useWorkflow } from "@/lib/useWorkflow";
+import { AiActivity } from "./AiActivity";
 import clsx from "clsx";
+import { useState } from "react";
 
 const PRIORITY_STYLES: Record<string, { label: string; badge: string }> = {
   immediate: { label: "Immediate", badge: "bg-risk-high text-white" },
@@ -29,12 +32,16 @@ export function ExecutiveSummaryPanel({
   const score = step("score");
   const canGenerate = score.info?.ready === true && !anyRunning;
   const blockedReason = !canGenerate ? (anyRunning ? "A job is running — wait for it to finish." : score.blockedReason) : null;
+  const [taskId, setTaskId] = useState<string | null>(null);
+  const { task } = useTask(taskId);
   const regenerate = useMutation({
     mutationFn: async () => {
       const { task_id } = await api.runExecutiveSummary(assessmentId);
-      await pollTask(task_id, undefined, 800);
+      setTaskId(task_id);
+      await waitForTask(qc, task_id);
     },
     onSettled: () => {
+      setTaskId(null);
       qc.invalidateQueries({ queryKey: ["report", assessmentId] });
       qc.invalidateQueries({ queryKey: ["assessment", assessmentId] });
     },
@@ -56,6 +63,9 @@ export function ExecutiveSummaryPanel({
         >
           {regenerate.isPending ? "Generating…" : "Generate summary"}
         </button>
+        {regenerate.isPending && (
+          <AiActivity variant="inline" kind="executive_summary" source={task} className="mt-3" />
+        )}
         {blockedReason && !regenerate.isPending && (
           <div className="mt-1.5 text-xs text-ink-500 italic">{blockedReason}</div>
         )}
@@ -92,6 +102,9 @@ export function ExecutiveSummaryPanel({
               {regenerate.isPending ? "Regenerating…" : "Regenerate"}
             </button>
           </div>
+        )}
+        {regenerate.isPending && (
+          <AiActivity variant="inline" kind="executive_summary" source={task} className="mt-3" />
         )}
         {regenerate.isError && (
           <div className="mt-2 text-xs text-risk-high">{describeError(regenerate.error)}</div>

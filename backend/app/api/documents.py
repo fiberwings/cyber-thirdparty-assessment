@@ -118,11 +118,13 @@ def _submit_extraction(db: Session, doc: Document) -> TaskHandle:
     doc_id, assessment_id = doc.id, doc.assessment_id
 
     async def job(handle):
-        await handle.update(progress=0.05, detail="Extracting weaknesses...")
+        # The extraction shape (single call / windowed / two-phase) is decided
+        # inside the agent, which reports its own stages and unit counts via
+        # app.activity; the job only forwards the detail text.
+        handle.stage("Extracting findings", detail="Extracting weaknesses...")
 
         async def extract_progress(p: float, detail: str):
-            # Reserve [0.0, 0.85] for extraction; the rest for the profile.
-            await handle.update(progress=min(p * 0.85, 0.85), detail=detail)
+            await handle.update(detail=detail)
 
         try:
             with SessionLocal() as inner:
@@ -132,10 +134,12 @@ def _submit_extraction(db: Session, doc: Document) -> TaskHandle:
                 # the document simply has no profile (deterministic checks stay
                 # silent) and the profile can be re-extracted via the API.
                 profile_warning = ""
+                handle.stage("Attestation profile")
                 try:
                     await attestation_agent.extract_profile(inner, doc_id)
                 except Exception as e:
                     profile_warning = f" — attestation profile failed (re-run available): {str(e)[:150]}"
+                    attestation_agent.record_profile_error(inner, doc_id, str(e))
         except Exception as e:
             # Surface on the row: the evidence phase turns "error" with this
             # document listed and the UI offers a retry. Never leave a silent
@@ -246,7 +250,14 @@ async def rerun_attestation_profile(document_id: int, db: Session = Depends(db_s
         a, "correlation", reason=f"Attestation profile re-extracted: {d.filename}"
     )
     db.commit()
-    await attestation_agent.extract_profile(db, document_id)
+    try:
+        await attestation_agent.extract_profile(db, document_id)
+    except Exception as e:
+        attestation_agent.record_profile_error(db, document_id, str(e))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Attestation profile extraction failed: {str(e)[:300]}",
+        )
     db.refresh(d)
     return serialize_document(d)
 

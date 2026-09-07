@@ -9,7 +9,7 @@ from app.api.deps import db_session, get_assessment
 from app.api.serializers import serialize_description
 from app.db import SessionLocal
 from app.schemas.api import DescriptionRead, TaskStatusRead, TurnInput
-from app.tasks import registry
+from app.tasks import registry, task_status_read
 
 router = APIRouter(prefix="/api/assessments", tags=["scoping"])
 
@@ -38,15 +38,13 @@ async def scoping_turn(
             assessment = inner.get(type(a), aid)
             if assessment is None:
                 raise ValueError("Assessment was deleted.")
-            await handle.update(progress=0.1, detail="Recording answer")
-            await handle.update(progress=0.3, detail="Analyzing scope…")
+            # One reasoner call; no knowable units — the indicator stays
+            # indeterminate and shows the live stream instead of fake steps.
+            handle.stage("Analyzing scope")
             await scoping_agent.run_turn(inner, assessment, answer)
-            await handle.update(progress=0.95, detail="Saving")
 
     handle = registry.submit(job, kind=workflow.KIND_SCOPING_TURN, assessment_id=aid)
-    return TaskStatusRead(
-        task_id=handle.id, status=handle.status, progress=0.0, detail=""
-    )
+    return task_status_read(handle)
 
 
 @router.post("/{assessment_id}/scoping/force-continue", response_model=DescriptionRead)

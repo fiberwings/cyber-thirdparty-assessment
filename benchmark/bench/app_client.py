@@ -174,18 +174,31 @@ class AppClient:
         self,
         task_id: str,
         stage: str,
-        timeout_s: float,
         assessment_id: int | None = None,
+        *,
+        idle_timeout_s: float | None = None,
+        max_stage_s: float | None = None,
         poll_interval: float | None = None,
     ) -> dict[str, Any]:
-        """Poll a background task until done/error/timeout.
+        """Poll a background task until done/error, waiting on *liveness*.
+
+        The idle clock restarts whenever the task shows activity — the
+        backend's `last_activity_at` (advanced by every streamed token and
+        keepalive), or, against an older backend, a change of progress /
+        detail. A stage therefore fails only after IDLE_TIMEOUT_S without any
+        activity, or past the MAX_STAGE_S runaway ceiling; a slow model that
+        keeps producing tokens is never cut off.
 
         On a 404 (in-memory registry lost, e.g. backend restart) fall back to
         the durable per-phase state on the assessment.
         """
         interval = poll_interval or settings.POLL_INTERVAL
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
+        idle_limit = idle_timeout_s if idle_timeout_s is not None else settings.IDLE_TIMEOUT_S
+        ceiling = max_stage_s if max_stage_s is not None else settings.MAX_STAGE_S
+        t0 = time.monotonic()
+        last_change = t0
+        fingerprint: tuple | None = None
+        while True:
             r = self.http.get(f"/api/tasks/{task_id}")
             if r.status_code == 404:
                 return self._phase_fallback(stage, assessment_id)
@@ -194,9 +207,24 @@ class AppClient:
             if status["status"] == "done":
                 return status
             if status["status"] == "error":
-                raise StageError(stage, status.get("detail") or "task errored")
+                raise StageError(stage, status.get("detail") or status.get("error") or "task errored")
+            now = time.monotonic()
+            current = (status.get("last_activity_at"), status.get("progress"), status.get("detail"))
+            if current != fingerprint:
+                fingerprint = current
+                last_change = now
+            elif now - last_change > idle_limit:
+                raise StageError(
+                    stage,
+                    f"timed out: no activity for {now - last_change:.0f}s "
+                    f"(IDLE_TIMEOUT_S={idle_limit:.0f}, task {task_id}, "
+                    f"last detail {status.get('detail')!r})",
+                )
+            if now - t0 > ceiling:
+                raise StageError(
+                    stage, f"timed out after {now - t0:.0f}s (MAX_STAGE_S={ceiling:.0f}) (task {task_id})"
+                )
             time.sleep(interval)
-        raise StageError(stage, f"timed out after {timeout_s:.0f}s (task {task_id})")
 
     def _phase_fallback(self, stage: str, assessment_id: int | None) -> dict[str, Any]:
         if assessment_id is None:

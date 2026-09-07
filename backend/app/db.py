@@ -80,6 +80,14 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     # Sequential workflow enforcement: durable per-document extraction state
     ("document", "weakness_task_id", "VARCHAR(36)"),
     ("document", "weakness_error", "TEXT"),
+    # Attestation profile failure surfaced on the row (not a silent NULL profile)
+    ("document", "attestation_profile_error", "TEXT"),
+    # Liveness / streaming router: per-call telemetry and failure forensics
+    ("model_call", "first_token_ms", "INTEGER"),
+    ("model_call", "output_head", "TEXT"),
+    ("task", "last_activity_at", "DATETIME"),
+    # Structured task progress for the AI activity indicator
+    ("task", "stats", "JSON NOT NULL DEFAULT '{}'"),
 ]
 
 _POST_MIGRATION_INDEXES: list[str] = [

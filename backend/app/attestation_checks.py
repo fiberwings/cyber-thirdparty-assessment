@@ -12,6 +12,8 @@ value) are conservative industry expectations, kept visible here:
 
 from __future__ import annotations
 
+from typing import Iterable
+
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -177,30 +179,58 @@ def check_profile(
 def check_required_attestations(
     profiles: dict[str, AttestationProfileOut],  # doc_label -> profile
     standards: StandardsProfile,
+    supplied_kinds: Iterable[str] = (),  # upload kinds of assurance docs: soc|iso|pentest
 ) -> list[CheckFinding]:
     """Assessment-level: each required attestation must be evidenced by some
     supplied assurance document (matched on the requirement wording vs doc
     type, deliberately coarse — 'SOC 2' matches any soc2_*, 'ISO' any iso*,
-    'pen' any pentest)."""
+    'pen' any pentest).
+
+    "Supplied" means uploaded: a document whose typed profile could not be
+    extracted still counts (its upload kind is the evidence), otherwise a
+    fast-model formatting slip would turn into a false "not supplied"
+    weakness. The missing profile is reported separately as an evidence
+    note (see `missing_profile_note`)."""
     out: list[CheckFinding] = []
     have = {p.doc_type for p in profiles.values()}
+    kinds = {k for k in supplied_kinds if k}
     for req in standards.required_attestations:
         r = req.lower()
         ok = (
-            ("soc" in r and any(t.startswith("soc") for t in have))
-            or ("iso" in r and any(t.startswith("iso") for t in have))
-            or (("pen" in r or "tlpt" in r) and "pentest" in have)
+            ("soc" in r and (any(t.startswith("soc") for t in have) or "soc" in kinds))
+            or ("iso" in r and (any(t.startswith("iso") for t in have) or "iso" in kinds))
+            or (("pen" in r or "tlpt" in r) and ("pentest" in have or "pentest" in kinds))
         )
         if not ok:
+            supplied = sorted(have | {f"{k} (upload kind)" for k in kinds})
             out.append(CheckFinding(
                 code=f"required_attestation_missing:{r[:40]}",
                 kind="weakness",
                 severity="high",
                 description=(
                     f"The assessor requires \"{req}\" but no supplied assurance document "
-                    f"evidences it (supplied: {', '.join(sorted(have)) or 'none'})."
+                    f"evidences it (supplied: {', '.join(supplied) or 'none'})."
                 ),
                 quotes=[],
                 suggested_control_codes=["AUDIT.SOC2"],
             ))
     return out
+
+
+def missing_profile_note(doc_label: str, kind: str, error: str | None = None) -> CheckFinding:
+    """Evidence note for an uploaded assurance document whose typed profile
+    could not be extracted: the deterministic checks (freshness, scope,
+    opinion, retest) did not run for it, and the reader must know that the
+    document was supplied but not machine-checked."""
+    why = f" Extraction error: {error.strip()[:200]}" if error and error.strip() else ""
+    return CheckFinding(
+        code="attestation_profile_missing",
+        kind="evidence_note",
+        severity="low",
+        description=(
+            f"{doc_label}: uploaded as a {kind} document, but its attestation profile could not be "
+            f"extracted, so the deterministic freshness / scope / opinion checks did not run for it. "
+            f"Re-run the profile from the evidence page (the document still counts as supplied).{why}"
+        ),
+        quotes=[],
+    )

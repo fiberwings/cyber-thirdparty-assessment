@@ -1,13 +1,15 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, describeError, pollTask } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { use, useEffect, useState } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
+import { AiActivity, AiGlyph } from "@/components/AiActivity";
 import { ScenarioCard } from "@/components/ScenarioCard";
 import { ScenarioDrawer } from "@/components/ScenarioDrawer";
-import { compareScenariosByRisk, relativeTime } from "@/lib/utils";
+import { compareScenariosByRisk } from "@/lib/utils";
 import { staleLine, useWorkflow, type StepView } from "@/lib/useWorkflow";
+import { waitForTask } from "@/lib/useTask";
 import type { PhaseInfo, WorkflowKey } from "@/lib/types";
 import { useRouter } from "next/navigation";
 
@@ -46,7 +48,7 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
     mutationFn: async () => {
       const { task_id } = await api.synthesizeWeaknesses(aid);
       qc.invalidateQueries({ queryKey: ["assessment", aid] });
-      await pollTask(task_id, undefined, 800);
+      await waitForTask(qc, task_id);
     },
     onSettled: invalidate,
   });
@@ -55,9 +57,16 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
     mutationFn: async (onlyFailed: boolean = false) => {
       const { task_id } = await api.runGapAnalysis(aid, onlyFailed);
       qc.invalidateQueries({ queryKey: ["assessment", aid] });
-      await pollTask(task_id, undefined, 800);
+      await waitForTask(qc, task_id);
       await api.recalculate(aid);
     },
+    onSettled: invalidate,
+  });
+
+  // Cancel whichever job a step is running; the step flips to error
+  // ("cancelled by user") and can be re-run — no 409 lingers behind it.
+  const cancel = useMutation({
+    mutationFn: (taskId: string) => api.cancelTask(taskId),
     onSettled: invalidate,
   });
 
@@ -66,7 +75,7 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
       await api.recalculate(aid);
       const { task_id } = await api.runNarratives(aid);
       qc.invalidateQueries({ queryKey: ["assessment", aid] });
-      await pollTask(task_id, undefined, 800);
+      await waitForTask(qc, task_id);
     },
     onSuccess: () => {
       router.push(`/assessments/${aid}/score`);
@@ -84,7 +93,7 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
     if (tasksToWatch.length === 0) return;
     let cancelled = false;
     Promise.all(
-      tasksToWatch.map((tid) => pollTask(tid, undefined, 1200).catch(() => undefined)),
+      tasksToWatch.map((tid) => waitForTask(qc, tid).catch(() => undefined)),
     ).then(() => {
       if (!cancelled) invalidate();
     });
@@ -118,18 +127,24 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
         <Step
           title="1. Cross-correlate weaknesses"
           desc="Maps extracted findings onto scenario controls and spawns emergent scenarios for risks the original scoping missed."
+          kind="cross_correlation"
           view={synth}
           submitting={synthesize.isPending}
           onRun={() => synthesize.mutate()}
+          onCancel={(tid) => cancel.mutate(tid)}
+          cancelling={cancel.isPending}
           error={synthesize.isError ? describeError(synthesize.error) : undefined}
         />
         <div className="border-t border-ink-100" />
         <Step
           title="2. Run gap analysis"
           desc="Reasoner walks every scenario × expected control (including emergent scenarios from step 1) and pulls evidence from your uploaded documents."
+          kind="gap_analysis"
           view={gap}
           submitting={runGap.isPending}
           onRun={() => runGap.mutate(false)}
+          onCancel={(tid) => cancel.mutate(tid)}
+          cancelling={cancel.isPending}
           warning={gapInfo?.warning || undefined}
           failedTargets={resumeAllowed ? gapInfo?.failed_targets : undefined}
           onRunFailed={() => runGap.mutate(true)}
@@ -139,9 +154,12 @@ export default function AnalysisPage({ params }: { params: Promise<{ id: string 
         <Step
           title="3. Generate narratives & summary, then continue"
           desc="Recalculates residual risk, writes the score-explanation prose per scenario and the executive summary."
+          kind="narratives"
           view={narr}
           submitting={writeNarratives.isPending}
           onRun={() => writeNarratives.mutate()}
+          onCancel={(tid) => cancel.mutate(tid)}
+          cancelling={cancel.isPending}
           // A partial gap analysis (some controls failed) still satisfies this
           // step; repeat the warning so the assessor knows what the narratives
           // will be missing.
@@ -179,9 +197,7 @@ function StatusIcon({ state }: { state: PhaseInfo["state"] | undefined }) {
         </span>
       );
     case "running":
-      return (
-        <span className="flex h-5 w-5 items-center justify-center rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
-      );
+      return <AiGlyph size={20} />;
     case "error":
       return (
         <span className="flex h-5 w-5 items-center justify-center rounded-full bg-risk-high text-white text-[11px] font-bold">
@@ -194,14 +210,9 @@ function StatusIcon({ state }: { state: PhaseInfo["state"] | undefined }) {
   }
 }
 
+// The non-running states; a running step renders <AiActivity> instead.
 function statusLine(info: PhaseInfo | undefined): { text: string; cls: string } {
   if (!info || info.state === "pending") return { text: "Not run yet", cls: "text-ink-500" };
-  if (info.state === "running") {
-    const pct = info.progress != null ? `${Math.round(info.progress * 100)}%` : "running";
-    const det = info.detail ? ` · ${info.detail}` : "";
-    const since = info.started_at ? ` · started ${relativeTime(info.started_at)}` : "";
-    return { text: `${pct}${det}${since}`, cls: "text-amber-700" };
-  }
   if (info.state === "error") {
     return { text: info.error || "Failed — try again", cls: "text-risk-high" };
   }
@@ -221,10 +232,12 @@ function buttonLabel(info: PhaseInfo | undefined, submitting: boolean, stale: bo
 }
 
 function Step({
-  title, desc, view, submitting, onRun, warning, failedTargets, onRunFailed, error,
+  title, desc, kind, view, submitting, onRun, warning, failedTargets, onRunFailed, error, onCancel, cancelling,
 }: {
   title: string;
   desc: string;
+  // Task kind (backend app.workflow.KIND_*) — picks the indicator's verbs.
+  kind: string;
   view: StepView;
   submitting: boolean;
   onRun: () => void;
@@ -232,6 +245,8 @@ function Step({
   failedTargets?: string[];
   onRunFailed?: () => void;
   error?: string;
+  onCancel?: (taskId: string) => void;
+  cancelling?: boolean;
 }) {
   const info = view.info;
   const status = statusLine(info);
@@ -257,7 +272,18 @@ function Step({
           )}
         </div>
         <div className="text-xs text-ink-600 mt-0.5">{desc}</div>
-        <div className={`text-xs mt-1 ${status.cls}`}>{status.text}</div>
+        {isRunning ? (
+          <AiActivity
+            className="mt-2"
+            variant="inline"
+            kind={kind}
+            source={info?.state === "running" ? info : undefined}
+            onCancel={info?.state === "running" && info.task_id && onCancel ? () => onCancel(info.task_id as string) : undefined}
+            cancelling={cancelling}
+          />
+        ) : (
+          <div className={`text-xs mt-1 ${status.cls}`}>{status.text}</div>
+        )}
         {stale && info?.state === "done" && (
           <div className="text-xs mt-0.5 text-amber-800">{stale}</div>
         )}

@@ -45,7 +45,37 @@ export interface WorkflowConflictDetail {
   message: string;
 }
 
-export interface PhaseInfo {
+// Structured, observed progress of a running job (backend TaskProgressFields).
+// `units_total === 0` means the current stage has no knowable unit count:
+// the UI shows an indeterminate state and never invents a percentage.
+export interface TaskProgressFields {
+  stage?: string;
+  stage_index?: number;
+  stages?: string[];
+  units_done?: number;
+  units_total?: number;
+  unit_label?: string;
+  // Router purpose of the most recent LLM call (e.g. "weakness_confirmation").
+  purpose?: string;
+  calls_active?: number;
+  calls_done?: number;
+  // Cumulative streamed output tokens (estimated while a stream is open,
+  // exact once the provider's usage chunk arrives).
+  tokens_out?: number;
+  tokens_reasoning?: number;
+  first_token_ms?: number | null;
+  // Server-side wall clock since the task started; the client ticks from it.
+  elapsed_s?: number | null;
+}
+
+// What the AI activity indicator reads. A task poll payload, a running
+// phase, or a client-only stub for synchronous calls all satisfy it.
+export type ActivitySource = TaskProgressFields & {
+  detail?: string | null;
+  idle_s?: number | null;
+};
+
+export interface PhaseInfo extends TaskProgressFields {
   state: PhaseState;
   started_at: string | null;
   completed_at: string | null;
@@ -53,6 +83,11 @@ export interface PhaseInfo {
   error: string | null;
   detail: string | null;
   progress: number | null;
+  // Liveness while running: last activity stamp (streamed token, keepalive
+  // or progress step) and seconds since. Waits are based on these, not on
+  // how long a step "should" take.
+  last_activity_at?: string | null;
+  idle_s?: number | null;
   // done-with-partial-failures (gap analysis): resumable per control
   warning?: string | null;
   failed_targets?: string[];
@@ -61,6 +96,19 @@ export interface PhaseInfo {
   // Workflow: whether the step may be (re)started now, and why not.
   ready?: boolean;
   blocked_by?: BlockReason[];
+}
+
+// GET /api/tasks/{id} (also returned when a job is submitted / re-attached).
+export interface TaskStatus extends TaskProgressFields {
+  task_id: string;
+  status: string; // pending|running|done|error
+  progress: number;
+  detail: string;
+  kind?: string;
+  error?: string;
+  started_at?: string | null;
+  last_activity_at?: string | null;
+  idle_s?: number | null;
 }
 
 export interface VulnSla {
@@ -144,6 +192,8 @@ export interface DocumentRead {
   // Typed attestation profile (SOC / ISO / pen-test docs); every field
   // carries the quote it came from. Shape mirrors backend AttestationProfileOut.
   attestation_profile?: Record<string, any> | null;
+  // Why the last profile extraction failed (null once one succeeds).
+  attestation_profile_error?: string | null;
 }
 
 export interface ChunkRead {

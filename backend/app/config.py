@@ -82,12 +82,34 @@ class Settings(BaseSettings):
     # and how many doublings the ladder may take before failing loudly.
     llm_truncation_cap: int = Field(default=32768, alias="LLM_TRUNCATION_CAP")
     llm_truncation_retries: int = Field(default=2, alias="LLM_TRUNCATION_RETRIES")
-    # Per-attempt HTTP timeout scales with the requested output budget:
-    # base + tokens / assumed_tps, clamped to timeout_max. The client is
-    # non-streaming, so the read timeout must cover the whole generation.
-    llm_timeout_base_s: float = Field(default=60.0, alias="LLM_TIMEOUT_BASE_S")
-    llm_assumed_output_tps: float = Field(default=40.0, alias="LLM_ASSUMED_OUTPUT_TPS")
-    llm_timeout_max_s: float = Field(default=600.0, alias="LLM_TIMEOUT_MAX_S")
+    # Liveness-based limits (the client streams completions, so it observes
+    # progress instead of guessing a duration — any model speed works):
+    #   connect  — TCP/TLS connect + pool acquisition
+    #   idle     — tier (i): no bytes at all on the socket (OpenRouter keepalive
+    #              comments count as bytes) → dead connection
+    #   silence  — tier (ii): no output or reasoning token for this long even
+    #              though the connection is alive. Models that reason *hidden*
+    #              (no reasoning deltas on the wire) look identical to a stuck
+    #              generation here — glm-5.3-flash thought for > 15 min before
+    #              its first visible token on a 32k budget — so the default
+    #              equals the ceiling (tier off); tighten it only for models
+    #              that stream their reasoning or do not reason.
+    #   call max — hard per-attempt ceiling, a runaway guard sized in hours
+    # Lowering silence / call max below the shipped defaults re-introduces
+    # speed-based failures on slow reasoners — an accuracy trade-off (CLAUDE.md).
+    llm_connect_timeout_s: float = Field(default=30.0, alias="LLM_CONNECT_TIMEOUT_S")
+    llm_stream_idle_s: float = Field(default=180.0, alias="LLM_STREAM_IDLE_S")
+    llm_content_silence_s: float = Field(default=3600.0, alias="LLM_CONTENT_SILENCE_S")
+    llm_call_max_s: float = Field(default=3600.0, alias="LLM_CALL_MAX_S")
+    # Background-task watchdog: a task with no activity ping (streamed token,
+    # keepalive, progress update) for idle_timeout, or older than max_runtime,
+    # is cancelled with a diagnostic error instead of blocking the assessment
+    # forever. idle_timeout must exceed llm_stream_idle_s so the router reports
+    # a dead socket before the watchdog fires.
+    task_idle_timeout_s: float = Field(default=600.0, alias="TASK_IDLE_TIMEOUT_S")
+    task_max_runtime_s: float = Field(default=14400.0, alias="TASK_MAX_RUNTIME_S")
+    task_watchdog_interval_s: float = Field(default=15.0, alias="TASK_WATCHDOG_INTERVAL_S")
+    task_activity_persist_s: float = Field(default=10.0, alias="TASK_ACTIVITY_PERSIST_S")
     # Minimum model output cap a reasoner-profile model must support — the
     # truncation ladder can request up to llm_truncation_cap tokens.
     llm_min_model_output_cap: int = Field(default=32768, alias="LLM_MIN_MODEL_OUTPUT_CAP")
@@ -108,6 +130,23 @@ class Settings(BaseSettings):
             )
         if self.llm_truncation_retries < 0:
             raise ValueError("LLM_TRUNCATION_RETRIES must be >= 0")
+        if not (
+            0
+            < self.llm_connect_timeout_s
+            <= self.llm_stream_idle_s
+            <= self.llm_content_silence_s
+            <= self.llm_call_max_s
+        ):
+            raise ValueError(
+                "Liveness policy must satisfy 0 < LLM_CONNECT_TIMEOUT_S <= LLM_STREAM_IDLE_S "
+                "<= LLM_CONTENT_SILENCE_S <= LLM_CALL_MAX_S"
+            )
+        if self.task_idle_timeout_s < self.llm_stream_idle_s:
+            raise ValueError("TASK_IDLE_TIMEOUT_S must be >= LLM_STREAM_IDLE_S")
+        if self.task_max_runtime_s < self.llm_call_max_s:
+            raise ValueError("TASK_MAX_RUNTIME_S must be >= LLM_CALL_MAX_S")
+        if self.task_watchdog_interval_s <= 0 or self.task_activity_persist_s < 0:
+            raise ValueError("TASK_WATCHDOG_INTERVAL_S must be > 0 and TASK_ACTIVITY_PERSIST_S >= 0")
         return self
 
     # Deployment environment: "dev" | "production". Some dev-only switches

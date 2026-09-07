@@ -142,6 +142,10 @@ class Document(Base):
     # Shape: schemas.attestation.AttestationProfileOut dump — every field
     # carries the verbatim quote it came from.
     attestation_profile: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Why the last profile extraction failed (None once one succeeds); the
+    # evidence page shows it with the re-run action and the attestation
+    # checks emit an evidence note instead of a false "not supplied".
+    attestation_profile_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     assessment: Mapped[Assessment] = relationship(back_populates="documents")
@@ -370,6 +374,12 @@ class ModelCall(Base):
     error: Mapped[str] = mapped_column(Text, default="")
     # True when the response came from the dev-only LLM cache (no tokens spent).
     cached: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Streaming telemetry: ms to the first output token (None for cache hits /
+    # failures before output). Observed throughput = output_tokens / latency.
+    first_token_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Forensics for failed calls only: the first 8k chars the model produced
+    # (partial stream, truncated, garbled or schema-invalid output). NULL on ok.
+    output_head: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -403,3 +413,9 @@ class TaskRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=_now
     )
+    # Liveness: last progress update or streamed token/keepalive on behalf of
+    # this task (throttled write-through; see TaskHandle.touch).
+    last_activity_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Structured progress snapshot (app.tasks.TaskStats): stage, units, calls,
+    # streamed tokens. Same throttled write-through as last_activity_at.
+    stats: Mapped[dict] = mapped_column(JSON, default=dict)

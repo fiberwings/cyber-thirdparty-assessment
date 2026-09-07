@@ -71,6 +71,9 @@ export default function EvidencePage({ params }: { params: Promise<{ id: string 
 
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [docError, setDocError] = useState<string | null>(null);
+  // Client clock when the synchronous profile re-run started (no task id to
+  // poll, so the indicator times itself).
+  const [profileStartedAt, setProfileStartedAt] = useState<number | null>(null);
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["documents", aid] });
@@ -93,6 +96,21 @@ export default function EvidencePage({ params }: { params: Promise<{ id: string 
     mutationFn: (id: number) => api.extractWeaknesses(id),
     onMutate: () => setDocError(null),
     onSettled: refresh,
+    onError: (e) => setDocError(describeError(e)),
+  });
+
+  // Re-extract a failed attestation profile (synchronous fast-model call);
+  // the backend stamps correlation stale so the checks re-run.
+  const rerunProfile = useMutation({
+    mutationFn: (id: number) => api.rerunAttestationProfile(id),
+    onMutate: () => {
+      setDocError(null);
+      setProfileStartedAt(Date.now());
+    },
+    onSettled: () => {
+      setProfileStartedAt(null);
+      refresh();
+    },
     onError: (e) => setDocError(describeError(e)),
   });
 
@@ -280,6 +298,8 @@ export default function EvidencePage({ params }: { params: Promise<{ id: string 
                   searchActive={filterActive}
                   onDelete={(id) => del.mutate(id)}
                   onRetryExtraction={(id) => retry.mutate(id)}
+                  onRerunProfile={(id) => rerunProfile.mutate(id)}
+                  profileRunningSince={rerunProfile.isPending && rerunProfile.variables === g.doc.id ? profileStartedAt : null}
                 />
               ))}
             </div>

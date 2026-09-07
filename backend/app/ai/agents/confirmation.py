@@ -19,6 +19,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from app import activity
 from app.ai.agents.gap_analysis import format_bundle, load_bundle
 from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
@@ -103,6 +104,7 @@ async def confirm_candidates(
         return list(out.decisions)
 
     n_docs = len(by_doc)
+    activity.stage("Confirming candidates", units_total=n_docs, unit_label="documents")
     for i, (doc_id, rows) in enumerate(by_doc.items()):
         doc_name = rows[0].document.filename if rows[0].document is not None else f"document {doc_id}"
         keep_reason = "not decided by the confirmation model (omitted from its answer); kept for human review"
@@ -146,6 +148,7 @@ async def confirm_candidates(
             }
             counts["unreviewed_kept"] += 1
         db.commit()
+        activity.advance(i + 1)
         if on_progress:
             await on_progress((i + 1) / n_docs, f"Reviewed {doc_name}: {len(rows)} candidates")
     return counts
@@ -274,6 +277,7 @@ async def review(
     )
     db.expire_all()
     a = db.get(Assessment, assessment_id)
+    activity.stage("Merging duplicates")
     counts["merged"] = await merge_confirmed(db, a, client=client)
     db.expire_all()
     return counts

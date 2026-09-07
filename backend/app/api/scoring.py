@@ -176,11 +176,12 @@ async def run_narratives(assessment_id: int, db: Session = Depends(db_session)):
             with SessionLocal() as inner:
                 assessment = inner.get(Assessment, aid)
                 scenarios = list(assessment.scenarios)
-                total = max(1, len(scenarios))
+                handle.plan(["Scenario narratives", "Executive summary"])
+                handle.stage("Scenario narratives", units_total=len(scenarios), unit_label="scenarios")
                 for i, s in enumerate(scenarios, start=1):
                     await narr_agent.write_for_scenario(inner, assessment, s)
-                    await handle.update(progress=0.9 * i / total, detail=s.code)
-                await handle.update(progress=0.9, detail="Writing executive summary")
+                    handle.advance(i, detail=s.code)
+                handle.stage("Executive summary", detail="Writing executive summary")
                 await summary_agent.write(inner, aid)
                 inner.commit()
             mark_phase_done(aid, "narratives")
@@ -206,9 +207,9 @@ async def run_executive_summary(assessment_id: int, db: Session = Depends(db_ses
     async def job(handle):
         from app.ai.agents import executive_summary as summary_agent
         with SessionLocal() as inner:
-            await handle.update(progress=0.1, detail="Writing executive summary")
+            handle.stage("Executive summary", detail="Writing executive summary")
             await summary_agent.write(inner, aid)
         await handle.update(progress=1.0, detail="Executive summary updated")
 
     handle = registry.submit(job, kind=workflow.KIND_EXEC_SUMMARY, assessment_id=aid)
-    return TaskStatusRead(task_id=handle.id, status=handle.status, progress=0.0, detail="")
+    return task_status_read(handle)

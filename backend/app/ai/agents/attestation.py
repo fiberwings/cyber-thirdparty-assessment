@@ -18,7 +18,12 @@ from sqlalchemy.orm import Session
 from app.ai.context import analysis_date, standards_profile
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, call_structured
-from app.attestation_checks import CheckFinding, check_profile, check_required_attestations
+from app.attestation_checks import (
+    CheckFinding,
+    check_profile,
+    check_required_attestations,
+    missing_profile_note,
+)
 from app.config import settings
 from app.models import Assessment, Chunk, Document, Weakness
 from app.schemas.attestation import AttestationProfileOut
@@ -58,8 +63,19 @@ async def extract_profile(
         client=client,
     )
     doc.attestation_profile = out.model_dump(exclude_none=True)
+    doc.attestation_profile_error = None
     db.commit()
     return out
+
+
+def record_profile_error(db: Session, document_id: int, error: str) -> None:
+    """Persist why the profile could not be extracted (shown on the evidence
+    page next to the re-run action; quoted in the evidence note)."""
+    doc = db.get(Document, document_id)
+    if doc is None:
+        return
+    doc.attestation_profile_error = error[:500]
+    db.commit()
 
 
 def _dedupe_key(assessment_id: int, doc_id: int | None, code: str) -> str:
@@ -112,14 +128,23 @@ def apply_checks(db: Session, assessment_id: int) -> dict[str, int]:
 
     profiles: dict[str, AttestationProfileOut] = {}
     findings: list[tuple[Document | None, CheckFinding]] = []
+    supplied_kinds: set[str] = set()
     for doc in a.documents:
+        if doc.kind in ATTESTATION_KINDS:
+            supplied_kinds.add(doc.kind)
         if not doc.attestation_profile:
+            if doc.kind in ATTESTATION_KINDS and doc.chunks:
+                # Supplied but not machine-checkable: say so instead of
+                # letting the required-attestation check call it missing.
+                findings.append((doc, missing_profile_note(
+                    doc.filename, doc.kind, doc.attestation_profile_error
+                )))
             continue
         profile = AttestationProfileOut.model_validate(doc.attestation_profile)
         profiles[doc.filename] = profile
         for f in check_profile(profile, as_of, standards, doc_label=doc.filename):
             findings.append((doc, f))
-    for f in check_required_attestations(profiles, standards):
+    for f in check_required_attestations(profiles, standards, supplied_kinds):
         findings.append((None, f))
 
     counts = {"weakness": 0, "evidence_note": 0}

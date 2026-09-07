@@ -120,7 +120,7 @@ def run_pipeline(
         # Scenarios FIRST — correlation maps weaknesses onto their controls.
         with timed("scenarios"):
             task_id = client.generate_scenarios(assessment_id)
-            client.wait_task(task_id, "scenarios", settings.TIMEOUT_SCENARIOS, assessment_id)
+            client.wait_task(task_id, "scenarios", assessment_id)
 
         # Documents sequentially; await each auto-fired extraction so the
         # auto cross-correlation never races the next upload.
@@ -129,17 +129,17 @@ def run_pipeline(
                 res = client.upload_document(assessment_id, case.doc_path(doc), doc.kind)
                 wtid = res.get("weakness_task_id")
                 if wtid:
-                    client.wait_task(wtid, "extraction", settings.TIMEOUT_EXTRACTION, assessment_id)
+                    client.wait_task(wtid, "extraction", assessment_id)
 
         # Explicit awaited cross-correlation (idempotent; the auto-fired pass
         # exposes no task_id to the client, so this guarantees completion).
         with timed("cross_correlate"):
             task_id = client.cross_correlate(assessment_id)
-            client.wait_task(task_id, "cross_correlate", settings.TIMEOUT_CORRELATE, assessment_id)
+            client.wait_task(task_id, "cross_correlate", assessment_id)
 
         with timed("gap_analysis"):
             task_id = client.run_gap_analysis(assessment_id)
-            client.wait_task(task_id, "gap_analysis", settings.TIMEOUT_GAP_ANALYSIS, assessment_id)
+            client.wait_task(task_id, "gap_analysis", assessment_id)
 
         with timed("recalculate"):
             client.recalculate(assessment_id)
@@ -147,7 +147,7 @@ def run_pipeline(
         if not skip_narratives:
             with timed("narratives"):
                 task_id = client.run_narratives(assessment_id)
-                client.wait_task(task_id, "narratives", settings.TIMEOUT_NARRATIVES, assessment_id)
+                client.wait_task(task_id, "narratives", assessment_id)
 
         with timed("report"):
             report = client.get_report(assessment_id)

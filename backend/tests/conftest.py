@@ -65,15 +65,16 @@ class FakeOpenRouterClient:
         response_format: dict | None = None,
         temperature: float = 0.2,
         max_tokens: int | None = None,
-        timeout: float | None = None,
     ) -> dict:
+        from app import activity
+
+        activity.touch()  # the real client pings the ambient task per SSE line
         self.calls.append(
             {
                 "model": model,
                 "messages": messages,
                 "response_format": response_format,
                 "max_tokens": max_tokens,
-                "timeout": timeout,
             }
         )
         if not self.queue:

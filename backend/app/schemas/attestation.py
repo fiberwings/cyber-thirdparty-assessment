@@ -63,11 +63,47 @@ DocTypeLit = Literal[
 ]
 
 
+_QUOTED_FIELDS = frozenset({
+    "period_start", "period_end", "report_date", "first_examination", "opinion",
+    "cuec_count", "auditor", "bridge_letter", "cert_issue_date", "cert_expiry_date",
+    "certifying_body", "test_start_date", "test_end_date", "tester", "accreditation",
+    "scope",
+})
+_BOOL_FIELDS = frozenset({"first_examination", "bridge_letter"})
+
+
 class AttestationProfileOut(BaseModel):
     """Every field optional: absent = the document does not state it."""
 
     doc_type: DocTypeLit = "other"
     doc_type_quote: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def fold_sibling_quotes(cls, data):
+        """Accept `"report_date": "2025-11-28", "report_date_quote": "..."`
+        as `"report_date": {"value": ..., "quote": ...}`.
+
+        The schema's own `doc_type` / `doc_type_quote` pair teaches models
+        that convention and fast models generalise it to every field. The
+        two encodings carry the same information, so folding loses nothing;
+        the quote requirement is unchanged — a scalar with no sibling quote
+        is left as-is and still fails validation (no quote → not a value)."""
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        for name in _QUOTED_FIELDS:
+            v = out.get(name)
+            if v is None or isinstance(v, dict):
+                continue
+            q = out.get(f"{name}_quote")
+            if isinstance(q, str) and q.strip():
+                out[name] = {"value": v, "quote": q}
+            elif isinstance(v, bool) and name in _BOOL_FIELDS:
+                # A bare False is a legitimate unquoted absence (QuotedBool);
+                # a bare True still fails there for want of a quote.
+                out[name] = {"value": v, "quote": ""}
+        return out
 
     @field_validator("doc_type", mode="before")
     @classmethod

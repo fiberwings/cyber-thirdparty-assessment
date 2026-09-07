@@ -1,0 +1,490 @@
+# Veltrix Onboard — synthetic evidence pack authored against an assessment date
+# of 2 September 2026 (source: testdata/veltrix, git-ignored; answer key
+# 08_Validation_Summary.xlsx, NOT uploaded). Pack ids (F01..F37, D01..D05) are
+# quoted in comments so results can be mapped back to the pack's scorecard.
+#
+# Engagement requirements (MSA clauses + Bank TPISS v4.1) are carried in
+# standards_profile because that block reaches every evidence stage
+# (extraction, correlation, gap analysis, confirmation, exec summary); the
+# description only reaches scenario generation. Document 00 is also uploaded
+# as `other` so the engagement facts are in the evidence bundle.
+#
+# Goldens: the pack's 37 findings are represented as 28 goldens — pairs that a
+# correct assessment would report as ONE finding (raw exception + the
+# contradicting questionnaire claim) are merged, because the judge matches
+# one-to-one. Severities follow the pack's key. Decoys D01–D05 cannot be
+# expressed as goldens; D05 is a forbidden exec-summary claim.
+id: veltrix
+vendor_name: "Veltrix Onboard Pte. Ltd."
+description: |
+  Requesting organisation: Northgate Bank (Asia) Limited (the "Bank"), Third Party
+  Risk Management on behalf of Corporate & Investment Banking — Client Lifecycle
+  Management, Financial Crime Compliance and Coverage. Annual reassessment;
+  assessment date 2 September 2026. Business owner: Head of Client Lifecycle
+  Management, CIB APAC.
+
+  Supplier: Veltrix Onboard Pte. Ltd. (UEN 201712345K), 71 Robinson Road,
+  Singapore. Founded 2017; privately held, Series C (2023); FY2025 revenue
+  USD 28.4m, profitable since FY2024. Headcount 210 (Singapore 84, Pune 96,
+  remote 30). Wholly owned engineering subsidiary Veltrix Technologies India
+  Pvt. Ltd. (Pune). ~40 financial-institution customers in APAC and Europe; the
+  Bank is the largest customer (~11% of ARR). Vendor-claimed certifications:
+  ISO/IEC 27001:2022, SOC 2 Type II (Security, Availability, Confidentiality).
+
+  ### Service in scope: "Veltrix Onboard"
+  Multi-tenant SaaS for onboarding corporate clients. Modules used by the Bank:
+  - Client Data Capture — corporate entity data, ownership structures,
+    beneficial-owner details including passport / national ID images
+  - Document Vault — KYC/CDD documents (constitutional documents, proof of
+    address, source-of-wealth documentation, board resolutions)
+  - Screening — sanctions, PEP and adverse-media screening against third-party
+    watch-list data, alert disposition and audit trail
+  - Case Management — workflow for relationship managers, KYC analysts and
+    compliance approvers, periodic-review scheduling
+  - Veltrix IQ — intelligent-document-processing and adverse-media summarisation
+    feature released Q1 2026 and enabled by default for all tenants; per the
+    vendor's release notes it extracts fields from uploaded identity documents
+    and summarises adverse-media hits using a third-party large language model
+    API hosted in the United States (vendor states customer data is not used to
+    train the model).
+
+  ### Engagement scope
+  Countries: Hong Kong SAR, Singapore, Japan, Australia, India. ~450 named Bank
+  users incl. 12 Bank administrators; ~60 relationship managers use the mobile
+  app (iOS/Android) for document capture. Go-live April 2025 (HK, SG); JP, AU,
+  IN January 2026. Master Services Agreement 14 February 2025, 3-year term,
+  USD 1.4m p.a. Classified as a material outsourcing arrangement (HKMA SPM SA-2;
+  MAS Outsourcing Guidelines for the Singapore branch), notified to both
+  regulators.
+
+  ### Data processed
+  - Corporate client identifiers (legal name, registration number, address,
+    ownership structure) — Confidential — ~120,000 client entities
+  - Personal data of related parties (directors, signatories, beneficial
+    owners: full name, DOB, nationality, passport / national ID number,
+    residential address) — Highly Confidential — ~380,000 individuals, ~4% EU
+    residents
+  - Identity and KYC documents (passport / ID images, proof of address,
+    source-of-wealth statements, bank statements) — Highly Confidential —
+    ~2.1 million documents
+  - Screening results (sanctions / PEP / adverse-media hits and analyst
+    dispositions) — Highly Confidential — ~1.6 million alerts cumulative
+  - Relationship-manager case notes — Confidential
+  No cardholder data, Bank system credentials or trading data.
+
+  ### Architecture and integration (as disclosed by Veltrix)
+  AWS; primary region ap-southeast-1 (Singapore); DR replica in eu-west-1
+  (Ireland) with continuous database replication and hourly object-storage
+  replication. Multi-tenant application and database with logical tenant
+  separation (tenant_id scoping), dedicated S3 prefix per tenant. Integration:
+  REST API (client and related-party data pushed from the Bank's CRM, case
+  status pulled back) authenticated with tenant-scoped API keys; nightly SFTP
+  batch exchange (screening deltas, periodic-review lists) via
+  legacy-sftp.veltrix.io. SAML 2.0 SSO with the Bank's IdP for all Bank users;
+  Bank administrators also hold local break-glass accounts. No vendor
+  connectivity into the Bank network; outbound from the Bank over HTTPS and
+  SFTP only.
+
+  ### Vendor personnel and locations with access to Bank data
+  - Singapore — platform operations, security, customer success — production
+    administrative access — Veltrix employees
+  - Pune, India — engineering and 24x7 L3 production support — production
+    support access including break-glass database access — Veltrix
+    Technologies India employees
+  - Manila, Philippines — tier-1 customer support — read access to case
+    records and attachments via the support console — Cerulean Support
+    Services Inc. (BPO contractor)
+
+  ### Fourth parties identified by the Bank during due diligence
+  Amazon Web Services (Singapore; Ireland DR); Cerulean Support Services Inc.
+  (Manila BPO, read access to case records); WatchTower Data Ltd (London,
+  sanctions / PEP / adverse-media data, receives names of screened parties);
+  OptiRead Pte. Ltd. (Singapore, OCR of identity documents, receives document
+  images); a US-based large language model API provider (name not disclosed by
+  Veltrix; Veltrix IQ, receives document images and adverse-media text);
+  Datadog (US SaaS, application logs, stated to be masked). Compare with the
+  subprocessor list declared in the security questionnaire.
+
+  ### Criticality and substitutability
+  Corporate onboarding and periodic KYC reviews in five markets cannot be
+  completed without the platform; the manual workaround (spreadsheet capture,
+  manual screening) is sustainable for ~5 business days before regulatory KYC
+  timelines are at risk. Bank BIA: Recovery Tier 2 — RTO 8 hours, RPO 1 hour.
+  Exit / migration estimated at 6–9 months (2.1m documents); exit plan exists
+  but is untested. Veltrix is the Bank's sole APAC onboarding platform. No
+  incidents reported to the Bank since go-live.
+
+  ### Contractual requirements (MSA 14 Feb 2025) and Bank standard (TPISS v4.1)
+  Data stored and processed only in Singapore and Hong Kong SAR (cl. 12.1);
+  current subprocessor list with 30 days' notice of new subprocessors (12.4);
+  security-incident notification within 24 hours of detection (13.2); annual
+  SOC 2 Type II and independent penetration test covering all components used
+  to deliver the service, critical and high findings remediated within 30 days
+  (13.5); right to audit incl. on-site and by regulators (13.7); BC/DR plan
+  tested annually to RTO 8h / RPO 1h (14.1); cyber liability insurance
+  ≥ USD 10m per claim (15.3); return and certified deletion of Customer Data
+  within 30 days of termination (16.2). TPISS: MFA for all administrative and
+  remote access; critical vulnerabilities fixed within 14 days, high within
+  30; security logs retained ≥ 12 months; privileged access reviewed at least
+  quarterly; annual independent pen test covering all customer-facing
+  interfaces with retest of critical/high findings; background screening of
+  all personnel with access to Bank data including contractors; AES-256 at
+  rest and TLS 1.2+ only in transit; annual DR test meeting contracted RTO/RPO.
+
+  ### Assessment objective
+  Determine whether Veltrix's control environment, as described and evidenced,
+  meets the Bank's Tier-1 / material-outsourcing requirements, the MSA and
+  TPISS v4.1. Identify control gaps, inconsistencies between questionnaire
+  claims and the vendor's own policies, SOC 2 and penetration test, contract
+  breaches, and assurance blind spots (scope exclusions, carved-out subservice
+  organisations, undisclosed fourth parties). The bundle must be read jointly:
+  several gaps exist only when the questionnaire is reconciled with the
+  policies, the SOC 2 exceptions and scope, and the pen test scope and
+  remediation table. Absence of requested evidence is itself a finding.
+  Evidence: Bank engagement summary; Bank security questionnaire v4 (80
+  questions, returned 25 Aug 2026); Information Security Policy v3.2; Access
+  Control Policy v2.0; Incident Response Policy v1.4; BC/DR Policy v2.1; SOC 2
+  Type II (Harrow & Pell LLP, period 1 Jul 2024 – 30 Jun 2025); external
+  penetration test (Greyline Security Ltd, 28 Nov 2025). Requested but not
+  provided: SOC 2 bridge letter; current ISO 27001 certificate; Cerulean
+  Support Services assurance report; DR test report 2025/2026; pen test
+  retest report.
+documents:
+  - path: docs/00_Vendor_Profile_and_Engagement_Summary.docx
+    kind: other
+  - path: docs/01_Security_Questionnaire_Response.xlsx
+    kind: questionnaire
+  - path: docs/02_Information_Security_Policy.docx
+    kind: policy
+  - path: docs/03_Access_Control_Policy.docx
+    kind: policy
+  - path: docs/04_Incident_Response_Policy.docx
+    kind: policy
+  - path: docs/05_Business_Continuity_and_DR_Policy.docx
+    kind: policy
+  - path: docs/06_SOC2_Type_II_Report.pdf
+    kind: soc
+  - path: docs/07_Penetration_Test_Report.pdf
+    kind: pentest
+as_of_date: "2026-09-02"
+standards_profile:
+  required_attestations:
+    - "SOC 2 Type II report, provided annually (MSA 13.5)"
+    - "Independent penetration test report, annually, covering all components used to deliver the service, with retest of critical and high findings (MSA 13.5; TPISS)"
+  attestation_max_age_months: 12
+  pentest_max_age_months: 12
+  allowed_residency:
+    - "Singapore"
+    - "Hong Kong SAR"
+  mfa_policy: "MFA enforced for all administrative and remote access (TPISS v4.1)"
+  vuln_remediation_sla:
+    critical_days: 14
+    high_days: 30
+  other_requirements:
+    - "MSA 12.1: Customer Data stored and processed only in Singapore and Hong Kong SAR; any other location requires the Bank's prior written consent"
+    - "MSA 12.4: current subprocessor list maintained; the Bank notified at least 30 days before a new subprocessor processes Customer Data"
+    - "MSA 13.2: the Bank notified within 24 hours of detection of any actual or suspected security incident affecting Customer Data"
+    - "MSA 13.5: critical and high penetration-test findings remediated within 30 days"
+    - "MSA 13.7: the Bank and its regulators may audit Veltrix, including on-site, on 30 days' notice and without notice after an incident"
+    - "MSA 14.1: business continuity / DR plan maintained and tested annually, meeting RTO 8 hours and RPO 1 hour"
+    - "MSA 15.3: cyber liability insurance of at least USD 10 million per claim"
+    - "MSA 16.2: Customer Data returned and all copies securely deleted, with written certification, within 30 days of termination (other than as required by law)"
+    - "TPISS: security logs retained for at least 12 months and available to the Bank on request"
+    - "TPISS: privileged access reviewed at least quarterly"
+    - "TPISS: background screening of all personnel with access to Bank data, including contractors and outsourced support staff"
+    - "TPISS: encryption at rest (AES-256) and in transit (TLS 1.2 or higher only)"
+    - "TPISS: annual DR test meeting the contracted RTO/RPO"
+    - "Material outsourcing arrangement under HKMA SPM SA-2 and MAS Outsourcing Guidelines; regulators expect audit access and prompt incident notification"
+golden:
+  # Residual band is a hand judgement pending the user's review: an
+  # unverified critical cross-tenant exposure of identity documents plus
+  # multiple contract breaches at a Tier-1 material outsourcing.
+  expected_band: VeryHigh
+  expected_weaknesses:
+    # F01 + F13
+    - id: VLX-G01
+      description: >-
+        Critical cross-tenant IDOR (pen test finding VLX-2025-001, CVSS 9.1) on
+        /api/v2/documents/{id}/download let an authenticated user of one tenant
+        retrieve other tenants' KYC documents by iterating sequential IDs; the
+        remediation table marks it "Remediated (vendor attestation)" with retest
+        "Not performed", so closure of the exposure is unverified (and the
+        questionnaire F.5 claim that all critical/high findings were remediated
+        and retested is inaccurate).
+      severity: high
+    # F02 + F21
+    - id: VLX-G02
+      description: >-
+        MFA on privileged access is overstated: questionnaire D.2 says MFA is
+        enforced for all users and all administrative access, but the Access
+        Control Policy 6.3 only "recommends" MFA for administrative access
+        (required only for remote VPN) and the SOC 2 CC6.1 exception found 3 of
+        14 privileged AWS IAM users without MFA — short of the Bank standard
+        requiring MFA for all administrative and remote access.
+      severity: high
+      mapped_control_codes: [IAM.MFA]
+    # F03 + F16
+    - id: VLX-G03
+      description: >-
+        Critical-vulnerability remediation is weak and breached: the SOC 2 CC7.1
+        exception shows 4 of 25 sampled critical vulnerabilities remediated 52–71
+        days after identification, beyond the vendor's own 30-day SLA, and the
+        Information Security Policy 9.3 SLA (critical 30 / high 60 / medium 90
+        days) itself falls short of the Bank's 14-day critical and 30-day high
+        requirement.
+      severity: medium
+    # F04
+    - id: VLX-G04
+      description: >-
+        SOC 2 CC8.1 exception: 6 of 40 sampled production changes lacked
+        evidence of peer-review approval before deployment, contradicting the
+        questionnaire F.3 claim of mandatory code review.
+      severity: medium
+    # F05
+    - id: VLX-G05
+      description: >-
+        No data loss prevention controls: questionnaire C.7 answers "No" to DLP
+        on email, endpoints or cloud storage for a vendor handling identity
+        documents.
+      severity: medium
+    # F06 + F19
+    - id: VLX-G06
+      description: >-
+        Contractors and BPO support staff (Cerulean, Manila, who read customer
+        case records) are excluded from security awareness training
+        (questionnaire K.3) and from background screening — Information
+        Security Policy 7.1 screens only Veltrix employees "where permitted by
+        local law", contractors "at the discretion of the supplier" — despite
+        questionnaire K.1 stating all personnel are screened and the Bank
+        standard requiring screening of all personnel including contractors.
+      severity: medium
+    # F07
+    - id: VLX-G07
+      description: >-
+        Access Control Policy 6.4 permits shared or generic accounts for
+        "operational convenience" with team-lead approval and no compensating
+        controls (no session recording or password vaulting).
+      severity: medium
+    # F08 + F14
+    - id: VLX-G08
+      description: >-
+        Two high-severity pen test findings remain unaddressed: VLX-2025-002 (no
+        rate limiting or lockout on the login endpoint, credential stuffing
+        feasible) was unilaterally risk-accepted by the CTO with no compensating
+        control, no expiry and no customer consultation, and VLX-2025-003
+        (stored XSS in case notes rendered to other users) has no retest;
+        contrary to questionnaire F.5 and MSA 13.5 (critical/high fixed within
+        30 days).
+      severity: high
+    # F09
+    - id: VLX-G09
+      description: >-
+        Right to audit refused: questionnaire A.6 states customer on-site or
+        remote audits are not permitted and the SOC 2 is provided in lieu,
+        conflicting with MSA 13.7 (Bank and regulator audit rights) and
+        HKMA SA-2 / MAS outsourcing expectations.
+      severity: medium
+    # F10
+    - id: VLX-G10
+      description: >-
+        Information Security Policy v3.2 is stale: it requires at least annual
+        review but was last reviewed 14 February 2024, more than two and a half
+        years before the assessment date.
+      severity: medium
+    # F11
+    - id: VLX-G11
+      description: >-
+        SOC 2 Type II coverage is stale: the examination period 1 July 2024 –
+        30 June 2025 ended more than 12 months before the assessment date and
+        no bridge letter covers the period since (requested, not provided).
+      severity: medium
+    # F12
+    - id: VLX-G12
+      description: >-
+        ISO/IEC 27001:2022 certification claimed in questionnaire B.1/B.2 is
+        unsupported: the certificate expired 31 March 2026 with recertification
+        "in progress" and no current certificate was provided.
+      severity: high
+    # F15 + F36
+    - id: VLX-G13
+      description: >-
+        DR testing is overdue, failed its objectives and is misreported: the
+        BC/DR Policy (s.8, Appendix A) records the last full exercise on 21
+        September 2024 as only partially successful (database failover 9h40m;
+        replication lag caused a 6-hour data gap against the 4-hour RPO) with
+        two actions still open, and the 2025 exercise deferred to Q4 2026 —
+        while questionnaire J.3 claims annual exercises validated recovery
+        within objectives and MSA 14.1 requires an annual test.
+      severity: high
+    # F17 + F28
+    - id: VLX-G14
+      description: >-
+        Cerulean Support Services Inc. (Manila BPO, tier-1 support with read
+        access to customer case records) is carved out of the SOC 2 scope with
+        no assurance report provided, and is missing from the questionnaire L.1
+        subprocessor list although it appears in the SOC 2 and the engagement
+        summary.
+      severity: medium
+    # F18 + F25
+    - id: VLX-G15
+      description: >-
+        Privileged access is recertified only annually (Access Control Policy
+        8.2), below the Bank's quarterly requirement and contradicting
+        questionnaire D.5, which claims quarterly privileged access reviews.
+      severity: medium
+    # F20
+    - id: VLX-G16
+      description: >-
+        Cyber liability insurance of USD 2 million (questionnaire A.8) is below
+        the USD 10 million minimum required by MSA 15.3.
+      severity: low
+    # F22
+    - id: VLX-G17
+      description: >-
+        Breach notification commitments conflict: the Incident Response Policy
+        7.2 notifies customers within 72 hours of confirmation, the questionnaire
+        I.3 claims 24 hours, and MSA 13.2 requires notification within 24 hours
+        of detection — the documented policy does not meet the contract and
+        "confirmation" is a later trigger than "detection".
+      severity: high
+    # F23
+    - id: VLX-G18
+      description: >-
+        RTO/RPO claims are inconsistent and below requirement: the BC/DR Policy
+        s.5 defines RTO 24h / RPO 4h, the questionnaire J.2 states RTO 4h / RPO
+        1h, and the Bank requires RTO 8h / RPO 1h (MSA 14.1) — the questionnaire
+        overstates capability and the documented capability misses the contract.
+      severity: high
+    # F24
+    - id: VLX-G19
+      description: >-
+        Data residency claim contradicted and MSA 12.1 (Singapore / Hong Kong
+        only) breached: questionnaire C.3 says all customer data is stored and
+        processed in Singapore, but the DR replica is in AWS eu-west-1
+        (Ireland), Pune engineers hold production support / break-glass
+        access, Manila support staff read case records, and Veltrix IQ sends
+        document images to a US-hosted model API.
+      severity: high
+    # F27
+    - id: VLX-G20
+      description: >-
+        Undisclosed AI fourth party: the Veltrix IQ feature (enabled by
+        default) sends identity document images and adverse-media text to a
+        US-hosted third-party large language model API that is absent from the
+        subprocessor list (questionnaire L.1, declared complete) and the AI
+        question M.1 is answered evasively ("customer data is not used to train
+        models"), breaching MSA 12.4 subprocessor notification.
+      severity: high
+    # F26
+    - id: VLX-G21
+      description: >-
+        Log retention is overstated: questionnaire H.2 claims security logs are
+        retained 12 months, but Information Security Policy 10.2 keeps 90 days
+        online with archiving only "where storage permits", short of the Bank's
+        12-month requirement and unreliable for forensics.
+      severity: medium
+    # F29
+    - id: VLX-G22
+      description: >-
+        Data deletion commitment contradicted: questionnaire C.9 promises
+        deletion within 30 days of termination (as MSA 16.2 requires), but
+        Information Security Policy 11.3 retains customer records for 7 years
+        after termination and backups for 12 months.
+      severity: medium
+    # F30
+    - id: VLX-G23
+      description: >-
+        Legacy TLS 1.0/1.1 is enabled on legacy-sftp.veltrix.io (pen test
+        VLX-2025-007), the SFTP batch channel the Bank uses, contradicting
+        questionnaire E.4 ("TLS 1.2 or higher only") and the Bank's TLS 1.2+
+        standard.
+      severity: medium
+    # F31
+    - id: VLX-G24
+      description: >-
+        The penetration test scope covered only the web UI and external
+        perimeter; the REST API and mobile app were explicitly out of scope,
+        although the Bank's integration runs over the REST API (and ~60 users
+        use the mobile app) and MSA 13.5 / TPISS require coverage of all
+        components and customer-facing interfaces.
+      severity: high
+    # F32
+    - id: VLX-G25
+      description: >-
+        The SOC 2 system boundary (Section 3) excludes the Pune engineering
+        centre, yet the same section states Pune engineers provide 24x7
+        production support with break-glass access — production access is
+        outside the assured scope.
+      severity: high
+    # F33
+    - id: VLX-G26
+      description: >-
+        Customer-managed keys (BYOK) claimed in questionnaire C.5 are not
+        available: Information Security Policy 8.2 states keys are
+        Veltrix-managed in AWS KMS and BYOK is "on the product roadmap".
+      severity: low
+    # F34
+    - id: VLX-G27
+      description: >-
+        Weak password standard (Information Security Policy s.12, questionnaire
+        D.9): minimum 8 characters, 90-day forced rotation, lockout only after
+        10 failed attempts — below common practice and the Bank standard.
+      severity: low
+    # F35
+    - id: VLX-G28
+      description: >-
+        Incident response plan is not exercised: the IR Policy s.8 holds
+        exercises "as resources permit" and the last tabletop was 8 March 2024
+        (~30 months before the assessment), contradicting questionnaire I.4
+        which claims annual tabletop exercises.
+      severity: medium
+  exec_summary_rubric:
+    must_cover:
+      - id: VLX-K1
+        point: >-
+          An overall residual risk verdict is stated and consistent with the
+          computed aggregate band.
+      - id: VLX-K2
+        point: >-
+          The critical cross-tenant document exposure from the penetration test
+          and the absence of independent retest (vendor attestation only) is
+          mentioned.
+      - id: VLX-K3
+        point: >-
+          Cross-border processing contrary to the Singapore / Hong Kong
+          residency commitment (Ireland DR, India and Philippines access, US AI
+          provider) is mentioned.
+      - id: VLX-K4
+        point: >-
+          MFA not enforced on privileged / administrative access (SOC 2
+          exception and policy wording contradicting the questionnaire) is
+          mentioned.
+      - id: VLX-K5
+        point: >-
+          The questionnaire's reliability is called into question — several
+          answers (e.g. RTO/RPO, notification time, DR test outcome, residency,
+          access reviews) are contradicted by the vendor's own policies or
+          evidence.
+      - id: VLX-K6
+        point: >-
+          Assurance gaps are mentioned — at least one of: stale SOC 2 period
+          with no bridge letter, expired ISO 27001 certificate, Pune excluded
+          from the SOC 2 scope, Cerulean carve-out without assurance, pen test
+          scope excluding the API.
+    must_not_claim:
+      - id: VLX-F1
+        claim: >-
+          MFA is enforced for all administrative and privileged access without
+          exception.
+      - id: VLX-F2
+        claim: >-
+          All customer data is stored and processed in Singapore (or within the
+          contracted Singapore / Hong Kong locations).
+      - id: VLX-F3
+        claim: >-
+          All critical and high penetration test findings have been remediated
+          and retested.
+      # D05 decoy: the opinion is unqualified with exceptions
+      - id: VLX-F4
+        claim: >-
+          The SOC 2 auditor issued a qualified or adverse opinion.

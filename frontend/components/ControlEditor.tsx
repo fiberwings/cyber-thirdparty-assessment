@@ -2,7 +2,9 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ExpectedControlRead, Coverage, Effectiveness } from "@/lib/types";
-import { api, describeError, pollTask } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
+import { useTask, waitForTask } from "@/lib/useTask";
+import { AiActivity } from "./AiActivity";
 import { CitationChip } from "./CitationChip";
 import { useState, useEffect } from "react";
 
@@ -54,13 +56,19 @@ export function ControlEditor({
     },
   });
 
+  const [aiTaskId, setAiTaskId] = useState<string | null>(null);
+  const { task: aiTask } = useTask(aiTaskId);
   const rerunAI = useMutation({
     mutationFn: async () => {
       const { task_id } = await api.assessControlAI(control.id);
-      await pollTask(task_id, undefined, 800);
+      setAiTaskId(task_id);
+      await waitForTask(qc, task_id);
       await api.recalculate(assessmentId);
     },
-    onSettled: invalidateAll,
+    onSettled: () => {
+      setAiTaskId(null);
+      invalidateAll();
+    },
   });
 
   const remove = useMutation({
@@ -112,6 +120,9 @@ export function ControlEditor({
             </button>
           </div>
           <div className="text-sm font-medium text-ink-900">{control.name}</div>
+          {rerunAI.isPending && (
+            <AiActivity variant="inline" kind="gap_analysis_control" source={aiTask} className="my-2" />
+          )}
           {ca?.last_error && (
             <div className="mt-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] text-amber-800">
               Last AI run failed — verdict below is {ca.last_run_at ? "stale or absent" : "absent"}. Re-run AI to

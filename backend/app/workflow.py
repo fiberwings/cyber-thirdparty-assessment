@@ -407,9 +407,9 @@ def require_no_run_in_flight(
 
 
 def reattach_response(handle: TaskHandle) -> TaskStatusRead:
-    return TaskStatusRead(
-        task_id=handle.id, status=handle.status, progress=handle.progress, detail=handle.detail
-    )
+    from app.tasks import task_status_read
+
+    return task_status_read(handle)
 
 
 # ---------- Readiness annotation for the API ----------

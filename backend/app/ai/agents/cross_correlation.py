@@ -37,6 +37,7 @@ import json
 
 from sqlalchemy.orm import Session
 
+from app import activity
 from app.ai.context import analysis_datetime, standards_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
@@ -356,6 +357,7 @@ async def run(
     # stored profiles + analysis date + standards; re-runs replace).
     from app.ai.agents import attestation as attestation_agent
 
+    activity.stage("Attestation checks")
     attestation_agent.apply_checks(db, assessment_id)
 
     # R3/R4: review extracted candidates against the whole bundle first, then
@@ -402,6 +404,7 @@ async def run(
     semaphore = asyncio.Semaphore(_PHASE_CONCURRENCY)
     n = len(batches)
     done = 0
+    activity.stage("Correlating clusters", units_total=n, unit_label="clusters")
     mapped_total = 0
     emergent_total = 0
     unscored_total = 0
@@ -442,6 +445,7 @@ async def run(
                         await correlate(inner, batch[mid:]),
                     ]
         done += 1
+        activity.advance(done)
         if on_progress:
             await on_progress(
                 0.05 + 0.85 * done / n,
@@ -470,6 +474,7 @@ async def run(
         inner.commit()
 
         # Deterministic floor for any high/critical still unmatched.
+        activity.stage("Accuracy floor")
         if on_progress:
             await on_progress(0.92, "Applying high/critical accuracy floor...")
         forced = _force_emergent_for_unmapped(

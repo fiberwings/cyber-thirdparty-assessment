@@ -49,10 +49,13 @@ async def generate_scenarios(assessment_id: int, db: Session = Depends(db_sessio
     aid = a.id
 
     async def job(handle):
-        await handle.update(progress=0.05, detail="Generating scenario skeletons...")
+        handle.plan(["Drafting scenarios", "Selecting controls"])
+        handle.stage("Drafting scenarios", detail="Generating scenario skeletons...")
 
         async def on_progress(p: float, detail: str):
-            await handle.update(progress=p, detail=detail)
+            # Progress is derived from the agent's stage/unit reports
+            # (app.activity); only the human-readable detail is forwarded.
+            await handle.update(detail=detail)
 
         try:
             # New session inside the background task to avoid sharing the request session.

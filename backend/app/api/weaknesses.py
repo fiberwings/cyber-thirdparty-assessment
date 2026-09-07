@@ -57,10 +57,20 @@ def submit_correlation(db: Session, a: Assessment) -> TaskStatusRead:
     aid = a.id
 
     async def job(handle):
-        await handle.update(progress=0.05, detail="Correlating weaknesses...")
+        # Stages are entered by the agent (app.activity); declaring the plan
+        # here gives the UI the full stepper from the first poll and keeps
+        # the derived progress monotonic across sub-stages.
+        handle.plan([
+            "Attestation checks",
+            "Confirming candidates",
+            "Merging duplicates",
+            "Correlating clusters",
+            "Accuracy floor",
+        ])
+        handle.set(detail="Correlating weaknesses...")
 
         async def on_progress(p: float, detail: str):
-            await handle.update(progress=p, detail=detail)
+            await handle.update(detail=detail)
 
         try:
             with SessionLocal() as inner:

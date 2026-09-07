@@ -38,6 +38,24 @@ const config: Config = {
       boxShadow: {
         card: "0 1px 2px 0 rgba(15,19,30,0.04), 0 1px 3px 0 rgba(15,19,30,0.05)",
       },
+      // AI activity indicator (components/AiActivity.tsx). Every use pairs
+      // with motion-reduce:animate-none.
+      keyframes: {
+        "ai-orbit": { from: { transform: "rotate(0deg)" }, to: { transform: "rotate(360deg)" } },
+        "ai-breathe": {
+          "0%, 100%": { transform: "scale(0.85)", opacity: "0.55" },
+          "50%": { transform: "scale(1.05)", opacity: "1" },
+        },
+        "ai-shimmer": { from: { transform: "translateX(-100%)" }, to: { transform: "translateX(300%)" } },
+        "ai-fade": { from: { opacity: "0", transform: "translateY(3px)" }, to: { opacity: "1", transform: "translateY(0)" } },
+      },
+      animation: {
+        "ai-orbit": "ai-orbit 1.6s linear infinite",
+        "ai-orbit-slow": "ai-orbit 2.8s linear infinite reverse",
+        "ai-breathe": "ai-breathe 1.8s ease-in-out infinite",
+        "ai-shimmer": "ai-shimmer 1.4s ease-in-out infinite",
+        "ai-fade": "ai-fade 300ms ease-out both",
+      },
     },
   },
   plugins: [],

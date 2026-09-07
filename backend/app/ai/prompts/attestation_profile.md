@@ -12,4 +12,20 @@ Rules — these are load-bearing:
 - `bridge_letter`: whether a bridge/gap letter is included or referenced for the period after `period_end`.
 - `scope`: the system/service in scope, briefly.
 
-Output JSON only, matching the schema you were given. Leave out anything the document does not state.
+# Output shape
+
+JSON only. Every field except `doc_type` / `doc_type_quote` is an object `{"value": ..., "quote": "..."}` — the quote is a sibling **inside** the object, not a separate `<field>_quote` key. Use only the fields listed below; do not add fields of your own (findings, methodology, client, version, risk rating and the like belong to the weakness extraction, not to this profile).
+
+Fields: `doc_type`, `doc_type_quote`; SOC: `period_start`, `period_end`, `report_date`, `first_examination`, `opinion`, `carve_outs` (list of `{"name", "service", "quote"}`), `cuec_count`, `auditor`, `bridge_letter`; ISO: `cert_issue_date`, `cert_expiry_date`, `certifying_body`; pen test: `test_start_date`, `test_end_date`, `tester`, `accreditation`; common: `scope`.
+
+Example (pen test):
+```
+{"doc_type": "pentest", "doc_type_quote": "External Penetration Test Report",
+ "report_date": {"value": "2025-11-28", "quote": "Report date: 28 November 2025"},
+ "test_start_date": {"value": "2025-11-03", "quote": "Testing was performed from 3 to 14 November 2025"},
+ "test_end_date": {"value": "2025-11-14", "quote": "Testing was performed from 3 to 14 November 2025"},
+ "tester": {"value": "Greyline Security Ltd", "quote": "Prepared by Greyline Security Ltd"},
+ "scope": {"value": "Customer web application and external perimeter", "quote": "In scope: the customer web application and the external perimeter"}}
+```
+
+Leave out anything the document does not state.

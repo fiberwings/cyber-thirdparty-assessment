@@ -17,5 +17,10 @@ Common accuracy regressions to watch for:
 - Defaults / fallbacks that silently downgrade scoring when inputs are missing
 - Caching or dedup that lets stale evidence stand in for fresh evidence
 - Prompt edits that drop "cite the evidence" / "say unknown when unknown" guardrails
+- Lowering the liveness limits (`LLM_CONTENT_SILENCE_S`, `LLM_CALL_MAX_S`, `TASK_IDLE_TIMEOUT_S`,
+  `TASK_MAX_RUNTIME_S` in `backend/app/config.py`) below the shipped defaults: completions are
+  streamed and deadlines are inactivity-based precisely so slow reasoning models finish instead of
+  being cut off; tightening them re-introduces speed-based failures (a timed-out stage is a lost
+  assessment step, never a faster one)
 
 When in doubt, flag and ask — a paused turn is cheap; a wrong assessment is not.

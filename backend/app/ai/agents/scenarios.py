@@ -26,6 +26,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app import activity
 from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
@@ -167,6 +168,7 @@ async def generate(
         client=client,
     )
     n = len(skeletons_out.scenarios)
+    activity.stage("Selecting controls", units_total=n, unit_label="scenarios")
     if on_progress:
         await on_progress(0.2, f"Generated {n} scenario skeletons; selecting controls...")
 
@@ -210,6 +212,7 @@ async def generate(
     async def report_done():
         nonlocal done
         done += 1
+        activity.advance(done)
         if on_progress:
             await on_progress(
                 0.2 + 0.8 * done / n,

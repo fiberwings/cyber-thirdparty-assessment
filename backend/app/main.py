@@ -23,15 +23,23 @@ from app.api import (
 from app.ai.router import warn_if_configured_models_undersized
 from app.config import settings
 from app.db import init_db
-from app.tasks import reconcile_interrupted_tasks
+from app.tasks import reconcile_interrupted_tasks, registry
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    import asyncio
+
     init_db()
     reconcile_interrupted_tasks()
     warn_if_configured_models_undersized()
-    yield
+    # Liveness watchdog: cancels quiet / runaway jobs so an assessment is
+    # never wedged behind a dead task (see app.tasks).
+    watchdog = asyncio.create_task(registry.watchdog_loop())
+    try:
+        yield
+    finally:
+        watchdog.cancel()
 
 
 app = FastAPI(

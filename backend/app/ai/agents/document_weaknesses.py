@@ -49,6 +49,7 @@ from datetime import datetime
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import activity
 from app.ai.context import analysis_datetime, standards_block
 from app.ai.prompts import load as load_prompt
 from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
@@ -361,6 +362,7 @@ async def _extract_questionnaire_windowed(
     extraction call per window of sheets/domains; no enumeration, no cap."""
     windows = _pack_section_windows(_group_by_section(chunks), QUESTIONNAIRE_WINDOW_MAX_TOKENS)
     n = len(windows)
+    activity.stage("Extracting sections", units_total=n, unit_label="windows")
     inserted = 0
     failures: list[BaseException] = []
 
@@ -416,6 +418,7 @@ async def _extract_questionnaire_windowed(
         except OpenRouterError as e:
             failures.append(e)
             continue
+        activity.advance(i + 1)
         if on_progress:
             await on_progress(
                 0.15 + 0.85 * (i + 1) / n,
@@ -554,6 +557,7 @@ async def extract(
         windows = _pack_sections_into_windows(sections, preamble, ENUMERATE_INPUT_MAX)
 
     skeletons: list[WeaknessSkeletonOut] = []
+    activity.stage("Enumerating findings", units_total=len(windows), unit_label="windows")
     for i, window_text in enumerate(windows):
         out: WeaknessSkeletonListOut = await call_structured(
             db,
@@ -570,6 +574,7 @@ async def extract(
             client=client,
         )
         skeletons.extend(out.skeletons)
+        activity.advance(i + 1)
         if on_progress:
             await on_progress(
                 0.15 + 0.25 * (i + 1) / len(windows),
@@ -604,6 +609,7 @@ async def extract(
     semaphore = asyncio.Semaphore(PHASE2_CONCURRENCY)
     n = len(skeletons)
     done = 0
+    activity.stage("Detailing findings", units_total=n, unit_label="findings")
 
     async def detail_worker(sk: WeaknessSkeletonOut) -> int:
         nonlocal done
@@ -655,6 +661,7 @@ async def extract(
                     except IntegrityError:
                         inner.rollback()
         done += 1
+        activity.advance(done)
         if on_progress:
             await on_progress(
                 0.4 + 0.6 * done / n,

@@ -38,6 +38,25 @@ def test_looks_garbled_classification():
     assert not _looks_garbled('{"control_code": "X",}', None, _Out)
 
 
+def test_sparse_on_schema_answer_is_a_schema_miss_not_garble():
+    """Mostly-optional schemas (the attestation profile) get sparse but
+    coherent answers: a pen test states none of the SOC-only fields. Such an
+    answer with a wrong field *shape* must reach the corrective retry — the
+    old "≤ 1/3 of schema fields present" rule sent it down the garble path,
+    which never shows the validator error and failed the profile outright."""
+    from app.schemas.attestation import AttestationProfileOut
+
+    sparse = {"doc_type": "pentest", "report_date": "2025-11-28", "scope": "Veltrix web app"}
+    assert not _looks_garbled('{"doc_type": ...}', sparse, AttestationProfileOut)
+    # Extra invented fields around recognised ones are a schema miss too
+    # (minimax padded the pen-test profile with ~35 foreign fields).
+    assert not _looks_garbled("{...}", {"control_code": "X", "zz": 1, "yy": 2, "xx": 3}, _Out)
+    # A single foreign wrapper around an object is a shape miss, not garble.
+    assert not _looks_garbled("{...}", {"result": {"control_code": "X"}}, _Out)
+    # An empty object is garble.
+    assert _looks_garbled("{}", {}, _Out)
+
+
 async def _call(db, fake_client):
     return await call_structured(
         db, purpose="test", profile="fast", messages=MESSAGES, schema=_Out, client=fake_client
