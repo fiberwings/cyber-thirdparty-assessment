@@ -7,7 +7,7 @@ Started 2026-08-30 on branch `accuracy-program` (from `main` @ 0dedfe7). **No ap
 
 ### Signal/noise classification judge step (`--judge full`)
 - `bench/prompts.py`: `FINDING_CLASS_SYSTEM` / `finding_class_user` (version `fc-2`; fc-1 was the first calibration, see Runs), categories verbatim from
-  `testdata/_results/cases/fp_spec.md`: `TP`, `TP_OPTIONAL`, `DUP_OF_TP`, `LEGIT_UNKEYED`, `BOILERPLATE`, `MISREAD`,
+  `testdata/_results/cases/fp_spec.md` (git-ignored; the categories are enumerated in `bench/judge.py`): `TP`, `TP_OPTIONAL`, `DUP_OF_TP`, `LEGIT_UNKEYED`, `BOILERPLATE`, `MISREAD`,
   `JUDGE_FN`, `JUDGE_FP_MATCH`; plus `missed_goldens[].fact_in_chunks` (ingestion vs reasoning problem).
 - `bench/judge.py`: `Judge.classify_findings()` with `FindingClassOut` schema and structural checks (every reported id
   exactly once; golden required for TP/TP_OPTIONAL/DUP_OF_TP/JUDGE_FN/JUDGE_FP_MATCH and forbidden otherwise; at most one

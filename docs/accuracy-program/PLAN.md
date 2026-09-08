@@ -1,6 +1,6 @@
 # Accuracy improvement program — PLAN (frozen, rev. 2 of 2026-08-30)
 
-Source: `testdata/_results/03_improvement_recommendations.md` (evaluation of 2026-08-29, app @ d391c80) **as revised on
+Source: `testdata/_results/03_improvement_recommendations.md` (git-ignored, not in the repository; evaluation of 2026-08-29, app @ d391c80) **as revised on
 2026-08-30** — see the revision note at the top of that document. Where the two disagree, this plan is authoritative.
 This file is written once. Progress goes in `STATE.md`; per-phase detail in `phases/`. Do not edit gates mid-phase.
 
@@ -31,7 +31,7 @@ This file is written once. Progress goes in `STATE.md`; per-phase detail in `pha
 ## Phases (canary = `orbitclear` throughout; full benchmark only in Phase 6)
 
 ### Phase 0 — Measurement (harness)
-Scope: signal/noise classification as a judge step (categories from `testdata/_results/cases/fp_spec.md`) reported as
+Scope: signal/noise classification as a judge step (categories from `testdata/_results/cases/fp_spec.md`, git-ignored; enumerated in `benchmark/bench/judge.py` `FindingCategory`) reported as
 `signal_share`, `dup_per_golden`, `band_error`; flags `--skip-narratives`, `--judge none|match|full`; `JUDGE_MAX_TOKENS`
 sized for 100+ findings; four new cases already in `benchmark/cases/`. No app change.
 Floor: `bench run --cases orbitclear` reports the new metrics and reproduces the baseline recall 5/5.

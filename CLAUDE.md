@@ -24,3 +24,11 @@ Common accuracy regressions to watch for:
   assessment step, never a faster one)
 
 When in doubt, flag and ask — a paused turn is cheap; a wrong assessment is not.
+
+## Documentation map
+
+- `README.md` — product overview and quick start.
+- `docs/ARCHITECTURE.md` — phases, AI usage, large-file handling, scoring; keep it in sync with code changes.
+- `docs/BUILD.md` — dependencies, versions, build-from-source steps.
+- `benchmark/README.md` — accuracy benchmark harness.
+- `docs/accuracy-program/STATE.md` — living log of the accuracy programme; read first when resuming that work.

@@ -1,6 +1,6 @@
 # Baseline — app @ d391c80, benchmark run 5 (+ manual completions), 2026-08-29
 Models: fast minimax/minimax-m3, reasoner deepseek/deepseek-v4-pro-0813, judge z-ai/glm-5.1. One repetition. Full detail in
-`testdata/_results/`.
+`testdata/_results/` (git-ignored: the evaluation records and the vendor evidence packs are not in the repository).
 
 | case | gaps | found | judge P | signal share | dups | boilerplate | misread | app band | expected | LLM calls | in tok | out tok | gap-analysis wall |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|

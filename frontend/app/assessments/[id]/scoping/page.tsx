@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, describeError } from "@/lib/api";
 import { use, useState } from "react";
 import { AssessmentShell } from "@/components/AssessmentShell";
-import { AssessmentSettings } from "@/components/AssessmentSettings";
+import { SettingsSummary } from "@/components/SettingsSummary";
 import { AiActivity } from "@/components/AiActivity";
 import { useTask, waitForTask } from "@/lib/useTask";
 import { useRouter } from "next/navigation";
@@ -71,7 +71,7 @@ export default function ScopingPage({ params }: { params: Promise<{ id: string }
         inherent risks — or you can force-continue at any time.
       </p>
 
-      <AssessmentSettings assessmentId={aid} />
+      <SettingsSummary assessmentId={aid} />
 
       {!hasDesc && (
         <div className="rounded-lg border border-ink-200 bg-white p-5 max-w-3xl">

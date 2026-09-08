@@ -20,6 +20,7 @@ untouched (frozen until Phase 5).
   analysis date (run artefact, not evidence); a one-line freshness rule anchors staleness on the analysis date only.
 - Executive-summary fingerprint includes `as_of_date` + profile → changing either flags the summary stale.
 - UI: `AssessmentSettings` panel on the scoping page (pin analysis date; profile form).
+  *(2026-09-08: the panel has since moved to a dedicated Settings page, `frontend/app/assessments/[id]/settings/`, with the scoping page showing a one-line summary.)*
 - Harness: `case.yaml` gains `as_of_date` / `standards_profile`; the runner PATCHes them before any stage. All six cases
   pinned to `as_of_date: 2026-05-01` (the date the test set was authored against — BASELINE freshness findings were
   artefacts of the run date).

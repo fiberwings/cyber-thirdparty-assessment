@@ -49,8 +49,8 @@ results DB (`data/bench.sqlite`).
 └─────────────┼──────────────────┼─────────────────────────────────┘
               │ HTTP             │ HTTPS
               ▼                  ▼
-   TPRM backend (:8000/:8010)  OpenRouter /chat/completions
-   the app under test          pinned judge model, temp 0
+   TPRM backend (:8000, or     OpenRouter /chat/completions
+   BENCH_BACKEND_URL)          pinned judge model, temp 0
 ```
 
 Module map (`bench/`):
@@ -143,16 +143,6 @@ as they start; per-case rows appear as they finish.
 
 | Flag | Default | Meaning |
 |---|---|---|
-**Grading a stored assessment (no pipeline, no app LLM cost):**
-
-```
-.venv/bin/bench grade --assessment 9 --case orbitclear [--judge match|full|none] [--notes "..."]
-```
-Fetches the report (+ chunks for `--judge full`) of an assessment that already exists on the backend and runs the judge
-only. Records a run with `config.mode = "grade"`, empty stage timings, and `tokens_json` reflecting the stored
-assessment's original pipeline cost. Use it to re-grade after re-running a single stage on a stored assessment
-(`POST .../extract-weaknesses`, `.../gap-analysis/run`, `.../recalculate`) instead of driving the whole pipeline.
-
 | `--cases a,b` | all | Comma-separated case ids (directory names under `cases/`) |
 | `--reps N` | 1 | Repetitions per case (distinct assessments; measures nondeterminism) |
 | `--concurrency N` | 1 | Parallel cases via threads. **Experimental above 1** — the backend task registry is in-process and the app DB is SQLite (write-lock contention); keep N ≤ 3 |
@@ -166,6 +156,19 @@ assessment's original pipeline cost. Use it to re-grade after re-running a singl
 | `--notes "..."` | — | Free-text note stored on the run |
 
 Exit code: `0` when every case graded ok, non-zero otherwise.
+
+### `bench grade`
+
+Grade a stored assessment — no pipeline, no app LLM cost:
+
+```
+.venv/bin/bench grade --assessment 9 --case orbitclear [--judge match|full|none] [--judge-model M] [--notes "..."]
+```
+
+Fetches the report (+ chunks for `--judge full`) of an assessment that already exists on the backend and runs the judge
+only. Records a run with `config.mode = "grade"`, empty stage timings, and `tokens_json` reflecting the stored
+assessment's original pipeline cost. Use it to re-grade after re-running a single stage on a stored assessment
+(`POST .../extract-weaknesses`, `.../gap-analysis/run`, `.../recalculate`) instead of driving the whole pipeline.
 
 ### `bench list-cases`
 
@@ -220,7 +223,7 @@ environment variables or `benchmark/.env`:
 | `BENCH_DB_PATH` | `benchmark/data/bench.sqlite` | Results DB |
 | `CASES_DIR` | `benchmark/cases` | Case directory root |
 | `MAIN_REPO_DIR` | repo root | Where `git rev-parse` runs for provenance |
-| `MAIN_DB_PATH` | `<repo>/data/tprm.sqlite` | App DB for read-only token/cost collection; unset/missing → collection silently skipped |
+| `MAIN_DB_PATH` | `<repo>/data/tprm.sqlite` | App DB for read-only token/cost collection; unset/missing → collection silently skipped. The default matches the Docker layout; a backend started from `backend/` with the default `DB_PATH` writes to `backend/data/tprm.sqlite` instead, so set this explicitly |
 | `IDLE_TIMEOUT_S` | 900 s | A stage fails after this long without task activity (keep above the app's `TASK_IDLE_TIMEOUT_S`, 600, so the app's diagnostic is what gets recorded) |
 | `MAX_STAGE_S` | 14400 s | Runaway ceiling per stage; an active stage is otherwise never cut off |
 | `POLL_INTERVAL` | 2.0 s | Task polling interval |
@@ -252,7 +255,21 @@ documents:                           # uploaded in listed order
   - path: docs/SOC_Report.pdf              # PDF, XLSX and DOCX are supported
     kind: soc
 
+# Assessment inputs, PATCHed onto the assessment before any stage runs
+# (POST .../settings). Pin the analysis date so freshness judgements are
+# reproducible; the standards profile is optional (see cases/veltrix).
+as_of_date: "2026-05-01"
+standards_profile:                   # optional; every field optional
+  required_attestations: ["SOC 2 Type II report, provided annually"]
+  attestation_max_age_months: 12
+  pentest_max_age_months: 12
+  allowed_residency: ["Singapore"]
+  mfa_policy: "MFA enforced for all administrative and remote access"
+  vuln_remediation_sla: {critical_days: 14, high_days: 30}
+  other_requirements: ["Incident notification within 24 hours"]
+
 golden:
+  expected_band: High                # Low|Moderate|High|VeryHigh — needed for band_error
   # The answer key: weaknesses the app SHOULD report. Hand-curated judgments
   # anchored in the documents — never blind copies of app output.
   expected_weaknesses:
@@ -313,7 +330,8 @@ Scoring (`metrics.py`):
 
 A second judge call classifies EVERY reported weakness against the parsed
 evidence chunks (the only source of truth about what the documents say) into
-one category from `testdata/_results/cases/fp_spec.md`: `TP`, `TP_OPTIONAL`,
+one category (the taxonomy is `FindingCategory` in `bench/judge.py`; the original
+specification is in `testdata/_results/cases/fp_spec.md`, which is git-ignored): `TP`, `TP_OPTIONAL`,
 `DUP_OF_TP`, `LEGIT_UNKEYED`, `BOILERPLATE`, `MISREAD`, `JUDGE_FN` (matcher
 missed a real golden hit), `JUDGE_FP_MATCH` (matcher linked a non-hit). It also
 states, for each missed golden, whether the underlying fact is present in any
@@ -388,7 +406,7 @@ under "Judge calls (raw, for audit)".
   `matched|missed|extra`, both descriptions/severities, confidence, whether it
   counted toward the metrics, and the judge's justification.
 - **`judge_call`** — one row per judge attempt: purpose
-  (`weakness_match|exec_rubric`), model, prompt version, latency, tokens,
+  (`weakness_match|finding_class|exec_rubric`), model, prompt version, latency, tokens,
   ok/error, full request and raw response JSON.
 
 ## Dashboard
@@ -496,6 +514,8 @@ No network, no LLM cost:
   two bad answers (records preserved), via respx-mocked OpenRouter.
 - `test_app_client.py` — `wait_task` state machine (done, error, timeout,
   404 → durable-phase fallback).
+- `test_collect.py` — read-only token/cost collection from the app's `model_call` table.
+- `test_pricing.py` — OpenRouter list-pricing estimates for pre-metering judge rows.
 - `test_dashboard.py` — view-model derivation (golden status precedence,
   cost/time rollups with grade-mode reuse, lenient golden loading) and every
   dashboard route against a seeded temp DB.

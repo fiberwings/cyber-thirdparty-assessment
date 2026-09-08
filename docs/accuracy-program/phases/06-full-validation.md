@@ -18,7 +18,7 @@ auditor-tested evidence mapped persists on reviewed weakness sets, adopt it (use
 ## Runs
 Run 18 (9 ok / 3 error) + run 19 (verifypro r1 re-graded after the VP-G6 key amendment) + runs 20/21 (globaltalent r2
 and verifypro r2 salvaged mid-pipeline — option B, user 2026-08-31). Failures fixed en route: harness extraction
-timeout 600→1800 s; `scenario_controls` budget 4096→8192; merge pass splits on output truncation (globaltalent's
+timeout 600→1800 s (a per-stage wall clock at the time; replaced on 2026-09-04 by the liveness-based `IDLE_TIMEOUT_S` / `MAX_STAGE_S`); `scenario_controls` budget 4096→8192; merge pass splits on output truncation (globaltalent's
 130-row merge overflowed 16k). globaltalent r1 abandoned (74k tokens spent; scenario truncation, fix applies forward).
 
 | case | rep | recall | n | signal | dup/g | band | Δexp | exec |

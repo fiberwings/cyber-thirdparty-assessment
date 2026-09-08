@@ -1,94 +1,87 @@
 # Cyber Third-Party Risk Assessment
 
-AI-assisted, fully cited TPRM workflow:
+An AI-assisted, evidence-cited cyber risk assessment of a vendor service. You describe the
+service, the app proposes the inherent risk scenarios and the controls each one expects, you upload
+the vendor's evidence, and the pipeline extracts, confirms, correlates and scores every finding
+against that evidence — with a verbatim quote and location for every claim, a deterministic score
+you can audit, and an executive summary that only references things that exist.
 
-1. Describe the vendor service (AI loops Q&A until sufficient — or you force-continue).
-2. AI proposes inherent risk scenarios + the controls each scenario expects.
-3. Upload vendor evidence (questionnaire, SOC 2, ISO 27001, pen test, policies — PDF / XLSX / DOCX).
-4. Cross-correlation: per-document findings are correlated across the evidence bundle, mapped onto scenario controls, and emergent scenarios are spawned from pen-test findings or questionnaire negatives.
-5. Gap analysis: every expected control (including those of emergent scenarios) is matched against retrieved evidence; coverage and effectiveness tracked separately, every claim cited with page/section + verbatim quote.
-6. Deterministic scoring (4×4 impact × likelihood) with meta-issue uplift for vague answers and missing docs.
-7. Edit any AI assessment → score recalculates instantly.
+Accuracy outranks speed and cost: see [`CLAUDE.md`](CLAUDE.md) for the rules every change follows
+and [`docs/accuracy-program/`](docs/accuracy-program/) for how the current pipeline was measured
+into shape.
 
-**Stack**: FastAPI + SQLAlchemy + SQLite/FTS5 (backend), Next.js 15 + Tailwind + TanStack Query (frontend), OpenRouter for interchangeable LLMs (Haiku for ingest/Q&A, Opus / GPT-5 for reasoning).
+## The workflow
 
----
+Six sequential steps, enforced by the backend (an out-of-order action is refused with the reason,
+and changing an input marks everything downstream stale until it is re-run):
 
-## Quick start (without Docker)
+| # | Step | What happens |
+|---|---|---|
+| 1 | **Scoping** | Describe the service; the AI asks one question at a time until seven dimensions (data, hosting, network, identity, regulation, geography, criticality) are covered — or force-continue. |
+| 2 | **Inherent risk** | The reasoner proposes risk scenarios (impact × likelihood) and the controls each expects, from a 47-control catalogue. |
+| 3 | **Evidence** | Upload questionnaires, SOC 2 / ISO 27001 reports, pen tests, policies (PDF, XLSX, DOCX). Each is chunked with page / section metadata, indexed, and mined for candidate weaknesses; assurance documents also get a typed attestation profile. |
+| 4 | **Analysis** | (a) Cross-correlate: deterministic attestation checks, then every candidate is confirmed, noted or dropped against the *whole* bundle, duplicates merged, findings mapped to scenario controls, emergent scenarios spawned. (b) Gap analysis: every expected control gets a coverage / effectiveness verdict with citations and cross-document contradictions. (c) Narratives and executive summary. |
+| 5 | **Residual score** | Deterministic 4×4 scoring — no model in the score path — with a residual-risk matrix, register and per-scenario explanation. Edit any verdict and the band updates instantly. |
+| 6 | **Report** | Printable report: verdict, key risks, actions, limitations, scenarios, weaknesses, documents. |
+
+Per-assessment **Settings** hold the analysis date, the assessor's own standards profile (required
+attestations, freshness windows, residency, MFA policy, SLAs) and per-stage model routing.
+
+## Quick start
+
+Requirements: an [OpenRouter](https://openrouter.ai) API key and either Docker, or Python 3.11+
+and Node 22. Full details in [`docs/BUILD.md`](docs/BUILD.md).
+
+**Docker**
 
 ```bash
-# 1. Backend
-cd backend
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-cp ../.env.example ../.env  # edit OPENROUTER_API_KEY
+cp .env.example .env         # set OPENROUTER_API_KEY
+docker compose up --build    # UI on http://localhost:3000, API docs on http://localhost:8000/docs
+```
+
+**Local**
+
+```bash
+# terminal 1 — backend
+cd backend && python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+cp ../.env.example ../.env   # set OPENROUTER_API_KEY
 .venv/bin/uvicorn app.main:app --reload --port 8000
 
-# 2. Frontend (in a second terminal)
-cd frontend
-npm install
-npm run dev   # http://localhost:3000
+# terminal 2 — frontend
+cd frontend && npm ci && npm run dev     # http://localhost:3000
 ```
 
-Open http://localhost:3000.
-
-## Quick start (Docker)
+Tests (no network, fake model):
 
 ```bash
-cp .env.example .env       # edit OPENROUTER_API_KEY
-docker compose up --build
+cd backend && .venv/bin/pytest -q      # 190 tests
+cd benchmark && .venv/bin/pytest -q    # 73 tests (after `pip install -e ".[dev]"` in benchmark/)
 ```
 
-## Tests
+## Stack
 
-```bash
-cd backend
-.venv/bin/pytest             # unit + e2e (mocked LLM)
-.venv/bin/python scripts/smoke_openrouter.py    # exercises a real OpenRouter key
-```
+FastAPI + SQLAlchemy + SQLite (WAL, FTS5) backend · Next.js 15 / React 19 / Tailwind / TanStack
+Query frontend · OpenRouter for interchangeable models (defaults: Claude Haiku 4.5 for the `fast`
+profile, Claude Opus 4.7 for the `reasoner` profile; any OpenRouter id can be configured or
+selected per stage) · a separate `benchmark/` package that drives the app over HTTP and grades it
+against hand-curated golden cases.
 
-The e2e test (`tests/test_e2e.py`) walks the full workflow end-to-end with a fake LLM that returns canned JSON — useful as an executable spec of the API surface.
+## Documentation
 
-## Architecture in 30 seconds
-
-- **Citations are first-class.** AI structured output is validated by Pydantic and rejected if a control claimed `partial`/`full` coverage without ≥1 citation. Pipeline retries once with a stricter prompt; on second failure the control becomes `unknown` and a `meta_issue` is recorded.
-- **Coverage vs. effectiveness are separate columns** so the UI can show "documented but weak in practice".
-- **No LLM in the score path.** `app/scoring/engine.py` is pure Python. The model only writes the explanation prose *after* scoring.
-- **Model routing is per-stage** and per-assessment overridable from the in-app `ModelPicker` (top right of every page).
-- **Single-process task registry** powers the long-running scenario generation, gap analysis, and weakness synthesis steps. SSE endpoint at `/api/tasks/{id}/events`.
-
-## Manual UI smoke test
-
-1. Start backend and frontend (see Quick start).
-2. Click **Create**, name a vendor.
-3. Type a 2-sentence description, press **Submit description**.
-4. Press **Start scoping** — the AI asks a question. Either answer it or click **Force continue**.
-5. Click **2. Inherent risk** in the left nav, then **Generate scenarios**.
-6. Click **3. Evidence** and upload at least one PDF or XLSX; wait for per-document extraction to finish.
-7. Click **4. Analysis** and run the three steps in order: cross-correlate, gap analysis, narratives & summary.
-8. Click **5. Residual score** — every band, every cited piece of evidence is visible. Every scenario has a numbered marker on the matrix and a row in the register; hovering one highlights the other, and **Inherent → residual** draws the movement arrows.
-9. Open any scenario and edit a control's effectiveness from "strong" to "weak"; the band re-renders within a second.
-
-The steps are strictly sequential and the backend enforces the order: an action whose prerequisites are
-not met (or while another job is running) is refused with a 409 and the reason is shown next to the
-disabled button. Changing an input after a step has run — editing the description or settings, uploading
-or deleting a document, regenerating scenarios, editing a scenario or control — marks every downstream
-step **stale** (kept visible, with the cause) and blocks progression until those steps are re-run.
+| Document | Read it for |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Components, the six phases and their enforcement, every AI stage, how accuracy is protected and cost kept down, how large files are handled independently of the model's context window, scoring, liveness, API and data model. |
+| [`docs/BUILD.md`](docs/BUILD.md) | Dependencies with versions, step-by-step build and run (Docker, local, benchmark), configuration reference, troubleshooting. |
+| [`benchmark/README.md`](benchmark/README.md) | The accuracy benchmark: cases, CLI, judge, metrics, dashboard. |
+| [`docs/accuracy-program/STATE.md`](docs/accuracy-program/STATE.md) | Living log of the accuracy programme (plan, baseline, per-phase reports, open decisions). |
+| [`CLAUDE.md`](CLAUDE.md) | The accuracy-first rules for changing this codebase. |
 
 ## Project layout
 
 ```
-backend/   — FastAPI + agents + scoring + parsing + tests
-frontend/  — Next.js 15 (App Router) UI
-storage/   — content-addressed uploads (gitignored)
-data/      — SQLite DB (gitignored)
+backend/     FastAPI app: API, AI agents and prompts, parsing, scoring, tests
+frontend/    Next.js UI
+benchmark/   accuracy harness (own venv, HTTP-only; never imports backend code)
+docs/        architecture, build guide, accuracy programme records
+data/        SQLite database (git-ignored)      storage/  uploaded evidence (git-ignored)
 ```
-
-## Environment
-
-See `.env.example`. Required: `OPENROUTER_API_KEY`. Everything else has sensible defaults for local use.
-
-Assessment-level inputs (set per assessment in the UI on the scoping page, or via `PATCH /api/assessments/{id}/settings`):
-the **analysis date** (`as_of_date`, default today — every prompt's "Analysis date" and every freshness judgement use it)
-and the **assessor standards profile** (required attestations, refresh windows, retention target, residency, MFA policy,
-vulnerability SLA). `LLM_DEV_CACHE=1` (dev only, see `.env.example`) caches model responses for cheap re-runs of unchanged stages.
