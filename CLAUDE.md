@@ -2,7 +2,7 @@
 
 ## Prime directive: assessment accuracy
 
-The product is a cyber risk assessment that humans rely on. **Accuracy outranks DX, speed, and code elegance.** Before any change, ask: *could this make the assessment less faithful to the evidence?* If yes, surface it in chat as **"Accuracy trade-off:"** with the risk and an alternative, and wait for confirmation before implementing.
+The product is a cyber risk assessment that humans rely on. **Accuracy outranks DX, speed, and code elegance.** Before any change, ask: *could this make the assessment less accurate, or faithful to the evidence?* If yes, surface it in chat as **"Accuracy trade-off:"** with the risk and an alternative, and wait for confirmation before implementing.
 
 Common accuracy regressions to watch for:
 - Lowering `max_tokens` budgets (they live in `backend/app/config.py` as `LLM_BUDGET_*` /
