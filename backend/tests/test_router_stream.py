@@ -361,3 +361,21 @@ async def test_cancelled_structured_call_records_model_call(fresh_db):
             await task
         row = db.query(ModelCall).one()
         assert row.ok is False and row.error == "cancelled"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_provider_ignore_list_is_sent_when_configured(monkeypatch):
+    from app.config import settings
+
+    route = respx.post(f"{BASE}/chat/completions").mock(
+        return_value=stream_response(sse(chunk("ok", finish="stop", usage=USAGE)))
+    )
+    monkeypatch.setattr(settings, "openrouter_provider_ignore", "StreamLake, Other")
+    await client().chat(MESSAGES, "test/model", max_tokens=100)
+    body = json.loads(route.calls[0].request.content)
+    assert body["provider"] == {"ignore": ["StreamLake", "Other"]}
+
+    monkeypatch.setattr(settings, "openrouter_provider_ignore", "")
+    await client().chat(MESSAGES, "test/model", max_tokens=100)
+    assert "provider" not in json.loads(route.calls[1].request.content)

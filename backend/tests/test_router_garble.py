@@ -113,3 +113,79 @@ async def test_garble_then_schema_miss_uses_both_budgets(fresh_db, fake_client):
         assert len(fake_client.calls) == 3
         assert fake_client.calls[1]["messages"] == MESSAGES
         assert fake_client.calls[2]["messages"][-2]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_failed_call_records_per_attempt_forensics(fresh_db, fake_client, caplog, tmp_path, monkeypatch):
+    """A validation failure leaves enough on model_call (and in the dump dir)
+    to explain *why*: per-attempt layer/outcome/finish reason and the output
+    tail, plus a WARNING per retry and for the final failure."""
+    import json as _json
+    import logging
+
+    from app.config import settings
+    from app.models import ModelCall
+
+    monkeypatch.setattr(settings, "llm_failure_dump_dir", tmp_path)
+    torn = '{"answer": "starts fine but the body is torn' + "x" * 3000
+    fake_client.push(torn)
+    fake_client.push(torn)
+    with caplog.at_level(logging.WARNING, logger="app.ai.router"):
+        with SessionLocal() as db:
+            with pytest.raises(OpenRouterError):
+                await call_structured(
+                    db,
+                    purpose="extract",
+                    profile="fast",
+                    messages=MESSAGES,
+                    schema=_Out,
+                    client=fake_client,
+                )
+    with SessionLocal() as db:
+        mc = db.query(ModelCall).one()
+    assert mc.ok is False
+    assert mc.finish_reason == "stop"
+    assert [a["layer"] for a in mc.attempts_json] == ["initial", "validation"]
+    assert [a["outcome"] for a in mc.attempts_json] == ["invalid_json", "invalid_json"]
+    assert mc.attempts_json[0]["max_tokens"] == settings.llm_budget_small
+    assert mc.output_tail.endswith("xxx") and len(mc.output_tail) == 2000
+    assert mc.output_head.startswith('{"answer"')
+    msgs = [r.message for r in caplog.records]
+    assert any("retrying" in m and "invalid_json" in m for m in msgs)
+    assert any("FAILED after 2 attempt(s)" in m for m in msgs)
+    dumps = list(tmp_path.glob("*_extract_a0_*.json"))
+    assert len(dumps) == 1
+    payload = _json.loads(dumps[0].read_text())
+    assert len(payload["attempts"]) == 2 and payload["attempts"][1]["content"] == torn
+
+
+@pytest.mark.asyncio
+async def test_content_filtered_response_is_never_parsed(fresh_db, fake_client, monkeypatch):
+    """A provider content-filter cut (native_finish_reason=sensitive, normalised
+    to `stop`) that lands at a JSON-valid point must not pass as a complete
+    answer: retry once with fresh context, then fail loudly naming the provider."""
+    from app.models import ModelCall
+
+    valid_but_cut = VALID  # coherent JSON — exactly the dangerous case
+    fake_client.push_filtered(valid_but_cut, native="sensitive", provider="StreamLake")
+    fake_client.push_json(VALID)
+    with SessionLocal() as db:
+        out = await call_structured(
+            db, purpose="extract", profile="fast", messages=MESSAGES, schema=_Out, client=fake_client
+        )
+    assert out.control_code == "X"
+    assert [c["messages"] for c in fake_client.calls] == [MESSAGES, MESSAGES]  # fresh context, not re-prompt
+    with SessionLocal() as db:
+        mc = db.query(ModelCall).one()
+    assert [a["outcome"] for a in mc.attempts_json] == ["filtered", "ok"]
+    assert mc.attempts_json[0]["provider"] == "StreamLake"
+
+    fake_client.push_filtered(valid_but_cut, native="sensitive", provider="StreamLake")
+    fake_client.push_filtered(valid_but_cut, native="sensitive", provider="StreamLake")
+    with SessionLocal() as db:
+        with pytest.raises(OpenRouterError) as exc:
+            await call_structured(
+                db, purpose="extract", profile="fast", messages=MESSAGES, schema=_Out, client=fake_client
+            )
+    assert exc.value.filtered is True and exc.value.truncated is False
+    assert "StreamLake" in str(exc.value) and "sensitive" in str(exc.value)

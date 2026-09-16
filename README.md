@@ -54,7 +54,7 @@ cd frontend && npm ci && npm run dev     # http://localhost:3000
 Tests (no network, fake model):
 
 ```bash
-cd backend && .venv/bin/pytest -q      # 190 tests
+cd backend && .venv/bin/pytest -q      # 194 tests
 cd benchmark && .venv/bin/pytest -q    # 73 tests (after `pip install -e ".[dev]"` in benchmark/)
 ```
 

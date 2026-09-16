@@ -49,7 +49,7 @@ The five union misses, with causes:
 ## Gate result vs BASELINE (run 5)
 - **Floor "no vendor's band further from expected than at baseline" — MET** (every rep within one band of expected;
   baseline had four vendors at distance 2).
-- **Floor "recall ≥ 35/36" — not evaluable as written and recorded as a qualified miss (user sign-off requested).**
+- **Floor "recall ≥ 35/36" — not evaluable as written; recorded as a qualified miss and signed off by the user on 2026-09-08 (see STATE.md, Decisions taken).**
   The key changed under the program: required goldens 36 → 41 (meridian/scaffold expansion) → 37 (VP-G6 removed as
   contradicting its own case standard, user 2026-08-31). Nearest equivalents: union 32/37 (86 %) vs the baseline's
   single-run 35/36 (97 %) on the smaller old key. Of the five misses, only CN-G3 existed at baseline (and was only

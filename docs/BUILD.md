@@ -271,7 +271,7 @@ can run them. `benchmark/README.md` has the full CLI, configuration and grading 
 No network or API key is needed; the backend tests use a fake model.
 
 ```bash
-# backend (190 tests, ≈ 40 s)
+# backend (194 tests, ≈ 40 s)
 cd backend && .venv/bin/pytest -q
 
 # frontend: type-check and production build
@@ -303,7 +303,9 @@ budget and liveness policies at startup and refuses inconsistent values.
 | Storage | `DB_PATH`, `DATA_DIR`, `STORAGE_DIR`, `STORAGE_SECRET` | `./data/tprm.sqlite`, `./data`, `./storage`, `change-me…` | Relative to the working directory. Set a real secret before non-local use. |
 | Ports and CORS | `FRONTEND_PORT`, `BACKEND_PORT` (Docker only), `CORS_ORIGINS` | 3000, 8000, `http://localhost:3000` | `CORS_ORIGINS` must match the browser-facing frontend origin when running outside Docker. |
 | Tunables | `FTS_TOPK`, `MAX_UPLOAD_MB` | 8, 50 | Retrieval depth in fallback gap analysis; upload limit. |
-| Output budgets | `LLM_BUDGET_SMALL/MEDIUM/LARGE`, `LLM_TRUNCATION_CAP`, `LLM_TRUNCATION_RETRIES`, `LLM_MIN_MODEL_OUTPUT_CAP` | 4096 / 8192 / 16384, 32768, 2, 32768 | Must be non-decreasing in that order. Lowering any below default is an accuracy regression (`CLAUDE.md`). |
+| Output budgets | `LLM_BUDGET_SMALL/MEDIUM/LARGE`, `LLM_TRUNCATION_CAP`, `LLM_TRUNCATION_RETRIES`, `LLM_MIN_MODEL_OUTPUT_CAP` | 16384 / 32768 / 65536, 128000, 2, 128000 | Must be non-decreasing in that order. Budgets bound hidden reasoning too. Lowering any below default is an accuracy regression (`CLAUDE.md`). |
+| Provider routing | `OPENROUTER_PROVIDER_IGNORE` | empty | Comma-separated OpenRouter provider names sent as `provider.ignore`; set `StreamLake` (as `.env.example` does) — its content filter truncates security/jurisdiction text. |
+| LLM failure forensics | `LLM_FAILURE_DUMP_DIR`, `LOG_LEVEL` | unset, `INFO` | Failed calls are always summarised on `model_call` (`attempts_json`, `finish_reason`, `provider`, `generation_id`, `output_head/tail`) and logged at WARNING; the dump dir additionally stores every attempt's full output as JSON. |
 | Liveness | `LLM_CONNECT_TIMEOUT_S`, `LLM_STREAM_IDLE_S`, `LLM_CONTENT_SILENCE_S`, `LLM_CALL_MAX_S`, `TASK_IDLE_TIMEOUT_S`, `TASK_MAX_RUNTIME_S` | 30, 180, 3600, 3600, 600, 14400 | Inactivity-based; see ARCHITECTURE §6. |
 | Deployment | `APP_ENV`, `LLM_DEV_CACHE` | `dev`, `0` | The dev cache is refused when `APP_ENV=production`; the benchmark refuses to measure against a backend that has it on. |
 
@@ -315,8 +317,11 @@ budget and liveness policies at startup and refuses inconsistent values.
 |---|---|
 | Frontend image build fails: `"/app/public": not found` | `frontend/public/` must exist (it holds only a `.gitkeep`). Restore it if it was deleted. |
 | Every AI action returns 502 `OPENROUTER_API_KEY is not set` | The key is missing from the `.env` the backend actually read (repo root first, then `backend/.env`). |
-| 502 `OpenRouter 402` or credits errors mid-stage | OpenRouter reserves credit for the full requested `max_tokens` per in-flight call; a ladder retry reserves up to `LLM_TRUNCATION_CAP`. Top up rather than lowering budgets. |
-| Backend log: `Configured reasoner model fails the capability check` | The configured model's output cap or context window is below what the budget policy needs. Pick a model that meets ARCHITECTURE §4.1 or accept truncated stages. |
+| 502 `OpenRouter 402` or credits errors mid-stage | OpenRouter reserves credit for the full requested `max_tokens` per in-flight call; a ladder retry reserves up to `LLM_TRUNCATION_CAP` (128 000 by default, times the stage's concurrency). Top up rather than lowering budgets. |
+| Backend log: `Configured reasoner model fails the capability check` (or `fast model`) | The configured model's catalogued output cap or context window is below its profile's requirement (reasoner ≥ `LLM_MIN_MODEL_OUTPUT_CAP` = 128 000 output tokens, fast ≥ `LLM_BUDGET_MEDIUM` = 32 768). The app still starts; the truncation ladder clamps at the model's own cap and fails loudly there. Pick a model that meets ARCHITECTURE §4.1. |
+| A stage fails with `… failed validation after retry`, `… output truncated at max_tokens=…` or another LLM call error | Read the WARNING lines in the backend log and the `model_call` row for the call: `attempts_json` (per attempt: layer, requested budget, outcome, finish reasons, provider), `output_head` / `output_tail`. Set `LLM_FAILURE_DUMP_DIR` and re-run to capture the complete output of every attempt as JSON. |
+| A stage fails with `… cut by the provider's content filter (… native_finish_reason=sensitive)` | OpenRouter routed the call to a host whose content filter stopped generation on security / data-residency text. Add that provider to `OPENROUTER_PROVIDER_IGNORE` (`.env.example` already excludes `StreamLake`) or switch models. |
+| No `app.*` lines in the backend log | Root logging is configured from `LOG_LEVEL` (default `INFO`); uvicorn's `--log-level` covers only its own loggers. |
 | Button disabled with "… is stale" / 409 responses | Sequential workflow enforcement: re-run the named upstream step. See ARCHITECTURE §2.1. |
 | "Task lost on server restart — re-run the step" | The backend restarted (or `--reload` fired) while a job ran. Re-run; nothing is silently completed. |
 | UI shows the API as unreachable while the backend is up | Frontend built or started with the wrong `BACKEND_URL`, or `CORS_ORIGINS` does not match the browser origin when the UI is served from another host/port. |

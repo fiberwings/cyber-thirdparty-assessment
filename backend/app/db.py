@@ -85,6 +85,12 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     # Liveness / streaming router: per-call telemetry and failure forensics
     ("model_call", "first_token_ms", "INTEGER"),
     ("model_call", "output_head", "TEXT"),
+    ("model_call", "output_tail", "TEXT"),
+    ("model_call", "finish_reason", "VARCHAR(30)"),
+    ("model_call", "native_finish_reason", "VARCHAR(60)"),
+    ("model_call", "provider", "VARCHAR(60)"),
+    ("model_call", "generation_id", "VARCHAR(80)"),
+    ("model_call", "attempts_json", "JSON"),
     ("task", "last_activity_at", "DATETIME"),
     # Structured task progress for the AI activity indicator
     ("task", "stats", "JSON NOT NULL DEFAULT '{}'"),

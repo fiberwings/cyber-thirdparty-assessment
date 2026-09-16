@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,6 +43,13 @@ class Settings(BaseSettings):
         default="cyber-tprm-assessment",
         alias="OPENROUTER_APP_NAME",
     )
+    # Comma-separated OpenRouter provider names never to route to (sent as
+    # `provider.ignore`). OpenRouter load-balances one model id across many
+    # hosts; a host whose content filter stops generation on security or
+    # jurisdiction text (StreamLake on glm-5.3-flash, 2026-09: native finish
+    # reason `sensitive`, torn JSON reported as `stop`) makes assessments fail
+    # or — worse — lose findings. Empty = OpenRouter's default routing.
+    openrouter_provider_ignore: str = Field(default="", alias="OPENROUTER_PROVIDER_IGNORE")
 
     # Default model profiles (overridable per call)
     model_fast: str = Field(default="anthropic/claude-haiku-4.5", alias="MODEL_FAST")
@@ -73,14 +81,22 @@ class Settings(BaseSettings):
 
     # LLM output-token budget policy. Three tiers, sized per call kind
     # (small = short structured outputs, medium = single-item detail work,
-    # large = dense synthesis over many items). Lowering any of these below
+    # large = dense synthesis over many items). The budgets bound *hidden
+    # reasoning too*: providers count thinking tokens against max_tokens, and
+    # the reasoners in use spend 70-85 % of their output on it, so a tier must
+    # leave room for the model to think before it writes (2026-09 matrix:
+    # ~10k reasoning tokens per extraction call). Lowering any of these below
     # the shipped defaults is a flagged accuracy regression — see CLAUDE.md.
-    llm_budget_small: int = Field(default=4096, alias="LLM_BUDGET_SMALL")
-    llm_budget_medium: int = Field(default=8192, alias="LLM_BUDGET_MEDIUM")
-    llm_budget_large: int = Field(default=16384, alias="LLM_BUDGET_LARGE")
+    llm_budget_small: int = Field(default=16384, alias="LLM_BUDGET_SMALL")
+    llm_budget_medium: int = Field(default=32768, alias="LLM_BUDGET_MEDIUM")
+    llm_budget_large: int = Field(default=65536, alias="LLM_BUDGET_LARGE")
     # Ceiling for the automatic retry-with-more-tokens on truncated output,
-    # and how many doublings the ladder may take before failing loudly.
-    llm_truncation_cap: int = Field(default=32768, alias="LLM_TRUNCATION_CAP")
+    # and how many doublings the ladder may take before failing loudly. The
+    # ceiling is deliberately below every catalogued model's output cap
+    # (128 000 = Claude Opus/Sonnet; glm-5.3-flash is 131 072, DeepSeek 384 000)
+    # and is the only runaway guard on a looping generation — do not set it to
+    # a model's absolute maximum.
+    llm_truncation_cap: int = Field(default=128_000, alias="LLM_TRUNCATION_CAP")
     llm_truncation_retries: int = Field(default=2, alias="LLM_TRUNCATION_RETRIES")
     # Liveness-based limits (the client streams completions, so it observes
     # progress instead of guessing a duration — any model speed works):
@@ -112,7 +128,18 @@ class Settings(BaseSettings):
     task_activity_persist_s: float = Field(default=10.0, alias="TASK_ACTIVITY_PERSIST_S")
     # Minimum model output cap a reasoner-profile model must support — the
     # truncation ladder can request up to llm_truncation_cap tokens.
-    llm_min_model_output_cap: int = Field(default=32768, alias="LLM_MIN_MODEL_OUTPUT_CAP")
+    llm_min_model_output_cap: int = Field(default=128_000, alias="LLM_MIN_MODEL_OUTPUT_CAP")
+    # Failure forensics: when set, every failed LLM call writes one JSON file
+    # (all attempts: request budget, finish reasons, provider, usage and the
+    # complete model output) into this directory. Off by default; failures are
+    # always summarised on model_call regardless.
+    llm_failure_dump_dir: Optional[Path] = Field(default=None, alias="LLM_FAILURE_DUMP_DIR")
+    # Root log level for the app's own loggers (uvicorn keeps its own config).
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    @property
+    def provider_ignore_list(self) -> list[str]:
+        return [p.strip() for p in self.openrouter_provider_ignore.split(",") if p.strip()]
 
     @model_validator(mode="after")
     def _validate_budget_policy(self) -> "Settings":

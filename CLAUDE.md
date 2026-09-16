@@ -12,6 +12,12 @@ Common accuracy regressions to watch for:
 - Bypassing the split-on-truncate contract: a `finish_reason == "length"` response must
   never be parsed or persisted, and callers rely on the loud `truncated=True` failure to
   subdivide oversized batches — never paper over it with silent budget inflation
+- Parsing, persisting or caching a response the provider's content filter cut: OpenRouter
+  reports these as a normal `stop`, so the router checks `native_finish_reason` (`sensitive`,
+  `content_filter`, …) and fails with `filtered=True`; a cut at a JSON-valid point would
+  otherwise pass as a complete, shorter answer
+- Weakening per-call forensics (`model_call.attempts_json`, `output_tail`, the WARNING logs
+  on retry/failure): diagnosing a lost finding depends on them
 - Validation/retry logic that masks bad model output instead of surfacing it
 - Truncating service descriptions, evidence chunks, or the control catalogue to save tokens
 - Defaults / fallbacks that silently downgrade scoring when inputs are missing

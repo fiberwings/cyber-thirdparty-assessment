@@ -529,6 +529,8 @@ No network, no LLM cost:
 |---|---|
 | `backend at ... is not healthy` | Backend not running, or wrong `BENCH_BACKEND_URL` (check `GET /api/health`) |
 | Case errors with `OpenRouter 404 ... deprecated` in a *pipeline* stage | The **app's** configured model (`.env` `MODEL_FAST`/`MODEL_REASONER`) is deprecated on OpenRouter — fix the app config, or pin per-run `--override`s |
+| Case errors with `... cut by the provider's content filter (... native_finish_reason=sensitive)` in a *pipeline* stage | OpenRouter routed the **app's** call to a host whose content filter stopped generation — add the provider to the app's `OPENROUTER_PROVIDER_IGNORE` (`.env`) and re-run; the bench only records the stage error text |
+| A case fails inside an app stage and the error text is not enough | Diagnose on the app side: `model_call.attempts_json` / `provider` / `native_finish_reason` / `output_tail` for that assessment, or start the backend with `LLM_FAILURE_DUMP_DIR` set to get the full output of every attempt |
 | Case errors with `OpenRouter 403 ... Terms Of Service` | The OpenRouter key is blocked for that model/provider — pick a model the key can use (probe with a direct `curl` to `/chat/completions`) |
 | `status=judge_error` | Pipeline succeeded but the judge failed twice (parse/structural). The report snapshot is kept; failed judge attempts are in `judge_call` for diagnosis |
 | Task 404 mid-run | Backend restarted (in-process task registry). The runner falls back to the durable `phases` state once; keep a single stable backend during a batch |

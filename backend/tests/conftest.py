@@ -40,6 +40,15 @@ class _Truncated:
         self.content = content
 
 
+class _Filtered:
+    """Marker wrapper: the provider's content filter cut this canned response."""
+
+    def __init__(self, content: str, native: str, provider: str):
+        self.content = content
+        self.native = native
+        self.provider = provider
+
+
 class FakeOpenRouterClient:
     """Returns canned JSON/text responses in FIFO order."""
 
@@ -56,6 +65,11 @@ class FakeOpenRouterClient:
     def push_truncated(self, content: str = "") -> None:
         """Queue a response whose finish_reason is `length` (truncated output)."""
         self.queue.append(_Truncated(content))
+
+    def push_filtered(self, content: Any, native: str = "sensitive", provider: str = "X") -> None:
+        """Queue a response the provider's content filter cut: normalised
+        finish_reason `stop`, native reason `native` (OpenRouter's shape)."""
+        self.queue.append(_Filtered(content if isinstance(content, str) else json.dumps(content), native, provider))
 
     async def chat(
         self,
@@ -83,8 +97,13 @@ class FakeOpenRouterClient:
             )
         content = self.queue.popleft()
         finish_reason = "stop"
+        native_finish = "stop"
+        provider = "Fake"
         if isinstance(content, _Truncated):
             finish_reason = "length"
+            content = content.content
+        elif isinstance(content, _Filtered):
+            native_finish, provider = content.native, content.provider
             content = content.content
         if not isinstance(content, str):
             content = json.dumps(content)
@@ -93,8 +112,10 @@ class FakeOpenRouterClient:
                 {
                     "message": {"role": "assistant", "content": content},
                     "finish_reason": finish_reason,
+                    "native_finish_reason": native_finish,
                 }
             ],
+            "provider": provider,
             # Mirrors OpenRouter's always-on usage accounting (cost in USD credits).
             "usage": {
                 "prompt_tokens": 100,

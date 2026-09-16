@@ -380,6 +380,21 @@ class ModelCall(Base):
     # Forensics for failed calls only: the first 8k chars the model produced
     # (partial stream, truncated, garbled or schema-invalid output). NULL on ok.
     output_head: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Failed calls only: the last 2k chars of the most recent output — a torn
+    # JSON body shows at the tail what a head cannot.
+    output_tail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # How the *last* attempt ended, as reported by OpenRouter: normalised
+    # finish_reason (stop/length/error), the provider's native reason, which
+    # provider served it and the generation id (look it up post-hoc with
+    # GET https://openrouter.ai/api/v1/generation?id=…).
+    finish_reason: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    native_finish_reason: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    provider: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    generation_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    # One entry per live attempt of this logical call (initial, truncation,
+    # validation, garble): budget requested, outcome, finish reasons, provider,
+    # per-attempt token split. See router._AttemptLog.
+    attempts_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

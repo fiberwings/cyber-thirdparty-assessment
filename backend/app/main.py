@@ -26,6 +26,27 @@ from app.db import init_db
 from app.tasks import reconcile_interrupted_tasks, registry
 
 
+def _configure_logging() -> None:
+    """Give the app's own loggers (app.ai.router retry/failure forensics,
+    task watchdog) a handler and level. uvicorn configures only its own
+    loggers, so without this `app.*` WARNINGs reach stderr via Python's bare
+    last-resort handler and INFO is dropped. LOG_LEVEL (default INFO)."""
+    import logging
+
+    root = logging.getLogger()
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    if not root.handlers:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+    else:
+        root.setLevel(level)
+
+
+_configure_logging()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     import asyncio

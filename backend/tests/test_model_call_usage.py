@@ -125,6 +125,10 @@ def test_additive_migration_adds_usage_columns():
                 r[1] for r in db.connection().exec_driver_sql("PRAGMA table_info(model_call)")
             }
             assert {"cached_tokens", "reasoning_tokens", "cost_source"} <= cols
+            assert {
+                "output_tail", "finish_reason", "native_finish_reason",
+                "provider", "generation_id", "attempts_json",
+            } <= cols
             old = db.query(ModelCall).one()
             assert (old.cached_tokens, old.reasoning_tokens, old.cost_usd) == (0, 0, 0.0)
             assert old.cost_source == ""

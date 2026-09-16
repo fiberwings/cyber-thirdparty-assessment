@@ -88,7 +88,29 @@ MODEL_CAPS: dict[str, tuple[int, int]] = {
     "anthropic/claude-haiku-4.5": (200_000, 64_000),
     "openai/gpt-5": (400_000, 128_000),
     "openai/gpt-5-mini": (400_000, 128_000),
+    # OpenRouter catalogue, 2026-09 (top_provider.max_completion_tokens).
+    "z-ai/glm-5.3-flash": (1_310_720, 131_072),
+    "z-ai/glm-5.1": (200_000, 131_072),
+    "deepseek/deepseek-v4-pro-0813": (1_048_576, 384_000),
+    "deepseek/deepseek-v4.1-flash": (1_048_576, 384_000),
+    "minimax/minimax-m3": (1_048_576, 512_000),
 }
+
+
+def model_output_cap(model_id: str) -> int | None:
+    """The catalogued output cap for `model_id`, or None when unknown."""
+    caps = MODEL_CAPS.get(model_id)
+    return caps[1] if caps else None
+
+
+def _ladder_ceiling(model_id: str) -> int:
+    """How far the truncation ladder may climb for this model: the configured
+    cap, clamped to the model's catalogued output cap so a model that stops
+    inside the ladder (Haiku: 64k) fails loudly with `truncated=True` at its
+    own limit instead of a provider 400 that callers cannot act on."""
+    cap = settings.llm_truncation_cap
+    model_cap = model_output_cap(model_id)
+    return min(cap, model_cap) if model_cap else cap
 
 # The whole-bundle gap-analysis path packs up to ~100K input tokens plus
 # prompts, so reasoner models need a genuinely large context window.
@@ -118,18 +140,17 @@ def validate_model_capability(model_id: str, profile: str) -> str | None:
         need_out = settings.llm_min_model_output_cap
         need_ctx = _REASONER_MIN_CONTEXT
     else:
-        # Deepest ladder a fast-profile call can reach: medium-tier start
-        # (attestation), doubled llm_truncation_retries times, clamped.
-        need_out = min(
-            settings.llm_truncation_cap,
-            settings.llm_budget_medium * (2 ** settings.llm_truncation_retries),
-        )
+        # Fast-profile calls start at the medium tier (attestation). The ladder
+        # clamps to the model's own output cap (`_ladder_ceiling`), so the model
+        # only has to honour the starting budget; a truncation then climbs as
+        # far as the model allows and fails loudly with truncated=True there.
+        need_out = settings.llm_budget_medium
         need_ctx = _FAST_MIN_CONTEXT
     if max_out < need_out:
         return (
             f"model '{model_id}' supports at most {max_out} output tokens, but the "
-            f"{profile} profile's truncation ladder can request up to {need_out} — "
-            "truncated (incomplete) assessments would be unavoidable"
+            f"{profile} profile requires at least {need_out} — truncated "
+            "(incomplete) assessments would be unavoidable"
         )
     if ctx < need_ctx:
         return (
@@ -237,7 +258,7 @@ async def _chat_maybe_cached(
         messages, model, response_format=response_format,
         temperature=temperature, max_tokens=max_tokens,
     )
-    if _finish_reason(resp) != "length":
+    if _finish_reason(resp) != "length" and not _content_filtered(resp):
         _cache_put(db, key, model, prompt_sha, resp)
     return resp, False
 
@@ -252,10 +273,15 @@ class OpenRouterError(RuntimeError):
         truncated: bool = False,
         partial: bool = False,
         output_head: str = "",
+        filtered: bool = False,
     ):
         super().__init__(message)
         self.transient = transient
         self.upstream_code = upstream_code
+        # True when the provider's content filter stopped the generation
+        # (see _content_filtered): the output is incomplete but splitting the
+        # input will not help — route around the provider instead.
+        self.filtered = filtered
         # True when the model hit max_tokens — callers can fall back to a
         # two-phase strategy instead of just bubbling up.
         self.truncated = truncated
@@ -341,6 +367,8 @@ class OpenRouterClient:
         }
         if response_format:
             body["response_format"] = response_format
+        if settings.provider_ignore_list:
+            body["provider"] = {"ignore": settings.provider_ignore_list}
         timeout = httpx.Timeout(
             connect=settings.llm_connect_timeout_s,
             read=settings.llm_stream_idle_s,
@@ -430,9 +458,11 @@ class OpenRouterClient:
         self, client: httpx.AsyncClient, url: str, body: dict[str, Any], state: _StreamState
     ) -> dict[str, Any]:
         finish: str | None = None
+        native_finish: str | None = None
         usage: dict[str, Any] | None = None
         resp_id: str | None = None
         resp_model: str | None = None
+        provider: str | None = None
         async with client.stream("POST", url, headers=self._headers(), json=body) as resp:
             if resp.status_code >= 400:
                 text = (await resp.aread()).decode("utf-8", "replace")[:500]
@@ -491,6 +521,7 @@ class OpenRouterClient:
                     )
                 resp_id = chunk.get("id") or resp_id
                 resp_model = chunk.get("model") or resp_model
+                provider = chunk.get("provider") or provider
                 if chunk.get("usage"):
                     usage = chunk["usage"]
                     state.usage = usage
@@ -518,6 +549,8 @@ class OpenRouterClient:
                     fr = choice.get("finish_reason")
                     if fr:
                         finish = fr
+                    if choice.get("native_finish_reason"):
+                        native_finish = choice["native_finish_reason"]
                     if fr == "error":
                         # Provider fault without an error envelope (seen on
                         # glm-5.3-flash, 0 tokens after 8 s): safe to retry
@@ -536,12 +569,14 @@ class OpenRouterClient:
         return {
             "id": resp_id,
             "model": resp_model,
+            "provider": provider,
             "object": "chat.completion",
             "choices": [
                 {
                     "index": 0,
                     "message": {"role": "assistant", "content": "".join(state.parts)},
                     "finish_reason": finish,
+                    "native_finish_reason": native_finish,
                 }
             ],
             "usage": usage,
@@ -564,6 +599,28 @@ def _finish_reason(response: dict[str, Any]) -> str | None:
         return response["choices"][0].get("finish_reason")
     except (KeyError, IndexError, TypeError):
         return None
+
+
+# Finish reasons meaning "the provider's content filter stopped the
+# generation". OpenRouter normalises most of these to a plain `stop`, so the
+# provider's native reason has to be checked too (StreamLake: `sensitive`).
+_CONTENT_FILTER_REASONS = {"content_filter", "content_filtered", "sensitive", "safety", "blocked"}
+
+
+def _content_filtered(response: dict[str, Any]) -> str | None:
+    """The filter reason when the provider cut this response, else None. A
+    filtered response is truncated output whatever its `finish_reason` says:
+    it must never be parsed (a cut at a JSON-valid point would pass as a
+    complete, shorter answer and silently lose findings)."""
+    try:
+        choice = response["choices"][0]
+    except (KeyError, IndexError, TypeError):
+        return None
+    for key in ("native_finish_reason", "finish_reason"):
+        r = choice.get(key)
+        if isinstance(r, str) and r.lower() in _CONTENT_FILTER_REASONS:
+            return r
+    return None
 
 
 # OpenRouter usage accounting is always on: every non-streaming response carries
@@ -613,6 +670,135 @@ class _UsageTally:
             )
 
 
+# ---------- per-attempt forensics ----------
+#
+# One logical call may make several live attempts (truncation ladder, schema
+# retry, garble retry). When it fails, "failed validation after retry" alone
+# says nothing about *why*: which provider served it, how it finished
+# (`stop` with a torn body vs `length`), how many tokens went to hidden
+# reasoning, what the tail of the output looked like. `_AttemptLog` records
+# that per attempt, summarises it on `model_call.attempts_json`, logs every
+# retry and final failure at WARNING, and — when LLM_FAILURE_DUMP_DIR is set —
+# writes the complete output of each attempt to disk.
+
+_OUTPUT_TAIL_CHARS = 2000
+
+
+@dataclass
+class _Attempt:
+    n: int
+    layer: str  # initial | truncation | validation | garble | filter
+    max_tokens: int
+    outcome: str = ""  # ok | length | filtered | invalid_json | schema_miss | garbled | transport | cancelled
+    finish_reason: str | None = None
+    native_finish_reason: str | None = None
+    provider: str | None = None
+    generation_id: str | None = None
+    model: str | None = None
+    cached: bool = False
+    input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_tokens: int = 0
+    content_chars: int = 0
+    error: str = ""
+    content: str = field(default="", repr=False)  # full text — dump file only
+
+    def note_response(self, resp: dict[str, Any], content: str, *, from_cache: bool) -> None:
+        choice = (resp.get("choices") or [{}])[0] if isinstance(resp.get("choices"), list) else {}
+        usage = resp.get("usage") or {}
+        cdet = usage.get("completion_tokens_details") or {}
+        self.finish_reason = choice.get("finish_reason")
+        self.native_finish_reason = choice.get("native_finish_reason")
+        self.provider = resp.get("provider")
+        self.generation_id = resp.get("id")
+        self.model = resp.get("model")
+        self.cached = from_cache
+        self.input_tokens = int(usage.get("prompt_tokens") or 0)
+        self.output_tokens = int(usage.get("completion_tokens") or 0)
+        self.reasoning_tokens = int(cdet.get("reasoning_tokens") or 0)
+        self.content = content
+        self.content_chars = len(content)
+
+    def summary(self) -> dict[str, Any]:
+        d = {k: v for k, v in self.__dict__.items() if k != "content"}
+        d["error"] = self.error[:500]
+        return d
+
+
+class _AttemptLog:
+    def __init__(self, purpose: str, model: str, assessment_id: int | None):
+        self.purpose = purpose
+        self.model = model
+        self.assessment_id = assessment_id
+        self.attempts: list[_Attempt] = []
+
+    def begin(self, layer: str, max_tokens: int) -> _Attempt:
+        a = _Attempt(n=len(self.attempts) + 1, layer=layer, max_tokens=max_tokens)
+        self.attempts.append(a)
+        return a
+
+    @property
+    def last(self) -> _Attempt | None:
+        return self.attempts[-1] if self.attempts else None
+
+    def summaries(self) -> list[dict[str, Any]]:
+        return [a.summary() for a in self.attempts]
+
+    def output_tail(self) -> str | None:
+        """Last chars of the most recent output — a torn JSON body shows what
+        happened at the end, `output_head` shows how it started."""
+        for a in reversed(self.attempts):
+            if a.content:
+                return a.content[-_OUTPUT_TAIL_CHARS:]
+        return None
+
+    def _describe(self, a: _Attempt) -> str:
+        return (
+            f"attempt {a.n} [{a.layer}] max_tokens={a.max_tokens} finish={a.finish_reason}"
+            f"/{a.native_finish_reason} provider={a.provider} gen={a.generation_id} "
+            f"tokens in/out/reasoning={a.input_tokens}/{a.output_tokens}/{a.reasoning_tokens} "
+            f"content_chars={a.content_chars}"
+        )
+
+    def warn_retry(self, a: _Attempt, why: str) -> None:
+        _logger.warning(
+            "LLM call '%s' (%s) retrying — %s: %s", self.purpose, self.model, why, self._describe(a)
+        )
+
+    def finish(self, *, ok: bool, error: str, cancelled: bool = False) -> None:
+        """Log the outcome of a failed call and write the dump file, if configured."""
+        if ok or cancelled:
+            return
+        _logger.warning(
+            "LLM call '%s' (%s, assessment %s) FAILED after %d attempt(s): %s\n  %s",
+            self.purpose, self.model, self.assessment_id, len(self.attempts), error[:500],
+            "\n  ".join(self._describe(a) + (f" outcome={a.outcome}" if a.outcome else "")
+                        for a in self.attempts),
+        )
+        self._dump(error)
+
+    def _dump(self, error: str) -> None:
+        d = settings.llm_failure_dump_dir
+        if not d:
+            return
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            safe_purpose = "".join(c if c.isalnum() or c in "-_" else "_" for c in self.purpose)
+            path = d / f"{ts}_{safe_purpose}_a{self.assessment_id or 0}_{id(self) & 0xFFFF:04x}.json"
+            payload = {
+                "purpose": self.purpose,
+                "model": self.model,
+                "assessment_id": self.assessment_id,
+                "error": error,
+                "attempts": [dict(a.summary(), content=a.content) for a in self.attempts],
+            }
+            path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            _logger.warning("LLM failure dump written to %s", path)
+        except Exception as e:  # forensics must never break the call path
+            _logger.warning("Could not write LLM failure dump: %s", e)
+
+
 def _strip_code_fence(content: str) -> str:
     s = content.strip()
     if s.startswith("```"):
@@ -657,6 +843,58 @@ def _looks_garbled(content: str, data: Any, schema: type[BaseModel]) -> bool:
     return not (len(keys) == 1 and isinstance(next(iter(data.values())), dict))
 
 
+def _record_call(
+    db: Session,
+    *,
+    assessment_id: int | None,
+    purpose: str,
+    profile: str,
+    model: str,
+    prompt_sha: str,
+    latency_ms: int,
+    first_token_ms: int | None,
+    usage: _UsageTally,
+    ok: bool,
+    error: str,
+    output_head: str,
+    cached: bool,
+    log: _AttemptLog,
+) -> None:
+    """Persist the ModelCall row for one logical call (never raises)."""
+    last = log.last
+    try:
+        db.add(
+            ModelCall(
+                assessment_id=assessment_id,
+                purpose=purpose,
+                profile=profile,
+                model_id=model,
+                prompt_sha=prompt_sha,
+                latency_ms=latency_ms,
+                first_token_ms=first_token_ms,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cached_tokens,
+                reasoning_tokens=usage.reasoning_tokens,
+                cost_usd=usage.cost_usd,
+                cost_source=usage.cost_source,
+                ok=ok,
+                error="" if ok else (error or "unknown")[:2000],
+                output_head=None if ok else (output_head or None),
+                output_tail=None if ok else log.output_tail(),
+                cached=cached,
+                finish_reason=last.finish_reason if last else None,
+                native_finish_reason=last.native_finish_reason if last else None,
+                provider=last.provider if last else None,
+                generation_id=last.generation_id if last else None,
+                attempts_json=log.summaries(),
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+
+
 async def call_structured(
     db: Session,
     *,
@@ -685,18 +923,24 @@ async def call_structured(
     first_token_ms: int | None = None
     started = time.perf_counter()
     usage = _UsageTally()
+    log = _AttemptLog(purpose, model, assessment_id)
     ok = False
+    cancelled = False
     transport_err: OpenRouterError | None = None
 
     validation_retried = False
     garble_retried = False
+    filter_retried = False
     truncation_retries = 0
-    tokens = max_tokens
+    ceiling = _ladder_ceiling(model)
+    tokens = min(max_tokens, ceiling)
+    layer = "initial"
     cached = False
 
     activity.call_started(purpose)
     try:
         while True:
+            attempt = log.begin(layer, tokens)
             try:
                 resp, from_cache = await _chat_maybe_cached(
                     db, cli, messages, model,
@@ -710,6 +954,10 @@ async def call_structured(
                 last_err = str(e)
                 transport_err = e
                 output_head = e.output_head[:_OUTPUT_HEAD_CHARS]
+                attempt.outcome = "transport"
+                attempt.error = last_err
+                attempt.content = e.output_head
+                attempt.content_chars = len(e.output_head)
                 if e.partial:
                     # Tokens were generated and (possibly) billed but no usage
                     # chunk arrived: count an unmetered live attempt so the
@@ -719,26 +967,51 @@ async def call_structured(
 
             content = _extract_content(resp)
             last_content = content
+            attempt.note_response(resp, content, from_cache=from_cache)
             if not from_cache:  # a cache hit spent no tokens
                 usage.add(resp)
                 meta = resp.get("_meta") or {}
                 if first_token_ms is None and meta.get("first_token_ms") is not None:
                     first_token_ms = int(meta["first_token_ms"])
 
+            filter_reason = _content_filtered(resp)
+            if filter_reason:
+                # The provider's content filter cut the output. Never parse it;
+                # retry once with the original messages (a fresh route usually
+                # lands on another host), then fail loudly naming the provider.
+                attempt.outcome = "filtered"
+                attempt.error = f"provider content filter: {filter_reason}"
+                if not filter_retried:
+                    filter_retried = True
+                    last_err = (
+                        f"provider {attempt.provider} content filter ({filter_reason}); "
+                        "retried with fresh context"
+                    )
+                    layer = "filter"
+                    log.warn_retry(attempt, f"provider content filter ({filter_reason}), retrying")
+                    continue
+                output_head = content[:_OUTPUT_HEAD_CHARS]
+                raise OpenRouterError(
+                    f"Structured call '{purpose}' was cut by the provider's content filter "
+                    f"({attempt.provider}: native_finish_reason={filter_reason}) on two attempts "
+                    "— exclude that provider (OPENROUTER_PROVIDER_IGNORE) or use another model.",
+                    filtered=True,
+                )
+
             if _finish_reason(resp) == "length":
                 # Output was truncated. A truncated response must never be
                 # parsed or masked — retry with a doubled output budget (up to
-                # the configured ladder depth and ceiling), then fail loudly so
-                # callers can segment the work.
-                if (
-                    truncation_retries < settings.llm_truncation_retries
-                    and tokens < settings.llm_truncation_cap
-                ):
+                # the configured ladder depth and the ceiling for this model),
+                # then fail loudly so callers can segment the work.
+                attempt.outcome = "length"
+                if truncation_retries < settings.llm_truncation_retries and tokens < ceiling:
                     truncation_retries += 1
                     last_err = (
                         f"truncated at max_tokens={tokens}; retried with larger budget"
                     )
-                    tokens = min(tokens * 2, settings.llm_truncation_cap)
+                    tokens = min(tokens * 2, ceiling)
+                    layer = "truncation"
+                    log.warn_retry(attempt, f"output truncated, doubling budget to {tokens}")
                     continue
                 output_head = content[:_OUTPUT_HEAD_CHARS]
                 raise OpenRouterError(
@@ -753,11 +1026,17 @@ async def call_structured(
                 data = json.loads(_strip_code_fence(content))
                 obj = schema.model_validate(data)
                 ok = True
+                attempt.outcome = "ok"
                 return obj
             except (json.JSONDecodeError, ValidationError) as e:
                 last_err = f"{type(e).__name__}: {e}"
                 output_head = content[:_OUTPUT_HEAD_CHARS]
+                attempt.outcome = (
+                    "invalid_json" if isinstance(e, json.JSONDecodeError) else "schema_miss"
+                )
+                attempt.error = last_err
                 if _looks_garbled(content, data, schema):
+                    attempt.outcome = "garbled"
                     if garble_retried:
                         # Garbled twice: fail loudly. Never feed garbage into
                         # the schema retry — it would only reproduce it.
@@ -769,6 +1048,8 @@ async def call_structured(
                         "garbled output; retried with fresh context. "
                         f"First attempt: {last_err[:300]}"
                     )
+                    layer = "garble"
+                    log.warn_retry(attempt, "garbled output, retrying with fresh context")
                     continue
                 if not validation_retried:
                     validation_retried = True
@@ -785,6 +1066,8 @@ async def call_structured(
                             ),
                         },
                     ]
+                    layer = "validation"
+                    log.warn_retry(attempt, f"{attempt.outcome}, re-prompting with validator error")
                     continue
                 break
 
@@ -795,37 +1078,21 @@ async def call_structured(
         )
     except asyncio.CancelledError:
         last_err = "cancelled"
+        cancelled = True
         output_head = output_head or last_content[:_OUTPUT_HEAD_CHARS]
+        if log.last is not None and not log.last.outcome:
+            log.last.outcome = "cancelled"
         raise
     finally:
         activity.call_finished()
         latency_ms = int((time.perf_counter() - started) * 1000)
         usage.warn_if_cost_missing(purpose, model)
-        try:
-            db.add(
-                ModelCall(
-                    assessment_id=assessment_id,
-                    purpose=purpose,
-                    profile=profile,
-                    model_id=model,
-                    prompt_sha=prompt_sha,
-                    latency_ms=latency_ms,
-                    first_token_ms=first_token_ms,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cached_tokens=usage.cached_tokens,
-                    reasoning_tokens=usage.reasoning_tokens,
-                    cost_usd=usage.cost_usd,
-                    cost_source=usage.cost_source,
-                    ok=ok,
-                    error="" if ok else (last_err or "unknown")[:2000],
-                    output_head=None if ok else (output_head or None),
-                    cached=cached,
-                )
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
+        log.finish(ok=ok, error=last_err, cancelled=cancelled)
+        _record_call(
+            db, assessment_id=assessment_id, purpose=purpose, profile=profile, model=model,
+            prompt_sha=prompt_sha, latency_ms=latency_ms, first_token_ms=first_token_ms,
+            usage=usage, ok=ok, error=last_err, output_head=output_head, cached=cached, log=log,
+        )
 
 
 async def call_text(
@@ -848,7 +1115,9 @@ async def call_text(
     prompt_sha = _hash_prompt(messages)
     started = time.perf_counter()
     usage = _UsageTally()
+    log = _AttemptLog(purpose, model, assessment_id)
     ok = False
+    cancelled = False
     err = ""
     content = ""
     output_head: str = ""
@@ -857,28 +1126,50 @@ async def call_text(
     activity.call_started(purpose)
     try:
         try:
-            tokens = max_tokens
+            ceiling = _ladder_ceiling(model)
+            tokens = min(max_tokens, ceiling)
+            layer = "initial"
             truncation_retries = 0
+            filter_retried = False
             while True:
+                attempt = log.begin(layer, tokens)
                 resp, from_cache = await _chat_maybe_cached(
                     db, cli, messages, model, response_format=None,
                     temperature=temperature, max_tokens=tokens, prompt_sha=prompt_sha,
                 )
                 cached = cached or from_cache
                 content = _extract_content(resp)
+                attempt.note_response(resp, content, from_cache=from_cache)
                 if not from_cache:
                     usage.add(resp)
                     meta = resp.get("_meta") or {}
                     if first_token_ms is None and meta.get("first_token_ms") is not None:
                         first_token_ms = int(meta["first_token_ms"])
+                filter_reason = _content_filtered(resp)
+                if filter_reason:
+                    attempt.outcome = "filtered"
+                    attempt.error = f"provider content filter: {filter_reason}"
+                    if not filter_retried:
+                        filter_retried = True
+                        layer = "filter"
+                        log.warn_retry(attempt, f"provider content filter ({filter_reason}), retrying")
+                        continue
+                    output_head = content[:_OUTPUT_HEAD_CHARS]
+                    raise OpenRouterError(
+                        f"Text call '{purpose}' was cut by the provider's content filter "
+                        f"({attempt.provider}: native_finish_reason={filter_reason}) on two "
+                        "attempts — exclude that provider (OPENROUTER_PROVIDER_IGNORE) or use "
+                        "another model.",
+                        filtered=True,
+                    )
                 if _finish_reason(resp) == "length":
                     # A cut-off narrative must never be persisted silently.
-                    if (
-                        truncation_retries < settings.llm_truncation_retries
-                        and tokens < settings.llm_truncation_cap
-                    ):
+                    attempt.outcome = "length"
+                    if truncation_retries < settings.llm_truncation_retries and tokens < ceiling:
                         truncation_retries += 1
-                        tokens = min(tokens * 2, settings.llm_truncation_cap)
+                        tokens = min(tokens * 2, ceiling)
+                        layer = "truncation"
+                        log.warn_retry(attempt, f"output truncated, doubling budget to {tokens}")
                         continue
                     output_head = content[:_OUTPUT_HEAD_CHARS]
                     raise OpenRouterError(
@@ -888,42 +1179,32 @@ async def call_text(
                         truncated=True,
                     )
                 ok = True
+                attempt.outcome = "ok"
                 return content
         except OpenRouterError as e:
             err = str(e)
             output_head = output_head or e.output_head[:_OUTPUT_HEAD_CHARS]
+            if log.last is not None and not log.last.outcome:
+                log.last.outcome = "transport"
+                log.last.error = err
+                log.last.content = e.output_head
+                log.last.content_chars = len(e.output_head)
             if e.partial:
                 usage.add({})  # unmetered live attempt → cost-missing warning
             raise
         except asyncio.CancelledError:
             err = "cancelled"
+            cancelled = True
+            if log.last is not None and not log.last.outcome:
+                log.last.outcome = "cancelled"
             raise
     finally:
         activity.call_finished()
         latency_ms = int((time.perf_counter() - started) * 1000)
         usage.warn_if_cost_missing(purpose, model)
-        try:
-            db.add(
-                ModelCall(
-                    assessment_id=assessment_id,
-                    purpose=purpose,
-                    profile=profile,
-                    model_id=model,
-                    prompt_sha=prompt_sha,
-                    latency_ms=latency_ms,
-                    first_token_ms=first_token_ms,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cached_tokens=usage.cached_tokens,
-                    reasoning_tokens=usage.reasoning_tokens,
-                    cost_usd=usage.cost_usd,
-                    cost_source=usage.cost_source,
-                    ok=ok,
-                    error=err[:2000],
-                    output_head=None if ok else (output_head or None),
-                    cached=cached,
-                )
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
+        log.finish(ok=ok, error=err, cancelled=cancelled)
+        _record_call(
+            db, assessment_id=assessment_id, purpose=purpose, profile=profile, model=model,
+            prompt_sha=prompt_sha, latency_ms=latency_ms, first_token_ms=first_token_ms,
+            usage=usage, ok=ok, error=err, output_head=output_head, cached=cached, log=log,
+        )
