@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from app.ai.router import OpenRouterError, call_structured, call_text
+from app.ai.router import LLMError, call_structured, call_text
 from app.config import settings
 from app.db import SessionLocal
 
@@ -65,7 +65,7 @@ async def test_structured_truncation_exhausts_retries_fails_loudly(fresh_db, fak
     for _ in range(settings.llm_truncation_retries + 1):
         fake_client.push_truncated("{}")
     with SessionLocal() as db:
-        with pytest.raises(OpenRouterError) as exc:
+        with pytest.raises(LLMError) as exc:
             await call_structured(
                 db,
                 purpose="test",
@@ -84,6 +84,8 @@ async def test_structured_budget_capped(fresh_db, fake_client):
     fake_client.push_truncated("{}")
     fake_client.push_truncated("{}")
     fake_client.push_json({"answer": "ok"})
+    # Start at 3/8 of the cap: one doubling fits, the second is clamped.
+    start = settings.llm_truncation_cap * 3 // 8
     with SessionLocal() as db:
         out = await call_structured(
             db,
@@ -91,15 +93,41 @@ async def test_structured_budget_capped(fresh_db, fake_client):
             profile="fast",
             messages=MESSAGES,
             schema=_Out,
-            max_tokens=12000,
+            max_tokens=start,
             client=fake_client,
         )
     assert out.answer == "ok"
     assert [c["max_tokens"] for c in fake_client.calls] == [
-        12000,
-        24000,
+        start,
+        start * 2,
         settings.llm_truncation_cap,
     ]
+
+
+@pytest.mark.asyncio
+async def test_ladder_clamps_to_the_models_catalogued_output_cap(fresh_db, fake_client, monkeypatch):
+    """A model whose output cap sits inside the ladder (Haiku: 64k) climbs to
+    its own cap and then fails loudly with truncated=True — never a provider
+    400 the callers cannot act on."""
+    from app.ai.router import MODEL_CAPS
+
+    monkeypatch.setitem(MODEL_CAPS, "test/small-out", (200_000, 5000))
+    fake_client.push_truncated("{}")
+    fake_client.push_truncated("{}")
+    with SessionLocal() as db:
+        with pytest.raises(LLMError) as exc:
+            await call_structured(
+                db,
+                purpose="test",
+                profile="fast",
+                messages=MESSAGES,
+                schema=_Out,
+                max_tokens=3000,
+                model_override="test/small-out",
+                client=fake_client,
+            )
+    assert exc.value.truncated is True
+    assert [c["max_tokens"] for c in fake_client.calls] == [3000, 5000]
 
 
 @pytest.mark.asyncio
@@ -124,7 +152,7 @@ async def test_truncation_policy_is_tunable(fresh_db, fake_client, monkeypatch):
     fake_client.push_truncated("{}")
     fake_client.push_truncated("{}")
     with SessionLocal() as db:
-        with pytest.raises(OpenRouterError) as exc:
+        with pytest.raises(LLMError) as exc:
             await call_structured(
                 db,
                 purpose="test",
@@ -159,7 +187,7 @@ async def test_text_truncation_retries_then_fails_loudly(fresh_db, fake_client):
     for _ in range(settings.llm_truncation_retries + 1):
         fake_client.push_truncated("half")
     with SessionLocal() as db:
-        with pytest.raises(OpenRouterError) as exc:
+        with pytest.raises(LLMError) as exc:
             await call_text(
                 db,
                 purpose="narrative",

@@ -14,16 +14,16 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from .conftest import FakeOpenRouterClient, seed_running_task
+from .conftest import FakeLLMClient, seed_running_task
 
 RUNNING_TASK_ID = "11111111-1111-1111-1111-111111111111"
 
 
 @pytest.fixture()
 def guarded_client(monkeypatch, fresh_db):
-    fake = FakeOpenRouterClient()
+    fake = FakeLLMClient()
     import app.ai.router as router_mod
-    monkeypatch.setattr(router_mod, "OpenRouterClient", lambda *a, **kw: fake)
+    monkeypatch.setattr(router_mod, "LLMClient", lambda *a, **kw: fake)
     return fake
 
 

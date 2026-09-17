@@ -35,11 +35,11 @@ Related documents:
                                                           └───────┬──────────────┬───────┘
                                                                   │              │ HTTPS (streamed SSE)
                                                        ┌──────────▼──────┐  ┌────▼──────────────┐
-                                                       │ SQLite (WAL)    │  │ OpenRouter         │
-                                                       │ data/tprm.sqlite│  │ /chat/completions  │
-                                                       │ + FTS5 index    │  │ any model id       │
-                                                       │ storage/ files  │  └────────────────────┘
-                                                       └─────────────────┘
+                                                       │ SQLite (WAL)    │  │ OpenRouter or      │
+                                                       │ data/tprm.sqlite│  │ Azure AI Foundry   │
+                                                       │ + FTS5 index    │  │ /chat/completions  │
+                                                       │ storage/ files  │  │ per model ref      │
+                                                       └─────────────────┘  └────────────────────┘
 
 ┌─────────────────────────┐
 │  benchmark/  (separate) │  HTTP-only driver + LLM judge + dashboard (:8100); never imports
@@ -53,18 +53,19 @@ Related documents:
 | Backend | FastAPI, SQLAlchemy 2, Pydantic 2, httpx | Single process, single user. Background jobs run on the event loop in a task registry; no external queue. |
 | Database | SQLite in WAL mode with `busy_timeout=5000` | One file (`DB_PATH`). Additive schema migrations run at startup (`app/db.py`, `_ADDITIVE_COLUMNS`). An FTS5 virtual table `chunk_fts` is kept in sync with `chunk` by triggers. |
 | File storage | Content-addressed directory (`STORAGE_DIR/<sha256>/<filename>`) | Downloads are HMAC-signed with `STORAGE_SECRET`. |
-| LLM access | OpenRouter (`OPENROUTER_API_KEY`) | Two named profiles, `fast` and `reasoner`, each mapped to a model id; every call is streamed. |
+| LLM access | OpenRouter (`OPENROUTER_API_KEY`) and/or Azure AI Foundry (`AZURE_OPENAI_*`, `AZURE_INFERENCE_*`) | Two named profiles, `fast` and `reasoner`, each mapped to a model ref whose scheme picks the provider (`azure:` / `foundry:` / bare = OpenRouter); every call is streamed through one engine. |
 | Benchmark | Separate Python package under `benchmark/` | Drives the app over HTTP with prepared vendor cases and grades the output. |
 
 ### Backend module map
 
 | Path | Responsibility |
 |---|---|
-| `app/main.py` | App factory, CORS, `/api/health`, startup (schema migration, interrupted-task reconciliation, model capability warning, watchdog). |
+| `app/main.py` | App factory, CORS, `/api/health`, root logging (`LOG_LEVEL`), startup (schema migration, interrupted-task reconciliation, model capability warning, watchdog). |
 | `app/config.py` | Every setting, with validation of the budget and liveness policies. |
 | `app/workflow.py` | Canonical step order, prerequisite guards (409), mutual exclusion, stale-on-write invalidation. |
 | `app/tasks.py`, `app/activity.py` | Task registry (in-memory + durable `task` table), structured progress, liveness watchdog, cancellation, SSE stream. |
-| `app/ai/router.py` | OpenRouter client: streaming, liveness deadlines, JSON-schema validation, retry ladder, dev cache, cost telemetry (`model_call` table). |
+| `app/ai/router.py` | The LLM client: one streaming engine, liveness deadlines, JSON-schema validation, retry ladder, provider content-filter detection, per-attempt forensics, dev cache, cost telemetry (`model_call` table). |
+| `app/ai/providers/*` | Provider dialects behind the engine: `openrouter.py`, `azure.py` (Azure OpenAI deployments and the Foundry Models endpoint), `registry.py` (model-ref parsing, `AZURE_DEPLOYMENT_META`, credential and startup checks). A dialect owns only the URL, auth, body parameters and how its stream labels the upstream and its content filter. |
 | `app/ai/agents/*` | One module per AI stage (see §3). |
 | `app/ai/prompts/*.md` | System prompts, loaded by name. |
 | `app/ai/catalog/controls.json` | The standard control catalogue: 47 controls in 15 families (Identity, Data, Cryptography, Vulnerability Management, Assurance, …). |
@@ -106,7 +107,10 @@ Notes on the table:
   band immediately.
 - The evidence step has no single job: it is *done* when every uploaded document has a
   `weakness_extracted_at` stamp, *running* while any document extraction is live, and *error* if
-  any extraction failed (the evidence page offers a per-document retry).
+  any extraction failed (the evidence page offers a per-document retry). The stamp is written only
+  when every call of the extraction succeeded — a two-phase extraction with one failed detail call
+  keeps the findings it did detail (the re-run dedupes on the quote key) but leaves the document
+  in *error*, so a partially extracted document never passes downstream as complete.
 - Uploading is allowed while another document is still extracting (same step); every other
   mutation is refused while any job runs for the assessment.
 
@@ -298,7 +302,10 @@ Persistence rules (both modes):
 - Failures are **per control**: the error is stored on `ControlAssessment.last_error`, the phase
   still completes with a warning listing the failed targets, and they can be re-run individually
   (`POST /api/expected-controls/{id}/assess-ai`) or together (`only_failed=true`). Only a run where
-  *every* call failed is a run-level failure.
+  *every* call failed is a run-level failure. The phase's `failed_targets` list is the contract
+  for anything that scores the result: the benchmark reads it after the stage and records the
+  case as invalid (`error_stage = gap_analysis`, `gap_failed_controls`) rather than grading a
+  report whose F1 would measure the outage.
 - A control the analyst has edited (`is_locked_by_user`) is never overwritten by the model.
 
 ### 3.6 Scoring (deterministic)
@@ -362,16 +369,37 @@ evidence. The design choices below follow from it; the cost savings are real but
 | `reasoner` | `anthropic/claude-opus-4.7` (`MODEL_REASONER`) | Scenario generation, weakness extraction, confirmation, merge, cross-correlation, gap analysis, executive summary | Every judgement that decides what is reported or what the score is. |
 | `fast` | `anthropic/claude-haiku-4.5` (`MODEL_FAST`) | Scoping Q&A, attestation-profile extraction, per-scenario narrative prose | Narrow tasks whose output is either validated structurally (the profile) or explanatory only (prose after scoring). |
 
-Both are OpenRouter model ids and can be changed in `.env`; the alternatives listed in
+Both are **model refs** and can be changed in `.env`; the alternatives listed in
 `MODEL_*_ALTERNATIVES` populate the per-assessment **Settings → Model routing** page, where each
 of six stages (`scoping`, `scenarios`, `gap_analysis`, `weaknesses`, `narrative`,
 `executive_summary`) can be overridden (`PATCH /api/assessments/{id}/model-overrides`). Moving a
 reasoner stage to the fast profile is an accuracy trade-off and is treated as such.
 
+A model ref's scheme decides the provider per call, so OpenRouter and Azure can be mixed freely
+(`app/ai/providers/registry.py`):
+
+| Ref | Provider | Sent as `model` | Capability lookup |
+|---|---|---|---|
+| `anthropic/claude-opus-4.7` or `openrouter:…` | OpenRouter (`/api/v1/chat/completions`, Bearer key, `provider.ignore`) | the id | the id |
+| `azure:<deployment>` | Azure OpenAI deployment (`{AZURE_OPENAI_ENDPOINT}/openai/v1/chat/completions`, `api-key`, `max_completion_tokens`) | the deployment | the canonical id from `AZURE_DEPLOYMENT_META` |
+| `foundry:<deployment>` | Foundry Models endpoint (`{AZURE_INFERENCE_ENDPOINT}/models/chat/completions`, `api-key`, `extra-parameters: pass-through`, `max_tokens`) | the deployment | idem |
+
+An Azure deployment name says nothing about the model behind it, so `AZURE_DEPLOYMENT_META`
+(`<deployment>=<canonical id>[;temp=fixed],…`) declares it; a deployment used as a profile
+default without an entry is a startup ERROR because the ladder ceiling and the guard below depend
+on it. `temp=fixed` omits the `temperature` parameter for deployments that only accept their
+default (o-series / GPT-5 reasoning reject the profile's 0.2 with a 400 that names the flag): an
+explicit sampling change, warned at startup and recorded per attempt as `temperature_sent: null`
+— the router never strips a parameter on its own. Azure reports token counts but no cost, so
+those calls are recorded with `cost_usd = 0`, `cost_source = ""` and no under-reporting warning.
+
 A **capability guard** (`router.py`, `MODEL_CAPS`) checks configured models against a local table
 of context windows and output caps: a reasoner model must offer ≥ 200 000 context tokens and an
-output cap ≥ `LLM_MIN_MODEL_OUTPUT_CAP` (32 768), a fast model ≥ 100 000 context; unknown ids only
-warn, so novel models remain usable.
+output cap ≥ `LLM_MIN_MODEL_OUTPUT_CAP` (128 000), a fast model ≥ 100 000 context and an output
+cap ≥ `LLM_BUDGET_MEDIUM` (its starting budget); unknown ids only warn, so novel models remain
+usable, while a ref that cannot be routed at all (unknown scheme, provider credentials not set)
+is rejected. The truncation ladder (§4.2) also clamps at the catalogued output cap, so a model
+that stops inside the ladder fails loudly at its own limit rather than with a provider error.
 
 ### 4.2 Structured output that is validated, never patched
 
@@ -385,11 +413,31 @@ Every non-prose call goes through `call_structured` in `app/ai/router.py`:
    with fresh context — feeding garbage back reproduces it. Garbled twice fails loudly.
 4. A response with `finish_reason == "length"` is **never parsed or persisted**. The router retries
    with a doubled output budget up to `LLM_TRUNCATION_RETRIES` (2) times, clamped at
-   `LLM_TRUNCATION_CAP` (32 768), then raises `truncated=True` so the *caller* can split its input
-   (§5.4). Silent budget inflation and partial parsing are both prohibited.
-5. Every logical call, successful or not, is recorded in `model_call` with purpose, model, tokens
+   `LLM_TRUNCATION_CAP` (128 000) and at the model's catalogued output cap, then raises
+   `truncated=True` so the *caller* can split its input (§5.4). Silent budget inflation and partial
+   parsing are both prohibited. Budgets bound the model's *hidden reasoning* as well as its answer
+   (providers count thinking tokens against `max_tokens`; the reasoners measured in 2026-09 spent
+   70–85 % of their output thinking), which is why the tiers are sized well above the JSON they
+   produce.
+5. A response the **provider's content filter** cut is treated the same way, whatever
+   `finish_reason` says: OpenRouter normalises such stops to `stop`, so the router checks the
+   provider's `native_finish_reason` (`sensitive`, `content_filter`, …), never parses or caches the body
+   (a cut at a JSON-valid point would pass as a complete, shorter answer), retries once with fresh
+   context, then raises `filtered=True` naming the provider. `OPENROUTER_PROVIDER_IGNORE` routes
+   around hosts known to do this (StreamLake on glm-5.3-flash cut a data-residency finding naming
+   Hong Kong SAR, 2026-09). Azure's filter is stricter on security text and configured per
+   deployment: a cut completion arrives as `finish_reason: content_filter` with the category in
+   `content_filter_results` (surfaced as native reason `content_filter:<category>/<severity>`),
+   and a rejected *prompt* as HTTP 400 `content_filter` — both are `filtered=True`, the remedy
+   being the deployment's content-filter policy in Foundry or another deployment.
+6. Every logical call, successful or not, is recorded in `model_call` with purpose, model, tokens
    (input, output, cached, reasoning) and metered cost summed across all of its attempts, latency,
-   time to first token, and, on failure, the first 8 000 characters of output for forensics.
+   time to first token, how the last attempt finished (`finish_reason`, the provider's
+   `native_finish_reason`, `provider`, `generation_id`) and a per-attempt summary
+   (`attempts_json`: layer, requested budget, outcome, dialect, temperature sent, token split). On failure it also keeps the
+   first 8 000 and last 2 000 characters of output, every retry and the final failure are logged at
+   WARNING, and with `LLM_FAILURE_DUMP_DIR` set the complete output of each attempt is written to
+   disk — enough to tell a torn `stop` body from a `length` cut without re-running the call.
 
 ### 4.3 Citation discipline
 
@@ -456,10 +504,10 @@ that no longer exists.
 | Batches of related codes over one bundle | Five codes share one copy of the bundle in the prompt instead of five copies. |
 | Fast profile for narrow tasks | Scoping turns, attestation profiles and narrative prose do not need the reasoner. |
 | Small outputs by construction | Two-phase scenario generation and two-phase extraction keep each output well under budget so the truncation ladder is rarely climbed. |
-| Output budget tiers (`LLM_BUDGET_SMALL/MEDIUM/LARGE` = 4 096 / 8 192 / 16 384) | Each call requests what its kind needs; OpenRouter reserves credit for the full `max_tokens`, so over-asking has a real cost. Lowering any tier below the default is an accuracy regression and is flagged as such. |
+| Output budget tiers (`LLM_BUDGET_SMALL/MEDIUM/LARGE` = 16 384 / 32 768 / 65 536) | Each call requests what its kind needs, including room for hidden reasoning; OpenRouter reserves credit for the full `max_tokens`, so over-asking has a real (reservation, not spend) cost. Lowering any tier below the default is an accuracy regression and is flagged as such. |
 | Bounded concurrency (4 for fan-out stages, 2 for whole-bundle batches) | Throughput within provider limits; the lower whole-bundle concurrency is deliberate so later batches see earlier batches' contradictions. |
-| Dev-only response cache (`LLM_DEV_CACHE=1`, refused when `APP_ENV=production`) | Re-running an unchanged stage while developing costs nothing; cache hits are recorded with zero tokens so cost accounting stays honest; the benchmark refuses to measure against a backend with it on. |
-| Metered cost per call | `model_call.cost_usd` from OpenRouter's `usage.cost`, so cost per stage and per assessment is a fact, not an estimate (`scripts/backfill_cost.py` estimates only for rows predating metering and labels them so). |
+| Dev-only response cache (`LLM_DEV_CACHE=1`, refused when `APP_ENV=production`) | Re-running an unchanged stage while developing costs nothing; only complete responses are cached (never a `length` cut or a content-filtered body); cache hits are recorded with zero tokens so cost accounting stays honest; the benchmark refuses to measure against a backend with it on. |
+| Metered cost per call | `model_call.cost_usd` from OpenRouter's `usage.cost`, so cost per stage and per assessment is a fact, not an estimate (`scripts/backfill_cost.py` estimates only for rows predating metering and labels them so). Azure does not meter: its calls are recorded unmetered (`cost_source = ""`), tokens exact. |
 
 The accuracy programme's closing report (`docs/accuracy-program/phases/06-full-validation.md`)
 records the combined effect on six benchmark vendors: bands within one level of expected for
@@ -470,7 +518,7 @@ records the combined effect on six benchmark vendors: bands within one level of 
 
 ## 5. Large files and variable context windows
 
-The configured models change (any OpenRouter id can be set) and their context windows and output
+The configured models change (any OpenRouter id or Azure deployment can be set) and their context windows and output
 caps differ by an order of magnitude. Accuracy must not depend on that. The rule throughout the
 pipeline is: **decide the shape of the work from the size of the input, keep every unit of work
 well inside the window, never drop evidence to make something fit, and split the input when the
@@ -576,7 +624,7 @@ is not implemented today and would be an accuracy trade-off to design.
 A model's output cap is the other variable. Every structured stage handles it the same way:
 
 1. The router climbs the budget ladder: start at the call's tier, double on `length`, up to
-   32 768, at most twice (§4.2).
+   `LLM_TRUNCATION_CAP` (128 000) or the model's own output cap, at most twice (§4.2).
 2. If it still truncates, the router raises `truncated=True` **without parsing** — a truncated
    JSON list is indistinguishable from a complete short one, so parsing it would silently lose
    findings.
@@ -600,8 +648,10 @@ fails; a cut-off paragraph is never persisted.
 ### 5.5 What this guarantees
 
 - Changing the model changes speed and cost, not which evidence is read: the units of work are
-  sized by the code, and the guard refuses (with a logged error) reasoner models whose output cap
-  cannot honour the ladder.
+  sized by the code; the startup guard logs an error for a configured model whose output cap is
+  below its profile's requirement (reasoner ≥ `LLM_MIN_MODEL_OUTPUT_CAP`, fast ≥ `LLM_BUDGET_MEDIUM`),
+  and the truncation ladder clamps at the model's catalogued cap and fails loudly there rather than
+  persisting a cut answer.
 - Every persisted finding is grounded in a chunk the pipeline actually showed the model, and the
   quote in it can be located again.
 - Every count the UI shows (findings extracted, controls assessed, candidates reviewed) is a
@@ -620,23 +670,41 @@ connection is detected within minutes.
 |---|---|---|
 | `LLM_CONNECT_TIMEOUT_S` | 30 | TCP / TLS connect and pool acquisition. |
 | `LLM_STREAM_IDLE_S` | 180 | No bytes at all on the socket (keepalive comments count) → dead connection. |
+| `LLM_STREAM_IDLE_NO_KEEPALIVE_S` | = `LLM_CONTENT_SILENCE_S` | The same tier for providers that send no keepalives (Azure): the socket is legitimately silent while the model reasons, so this replaces the 180 s read timeout there; a heartbeat pings the task every `TASK_WATCHDOG_INTERVAL_S` meanwhile so the watchdog stays quiet. Validated `LLM_STREAM_IDLE_S ≤ it ≤ LLM_CALL_MAX_S`. |
 | `LLM_CONTENT_SILENCE_S` | 3 600 | Socket alive but no output or reasoning token. Equal to the ceiling by default (tier off): models that reason *hidden* look exactly like a stall; streamed reasoning deltas count as activity. |
 | `LLM_CALL_MAX_S` | 3 600 | Hard per-attempt ceiling. |
 | `TASK_IDLE_TIMEOUT_S` | 600 | Watchdog: task with no activity (must be ≥ stream idle). |
 | `TASK_MAX_RUNTIME_S` | 14 400 | Watchdog: task age (must be ≥ call max). |
 
-Retry rules: a transient failure (network error, 408 / 429 / 5xx, provider `finish_reason:
-error`, empty stream) is retried once **only if no output token has arrived**; after partial
-output the call fails with `partial=True` and the received head is kept for diagnosis — never a
-second bill and never a silent fallback. Cancelling the task closes the stream. Configuration is
+Retry rules: a transient failure (network error, 408 / 429 / 5xx / 524, provider `finish_reason:
+error`, empty stream, a read timeout with nothing received) is retried **only if no output token
+has arrived**, up to `LLM_TRANSIENT_RETRIES` (6) times with exponential backoff — 1.5 s doubling,
+stretched to the provider's `Retry-After` on a 429 or 503 when it asks for longer, every wait
+capped by `LLM_RETRY_AFTER_CAP_S` (60 s), so the worst case is ≈ 95 s. Every retry is logged at
+WARNING and recorded on the attempt (`attempts_json[].transport_retries`: status, wait, the
+provider's `x-ratelimit-*` headers on a 429) so a lost stage shows what was tried. A 429 storm that
+outlasts the loop is a provisioning problem, not a retry one — Azure admits a request by reserving
+its `max_completion_tokens` against the deployment's tokens-per-minute, so a stage running
+`N` concurrent calls needs `N × budget` TPM (gap analysis: 4 × 65 536 ≈ 262 k); the WARNING prints
+the limit headers next to the reserved budget so the remedy (raise the deployment's TPM slider or
+lower the stage concurrency) is in the log. After partial output the call fails with
+`partial=True` and the received head is kept for diagnosis — never a second bill and never a silent
+fallback; the hard ceiling is never retried either. The one deliberate exception is a response the provider's
+content filter cut (§4.2 point 5): the body is complete from the transport's point of view but
+unusable, so it is retried once with fresh context and then fails with `filtered=True`. Cancelling the task closes the stream. Configuration is
 validated at startup (`0 < connect ≤ idle ≤ silence ≤ call max`; watchdog ≥ router limits), and
 lowering the liveness limits below the defaults is documented as an accuracy trade-off because a
 timed-out stage is a lost assessment step, never a faster one.
 
 Per-call telemetry in `model_call`: purpose, profile, model id, prompt hash, latency, time to
 first token, input / output / cached / reasoning tokens, metered cost and its source, success,
-error text, output head on failure, and whether the dev cache served it. The benchmark reads this
-table to attribute cost per stage.
+error text, how the last attempt finished (`finish_reason`, `native_finish_reason`, `provider`,
+`generation_id`), a per-attempt summary (`attempts_json`: layer, requested budget, outcome, finish
+reasons, provider, dialect, temperature sent, token split, transport retries), the first 8 000 and last 2 000 characters of output on failure,
+and whether the dev cache served it. Every retry and every final failure is also logged at WARNING
+(root logging level `LOG_LEVEL`, default `INFO`), and `LLM_FAILURE_DUMP_DIR`, when set, writes the
+complete output of every attempt of a failed call to a JSON file. The benchmark reads this table
+to attribute cost per stage.
 
 ---
 
@@ -672,7 +740,7 @@ Interactive documentation is served by FastAPI at `/docs` on the backend port.
 | `control_assessment`, `control_evidence` | The verdict per expected control (coverage, effectiveness, rationale, user lock, unresolved citations, last error / run) and its bound citations (chunk, polarity, quote). |
 | `weakness` | Every finding: source chunk and document, severity, description, quote, `kind_signal`, `mapped_control_codes`, `unmatched`, `origin` (document / gap_analysis / attestation_check), `status` (candidate / confirmed / evidence_note / dropped / merged), `review` (decision, reason, confidence, evidence strength, merge trail), `evidence_refs`, `dedupe_key` (unique per assessment). |
 | `meta_issue` | Evidence-quality flags per control (`insufficient_info`, `vague_answer`, `missing_doc`) and `unscored_finding` audit rows. |
-| `model_call` | One row per LLM attempt group (§6). |
+| `model_call` | One row per logical LLM call, with `attempts_json` itemising its attempts (§6). |
 | `llm_cache` | Dev-only response cache. |
 | `task` | Durable mirror of the job registry with `last_activity_at` and structured `stats`. |
 
@@ -683,8 +751,10 @@ Alembic. New databases are created with `Base.metadata.create_all`.
 
 ## 9. Testing strategy
 
-- `backend/tests/` (190 tests): unit tests for parsing, scoring, the router's truncation /
-  garble / streaming / liveness behaviour, workflow guards and stale stamps, task progress, the
+- `backend/tests/` (233 tests): unit tests for parsing, scoring, the router's truncation /
+  garble / streaming / liveness behaviour, the provider dialects (model refs, Azure request shape
+  and stream reassembly, its content filter, `Retry-After`, the no-keepalive tier and heartbeat,
+  unmetered cost, `temp=fixed`), workflow guards and stale stamps, task progress, the
   attestation checks, each accuracy-programme phase, and an end-to-end walk of the whole API with
   a fake model returning canned JSON (`test_e2e.py`). Two tests assert that the frontend's copies
   of the risk matrix and the settings stage list match the backend.

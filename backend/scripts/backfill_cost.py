@@ -29,7 +29,9 @@ import httpx
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 # Only rows that were really billed and never priced: live (not dev-cache),
-# with tokens, and with no metered or prior estimated cost.
+# with tokens, and with no metered or prior estimated cost. Azure calls
+# (`azure:` / `foundry:` refs) are unmetered by design and have no OpenRouter
+# list price — they are left alone.
 _CANDIDATES_SQL = """
 SELECT id, model_id, input_tokens, output_tokens
 FROM model_call
@@ -37,6 +39,8 @@ WHERE COALESCE(cost_usd, 0) = 0
   AND COALESCE(cost_source, '') = ''
   AND NOT COALESCE(cached, 0)
   AND (COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) > 0
+  AND model_id NOT LIKE 'azure:%'
+  AND model_id NOT LIKE 'foundry:%'
 """
 
 
@@ -68,7 +72,8 @@ def estimate(rows: list[tuple[int, str, int, int]], pricing: dict[str, Price]) -
         s["rows"] += 1
         s["in"] += in_tok or 0
         s["out"] += out_tok or 0
-        price = pricing.get(model_id)
+        # `openrouter:` refs price under their bare id.
+        price = pricing.get(model_id.removeprefix("openrouter:"))
         if price is None:
             continue
         s["priced"] = True

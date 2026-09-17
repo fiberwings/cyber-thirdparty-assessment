@@ -29,8 +29,9 @@ attestations, freshness windows, residency, MFA policy, SLAs) and per-stage mode
 
 ## Quick start
 
-Requirements: an [OpenRouter](https://openrouter.ai) API key and either Docker, or Python 3.11+
-and Node 22. Full details in [`docs/BUILD.md`](docs/BUILD.md).
+Requirements: an [OpenRouter](https://openrouter.ai) API key (or Azure AI Foundry credentials,
+see below) and either Docker, or Python 3.11+ and Node 22. Full details in
+[`docs/BUILD.md`](docs/BUILD.md).
 
 **Docker**
 
@@ -54,17 +55,28 @@ cd frontend && npm ci && npm run dev     # http://localhost:3000
 Tests (no network, fake model):
 
 ```bash
-cd backend && .venv/bin/pytest -q      # 190 tests
+cd backend && .venv/bin/pytest -q      # 194 tests
 cd benchmark && .venv/bin/pytest -q    # 73 tests (after `pip install -e ".[dev]"` in benchmark/)
 ```
 
 ## Stack
 
 FastAPI + SQLAlchemy + SQLite (WAL, FTS5) backend · Next.js 15 / React 19 / Tailwind / TanStack
-Query frontend · OpenRouter for interchangeable models (defaults: Claude Haiku 4.5 for the `fast`
-profile, Claude Opus 4.7 for the `reasoner` profile; any OpenRouter id can be configured or
-selected per stage) · a separate `benchmark/` package that drives the app over HTTP and grades it
-against hand-curated golden cases.
+Query frontend · OpenRouter or Azure AI Foundry for interchangeable models (defaults: Claude Haiku
+4.5 for the `fast` profile, Claude Opus 4.7 for the `reasoner` profile; any OpenRouter id or Azure
+deployment can be configured or selected per stage) · a separate `benchmark/` package that drives
+the app over HTTP and grades it against hand-curated golden cases.
+
+### Using Azure AI Foundry instead of (or alongside) OpenRouter
+
+A model ref decides the provider per call: a bare id goes through OpenRouter,
+`azure:<deployment>` to an Azure OpenAI deployment and `foundry:<deployment>` to the Foundry
+Models inference endpoint. Set the endpoint and API key for the surface you use
+(`AZURE_OPENAI_*` / `AZURE_INFERENCE_*`), declare which catalogue model each deployment serves in
+`AZURE_DEPLOYMENT_META` (so the output-budget policy applies to the right model), then point a
+profile or a per-stage override at it, e.g. `MODEL_REASONER=azure:gpt5-prod`. Everything above
+the wire — truncation ladder, content-filter detection, retries, forensics, liveness — is shared;
+see `.env.example` for the full block and `docs/ARCHITECTURE.md` §4.1 for the details.
 
 ## Documentation
 

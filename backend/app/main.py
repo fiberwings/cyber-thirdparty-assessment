@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.ai.router import OpenRouterError
+from app.ai.router import LLMError
 from app.api import (
     assessments,
     document_weaknesses,
@@ -24,6 +24,27 @@ from app.ai.router import warn_if_configured_models_undersized
 from app.config import settings
 from app.db import init_db
 from app.tasks import reconcile_interrupted_tasks, registry
+
+
+def _configure_logging() -> None:
+    """Give the app's own loggers (app.ai.router retry/failure forensics,
+    task watchdog) a handler and level. uvicorn configures only its own
+    loggers, so without this `app.*` WARNINGs reach stderr via Python's bare
+    last-resort handler and INFO is dropped. LOG_LEVEL (default INFO)."""
+    import logging
+
+    root = logging.getLogger()
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    if not root.handlers:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+    else:
+        root.setLevel(level)
+
+
+_configure_logging()
 
 
 @asynccontextmanager
@@ -57,8 +78,8 @@ app.add_middleware(
 )
 
 
-@app.exception_handler(OpenRouterError)
-async def _openrouter_error_handler(_: Request, exc: OpenRouterError) -> JSONResponse:
+@app.exception_handler(LLMError)
+async def _llm_error_handler(_: Request, exc: LLMError) -> JSONResponse:
     status = 502
     return JSONResponse(
         status_code=status,

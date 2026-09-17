@@ -40,7 +40,7 @@ from sqlalchemy.orm import Session
 from app import activity
 from app.ai.context import analysis_datetime, standards_block
 from app.ai.prompts import load as load_prompt
-from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
+from app.ai.router import LLMClient, LLMError, call_structured
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Assessment, ExpectedControl, MetaIssue, Scenario, Weakness
@@ -343,7 +343,7 @@ async def run(
     assessment_id: int,
     *,
     on_progress: ProgressCb | None = None,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
 ) -> dict[str, int]:
     """Map every unmatched Weakness to existing controls or emergent scenarios.
 
@@ -428,7 +428,7 @@ async def run(
             with SessionLocal() as inner:
                 try:
                     outs = [await correlate(inner, batch)]
-                except OpenRouterError as e:
+                except LLMError as e:
                     if not e.truncated or len(batch) < 2:
                         raise
                     # Even the router's enlarged-budget retry truncated: split
@@ -488,8 +488,8 @@ async def run(
             f"cross_correlation: {len(failures)}/{n} clusters failed; "
             f"first failure: {first}"
         )
-        if isinstance(first, OpenRouterError):
-            raise OpenRouterError(
+        if isinstance(first, LLMError):
+            raise LLMError(
                 msg,
                 transient=first.transient,
                 upstream_code=first.upstream_code,

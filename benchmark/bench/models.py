@@ -53,6 +53,11 @@ class CaseResult(Base):
     status: Mapped[str] = mapped_column(String(16), default="ok")
     error_stage: Mapped[str] = mapped_column(String(32), default="")
     error_detail: Mapped[str] = mapped_column(Text, default="")
+    # Controls the gap-analysis phase finished without assessing (backend
+    # `failed_targets`). 0 for a scored case; > 0 marks a run invalidated
+    # by an incomplete assessment (error_stage = gap_analysis); NULL when the
+    # pipeline never reached that check or the row predates the column.
+    gap_failed_controls: Mapped[int | None] = mapped_column(nullable=True)
 
     started_at: Mapped[datetime] = mapped_column(default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)

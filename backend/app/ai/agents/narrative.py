@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.context import analysis_date_line
 from app.ai.prompts import load as load_prompt
-from app.ai.router import OpenRouterClient, call_text
+from app.ai.router import LLMClient, call_text
 from app.config import settings
 from app.models import Assessment, MetaIssue, Scenario
 from app.scoring.engine import level_to_name
@@ -61,7 +61,7 @@ async def write_for_scenario(
     assessment: Assessment,
     scenario: Scenario,
     *,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
 ) -> str:
     meta = list(assessment.meta_issues)
     text = await call_text(

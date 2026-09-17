@@ -1,4 +1,4 @@
-"""Test configuration: fresh SQLite DB per test, plus a fake OpenRouter client."""
+"""Test configuration: fresh SQLite DB per test, plus a fake LLM client."""
 
 from __future__ import annotations
 
@@ -40,7 +40,16 @@ class _Truncated:
         self.content = content
 
 
-class FakeOpenRouterClient:
+class _Filtered:
+    """Marker wrapper: the provider's content filter cut this canned response."""
+
+    def __init__(self, content: str, native: str, provider: str):
+        self.content = content
+        self.native = native
+        self.provider = provider
+
+
+class FakeLLMClient:
     """Returns canned JSON/text responses in FIFO order."""
 
     def __init__(self, queue: list[Any] | None = None):
@@ -56,6 +65,15 @@ class FakeOpenRouterClient:
     def push_truncated(self, content: str = "") -> None:
         """Queue a response whose finish_reason is `length` (truncated output)."""
         self.queue.append(_Truncated(content))
+
+    def push_error(self, exc: Exception) -> None:
+        """Queue a failure: the call raises `exc` (e.g. an exhausted-retries LLMError)."""
+        self.queue.append(exc)
+
+    def push_filtered(self, content: Any, native: str = "sensitive", provider: str = "X") -> None:
+        """Queue a response the provider's content filter cut: normalised
+        finish_reason `stop`, native reason `native` (OpenRouter's shape)."""
+        self.queue.append(_Filtered(content if isinstance(content, str) else json.dumps(content), native, provider))
 
     async def chat(
         self,
@@ -79,12 +97,19 @@ class FakeOpenRouterClient:
         )
         if not self.queue:
             raise AssertionError(
-                f"FakeOpenRouterClient out of canned responses (call #{len(self.calls)} for {model})"
+                f"FakeLLMClient out of canned responses (call #{len(self.calls)} for {model})"
             )
         content = self.queue.popleft()
+        if isinstance(content, Exception):
+            raise content
         finish_reason = "stop"
+        native_finish = "stop"
+        provider = "Fake"
         if isinstance(content, _Truncated):
             finish_reason = "length"
+            content = content.content
+        elif isinstance(content, _Filtered):
+            native_finish, provider = content.native, content.provider
             content = content.content
         if not isinstance(content, str):
             content = json.dumps(content)
@@ -93,8 +118,10 @@ class FakeOpenRouterClient:
                 {
                     "message": {"role": "assistant", "content": content},
                     "finish_reason": finish_reason,
+                    "native_finish_reason": native_finish,
                 }
             ],
+            "provider": provider,
             # Mirrors OpenRouter's always-on usage accounting (cost in USD credits).
             "usage": {
                 "prompt_tokens": 100,
@@ -106,9 +133,13 @@ class FakeOpenRouterClient:
         }
 
 
+# Kept for one release: older tests and scripts may import the old name.
+FakeOpenRouterClient = FakeLLMClient
+
+
 @pytest.fixture()
 def fake_client():
-    return FakeOpenRouterClient()
+    return FakeLLMClient()
 
 
 # ---------- Workflow helpers ----------

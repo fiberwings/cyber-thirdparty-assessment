@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.context import analysis_date, standards_profile
 from app.ai.prompts import load as load_prompt
-from app.ai.router import OpenRouterClient, call_structured
+from app.ai.router import LLMClient, call_structured
 from app.attestation_checks import (
     CheckFinding,
     check_profile,
@@ -41,7 +41,7 @@ def _render(chunks: list[Chunk]) -> str:
 
 
 async def extract_profile(
-    db: Session, document_id: int, *, client: OpenRouterClient | None = None
+    db: Session, document_id: int, *, client: LLMClient | None = None
 ) -> AttestationProfileOut | None:
     doc = db.get(Document, document_id)
     if doc is None or doc.kind not in ATTESTATION_KINDS:

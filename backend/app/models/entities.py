@@ -365,10 +365,12 @@ class ModelCall(Base):
     # Provider prompt-cache reads / reasoning tokens, from OpenRouter usage details.
     cached_tokens: Mapped[int] = mapped_column(Integer, default=0)
     reasoning_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    # From OpenRouter `usage.cost` (credits, USD-denominated); 0 when unreported.
+    # From OpenRouter `usage.cost` (credits, USD-denominated); 0 when unreported
+    # and always 0 for Azure calls (unmetered by design).
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     # "openrouter" = metered by the provider; "estimated" = backfilled from list
-    # pricing × tokens (scripts/backfill_cost.py); "" = unknown / not reported.
+    # pricing × tokens (scripts/backfill_cost.py); "" = unknown / not reported /
+    # Azure (unmetered).
     cost_source: Mapped[str] = mapped_column(String(20), default="")
     ok: Mapped[bool] = mapped_column(Boolean, default=True)
     error: Mapped[str] = mapped_column(Text, default="")
@@ -380,6 +382,24 @@ class ModelCall(Base):
     # Forensics for failed calls only: the first 8k chars the model produced
     # (partial stream, truncated, garbled or schema-invalid output). NULL on ok.
     output_head: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Failed calls only: the last 2k chars of the most recent output — a torn
+    # JSON body shows at the tail what a head cannot.
+    output_tail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # How the *last* attempt ended: normalised finish_reason
+    # (stop/length/error), the provider's native reason (OpenRouter's upstream
+    # reason, or `content_filter:<category>/<severity>` from Azure), which
+    # provider served it (an OpenRouter upstream host, or
+    # `azure-openai:<resource>` / `azure-foundry:<resource>`) and the generation
+    # id (OpenRouter: GET https://openrouter.ai/api/v1/generation?id=…).
+    finish_reason: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    native_finish_reason: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    provider: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    generation_id: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    # One entry per live attempt of this logical call (initial, truncation,
+    # validation, garble, filter): budget requested, outcome, finish reasons,
+    # provider, dialect, temperature sent, per-attempt token split. See
+    # router._AttemptLog.
+    attempts_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

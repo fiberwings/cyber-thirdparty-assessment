@@ -13,7 +13,7 @@ import pytest
 import respx
 
 from app import activity
-from app.ai.router import OpenRouterClient
+from app.ai.router import LLMClient
 from app.db import SessionLocal
 from app.models import TaskRecord
 from app.tasks import TaskHandle, TaskStats, registry, task_status_read
@@ -155,7 +155,7 @@ async def test_streamed_call_feeds_task_telemetry(fresh_db):
             out = await call_text(
                 db, purpose="narrative", profile="reasoner",
                 messages=[{"role": "user", "content": "x"}],
-                client=OpenRouterClient(api_key="k", base_url=BASE),
+                client=LLMClient(api_key="k", base_url=BASE),
             )
         mid["out"] = out
         mid["stats"] = handle.stats_dict()
@@ -188,7 +188,7 @@ async def test_failed_attempt_keeps_the_estimate(fresh_db):
 
     async def job(handle):
         with pytest.raises(Exception):
-            await OpenRouterClient(api_key="k", base_url=BASE).chat([{"role": "user", "content": "x"}], "m")
+            await LLMClient(api_key="k", base_url=BASE).chat([{"role": "user", "content": "x"}], "m")
         seen["stats"] = handle.stats_dict()
 
     task = registry.submit(job, kind="t")

@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from app import activity
 from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
-from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
+from app.ai.router import LLMClient, LLMError, call_structured
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Assessment, ExpectedControl, Scenario
@@ -107,7 +107,7 @@ async def _phase2_worker(
     assessment_id: int,
     model_override: str | None,
     semaphore: asyncio.Semaphore,
-    client: OpenRouterClient | None,
+    client: LLMClient | None,
     on_done: Callable[[], Awaitable[None]] | None,
     context: str = "",
 ) -> ExpectedControlListOut:
@@ -150,7 +150,7 @@ async def generate(
     description_summary: str,
     *,
     on_progress: ProgressCb | None = None,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
 ) -> ScenarioListOut:
     model_override = (assessment.model_overrides or {}).get("scenarios")
     context = assessment_context_block(assessment)
@@ -260,8 +260,8 @@ async def generate(
             f"{len(full_scenarios)}/{n} scenarios got controls; "
             f"{len(failed)} failed ({codes}). First failure on '{first_code}': {first_err}"
         )
-        if isinstance(first_err, OpenRouterError):
-            raise OpenRouterError(
+        if isinstance(first_err, LLMError):
+            raise LLMError(
                 msg,
                 transient=first_err.transient,
                 upstream_code=first_err.upstream_code,

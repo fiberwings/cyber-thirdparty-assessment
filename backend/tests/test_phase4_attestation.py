@@ -233,7 +233,7 @@ async def test_upload_job_survives_profile_failure(fresh_db, fake_client, monkey
     from fastapi.testclient import TestClient
     from app import main as main_mod
     from app.ai import router as router_mod
-    monkeypatch.setattr(router_mod, "OpenRouterClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(router_mod, "LLMClient", lambda *a, **kw: fake_client)
     import io
     import pymupdf
     with TestClient(main_mod.app) as client:
