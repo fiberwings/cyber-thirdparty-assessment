@@ -423,6 +423,56 @@ async def test_document_weakness_extraction_persists(fresh_db, fake_client):
 
 
 @pytest.mark.asyncio
+async def test_two_phase_extraction_with_a_failed_detail_is_not_stamped_done(fresh_db, fake_client, monkeypatch):
+    """Two-phase path: the single call truncates, two skeletons are
+    enumerated, one detail call fails (transient, retries exhausted). The
+    finding that was detailed is kept, but the document must NOT read as
+    extracted — `weakness_extracted_at` is what the evidence phase treats as
+    done, and a partially detailed document would silently pass downstream."""
+    from app.ai.router import LLMError
+    from app.config import settings
+    from app.workflow import document_extraction_state
+
+    monkeypatch.setattr(settings, "llm_truncation_retries", 0)
+    with SessionLocal() as db:
+        a = Assessment(vendor_name="Acme")
+        db.add(a)
+        db.flush()
+        doc = Document(
+            assessment_id=a.id, kind="pentest", filename="pentest.pdf",
+            mime="application/pdf", sha256="abc2", size_bytes=1,
+        )
+        db.add(doc)
+        db.flush()
+        db.add(Chunk(document_id=doc.id, page=1, section_path="4.1", ord=1, text="JWT signature not verified."))
+        db.add(Chunk(document_id=doc.id, page=2, section_path="4.2", ord=2, text="TLS 1.0 enabled on /legacy."))
+        db.commit()
+        doc_id = doc.id
+
+        fake_client.push_truncated("{}")  # single call → two-phase fallback
+        fake_client.push_json({"skeletons": [
+            {"heading": "JWT not verified", "severity": "high", "section_path": "4.1", "kind_signal": "pentest_finding"},
+            {"heading": "TLS 1.0 enabled", "severity": "medium", "section_path": "4.2", "kind_signal": "pentest_finding"},
+        ]})
+        fake_client.push_json({"weaknesses": [{
+            "severity": "high", "description": "JWT signature is not verified.",
+            "quote": "JWT signature not verified", "section_path": "4.1", "page": 1,
+            "kind_signal": "pentest_finding", "suggested_control_codes": [],
+        }]})
+        fake_client.push_error(LLMError("openrouter 429: busy", transient=True, upstream_code=429))
+
+        with pytest.raises(LLMError) as exc:
+            await document_weaknesses.extract(db, doc_id, client=fake_client)
+        assert "1/2 findings detailed" in str(exc.value) and exc.value.transient is True
+
+        db.expire_all()
+        doc = db.get(Document, doc_id)
+        assert doc.weakness_extracted_at is None
+        assert document_extraction_state(doc)[0] != "done"
+        assert db.query(Weakness).filter(Weakness.source_document_id == doc_id).count() == 1
+
+
+@pytest.mark.asyncio
 async def test_document_weakness_extraction_dedupes_re_run(fresh_db, fake_client):
     """A second run on the same doc with the same canned response is a no-op
     (DB-level uniqueness on dedupe_key)."""

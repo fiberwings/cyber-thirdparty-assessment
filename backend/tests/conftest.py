@@ -1,4 +1,4 @@
-"""Test configuration: fresh SQLite DB per test, plus a fake OpenRouter client."""
+"""Test configuration: fresh SQLite DB per test, plus a fake LLM client."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ class _Filtered:
         self.provider = provider
 
 
-class FakeOpenRouterClient:
+class FakeLLMClient:
     """Returns canned JSON/text responses in FIFO order."""
 
     def __init__(self, queue: list[Any] | None = None):
@@ -65,6 +65,10 @@ class FakeOpenRouterClient:
     def push_truncated(self, content: str = "") -> None:
         """Queue a response whose finish_reason is `length` (truncated output)."""
         self.queue.append(_Truncated(content))
+
+    def push_error(self, exc: Exception) -> None:
+        """Queue a failure: the call raises `exc` (e.g. an exhausted-retries LLMError)."""
+        self.queue.append(exc)
 
     def push_filtered(self, content: Any, native: str = "sensitive", provider: str = "X") -> None:
         """Queue a response the provider's content filter cut: normalised
@@ -93,9 +97,11 @@ class FakeOpenRouterClient:
         )
         if not self.queue:
             raise AssertionError(
-                f"FakeOpenRouterClient out of canned responses (call #{len(self.calls)} for {model})"
+                f"FakeLLMClient out of canned responses (call #{len(self.calls)} for {model})"
             )
         content = self.queue.popleft()
+        if isinstance(content, Exception):
+            raise content
         finish_reason = "stop"
         native_finish = "stop"
         provider = "Fake"
@@ -127,9 +133,13 @@ class FakeOpenRouterClient:
         }
 
 
+# Kept for one release: older tests and scripts may import the old name.
+FakeOpenRouterClient = FakeLLMClient
+
+
 @pytest.fixture()
 def fake_client():
-    return FakeOpenRouterClient()
+    return FakeLLMClient()
 
 
 # ---------- Workflow helpers ----------

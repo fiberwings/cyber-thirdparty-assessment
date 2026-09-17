@@ -89,7 +89,9 @@ def run_pipeline(
     (~30k tokens); the report then carries no executive_summary and the
     exec rubric is not graded.
 
-    Returns (assessment_id, report, stage timings in seconds).
+    Returns (assessment_id, report, stage timings in seconds). A gap-analysis
+    phase that completed with unassessed controls raises StageError
+    (`gap_failed_controls` set) — the run is invalid, not partially valid.
     Raises StageError with the failing stage on any error.
     """
     timings: dict[str, float] = {}
@@ -140,6 +142,19 @@ def run_pipeline(
         with timed("gap_analysis"):
             task_id = client.run_gap_analysis(assessment_id)
             client.wait_task(task_id, "gap_analysis", assessment_id)
+            # A phase that completed with unassessed controls is a partial
+            # assessment: invalid for scoring (its F1 / band would measure
+            # the outage, not the model), kept for debugging.
+            failed = client.gap_analysis_failed_targets(assessment_id)
+            if failed:
+                raise StageError(
+                    "gap_analysis",
+                    f"{len(failed)} control(s) not assessed (AI run failed, see "
+                    f"ControlAssessment.last_error): {', '.join(failed[:8])}"
+                    f"{'…' if len(failed) > 8 else ''}",
+                    assessment_id,
+                    gap_failed_controls=len(failed),
+                )
 
         with timed("recalculate"):
             client.recalculate(assessment_id)
@@ -621,6 +636,7 @@ def run_one(
                 client, case, config.model_overrides, config.skip_narratives
             )
             cr.assessment_id = assessment_id
+            cr.gap_failed_controls = 0  # the pipeline refuses to continue otherwise
             cr.timings_json = json.dumps(timings)
             cr.report_json = json.dumps(report)
             agg = report.get("aggregate", {})
@@ -632,6 +648,7 @@ def run_one(
             status = "error"
             cr.error_stage = e.stage
             cr.error_detail = e.detail
+            cr.gap_failed_controls = e.gap_failed_controls
             assessment_id = e.assessment_id
             cr.assessment_id = assessment_id  # keep the link for debugging / bench grade
             raise

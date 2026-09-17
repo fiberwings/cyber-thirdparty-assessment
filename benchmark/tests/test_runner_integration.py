@@ -110,11 +110,19 @@ def stub_case(tmp_path):
     return load_case(case_dir)
 
 
-def _mock_backend(deleted: list, fail_gap: bool = False):
+def _mock_backend(deleted: list, fail_gap: bool = False, partial_gap: list[str] | None = None):
     if fail_gap:  # must register before the generic /api/tasks route (respx matches in order)
         respx.get(f"{BACKEND}/api/tasks/t-gap").mock(
             return_value=Response(200, json={"task_id": "t-gap", "status": "error",
                                              "progress": 0.3, "detail": "reasoner exploded"}))
+    # The durable phase state the runner reads after gap analysis: done, with
+    # the controls whose AI run failed listed (backend `failed_targets`).
+    analysis_phase = {"state": "done", "warning": None, "failed_targets": partial_gap or []}
+    if partial_gap:
+        analysis_phase["warning"] = f"{len(partial_gap)} control(s) still carry a failed AI run"
+    respx.get(f"{BACKEND}/api/assessments/1").mock(
+        return_value=Response(200, json={"id": 1, "vendor_name": "Stub Vendor",
+                                         "phases": {"analysis": analysis_phase}}))
     respx.get(f"{BACKEND}/api/health").mock(return_value=Response(200, json={"ok": True}))
     respx.get(f"{BACKEND}/api/models").mock(return_value=Response(200, json=[
         {"name": "fast", "default_model": "stub/fast", "alternatives": []},
@@ -209,7 +217,7 @@ def test_full_batch(fresh_db, stub_case, monkeypatch):
     assert json.loads(run.models_json)["profiles"]
 
     cr = session.scalars(select(CaseResult).where(CaseResult.run_id == run_id)).one()
-    assert cr.status == "ok"
+    assert cr.status == "ok" and cr.gap_failed_controls == 0
     assert (cr.tp, cr.fp, cr.fn) == (1, 1, 1)
     assert cr.f1 == 0.5
     assert cr.exec_overall == 100.0
@@ -302,7 +310,8 @@ def test_migration_adds_new_columns_to_old_db(fresh_db):
     conn = sqlite3.connect(path)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(case_result)")}
     conn.close()
-    assert {"signal_share", "dup_per_golden", "band_error", "classification_json", "n_weaknesses"} <= cols
+    assert {"signal_share", "dup_per_golden", "band_error", "classification_json", "n_weaknesses",
+            "gap_failed_controls"} <= cols
 
 
 @respx.mock
@@ -326,6 +335,38 @@ def test_stage_error_recorded_batch_continues(fresh_db, stub_case, monkeypatch):
     assert "reasoner exploded" in cr.error_detail
     # errored assessments are kept for debugging under cleanup="ok"
     assert not cr.assessment_deleted and not deleted
+    session.close()
+
+
+@respx.mock
+def test_partial_gap_analysis_invalidates_the_case(fresh_db, stub_case, monkeypatch):
+    """The backend marks a gap-analysis phase *done* even when some controls
+    were never assessed (their AI run failed after the router's retries —
+    a 429 storm on an under-provisioned deployment). Scoring that report
+    would measure the outage, not the model: the case is recorded as an
+    error at gap_analysis, the count is kept, and nothing is graded."""
+    monkeypatch.setattr(settings, "BENCH_BACKEND_URL", BACKEND)
+    monkeypatch.setattr(settings, "OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "MAIN_DB_PATH", "/nonexistent/tprm.sqlite")
+    monkeypatch.setattr(settings, "POLL_INTERVAL", 0.01)
+
+    deleted: list = []
+    _mock_backend(deleted, partial_gap=["DATA_LEAK/ENC.REST", "DATA_LEAK/IAM.MFA", "RANSOM/BCK.TEST"])
+    _mock_judge()
+
+    run_id, status = run_batch([stub_case], RunConfig(cleanup="ok"))
+    assert status == "failed"
+
+    session = get_session()
+    cr = session.scalars(select(CaseResult).where(CaseResult.run_id == run_id)).one()
+    assert cr.status == "error" and cr.error_stage == "gap_analysis"
+    assert cr.gap_failed_controls == 3
+    assert "3 control(s) not assessed" in cr.error_detail and "DATA_LEAK/ENC.REST" in cr.error_detail
+    assert cr.f1 is None and cr.report_json is None
+    assert not cr.assessment_deleted and not deleted
+    paths = [str(c.request.url.path) for c in respx.calls]
+    assert "/api/assessments/1/recalculate" not in paths  # pipeline stopped at the gate
+    assert not any("openrouter" in str(c.request.url) for c in respx.calls)  # no judge spend
     session.close()
 
 

@@ -270,7 +270,7 @@ def test_interrupted_tasks_reconciled_on_startup(fresh_db):
 def client(monkeypatch, fresh_db, fake_client):
     from app import main as main_mod
     from app.ai import router as router_mod
-    monkeypatch.setattr(router_mod, "OpenRouterClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(router_mod, "LLMClient", lambda *a, **kw: fake_client)
     with TestClient(main_mod.app) as c:
         yield c
 

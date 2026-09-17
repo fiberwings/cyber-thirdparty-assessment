@@ -23,10 +23,21 @@ class StageError(Exception):
     assessment id (when one was created) so the case row keeps pointing at
     the assessment left on the backend."""
 
-    def __init__(self, stage: str, detail: str, assessment_id: int | None = None):
+    def __init__(
+        self,
+        stage: str,
+        detail: str,
+        assessment_id: int | None = None,
+        *,
+        gap_failed_controls: int | None = None,
+    ):
         self.stage = stage
         self.detail = detail
         self.assessment_id = assessment_id
+        # Set when the gap-analysis phase completed with controls whose AI
+        # run failed (backend `failed_targets`): the assessment is
+        # incomplete, not broken, but its metrics would be an artefact.
+        self.gap_failed_controls = gap_failed_controls
         super().__init__(f"[{stage}] {detail}")
 
 
@@ -80,6 +91,16 @@ class AppClient:
         r = self.http.get(f"/api/assessments/{assessment_id}")
         r.raise_for_status()
         return r.json()
+
+    def gap_analysis_failed_targets(self, assessment_id: int) -> list[str]:
+        """Controls the gap-analysis phase finished *without* assessing
+        (`ControlAssessment.last_error` set — e.g. a 429 storm exhausted
+        the router's retries). The backend marks the phase done with a
+        warning so a human can resume; a benchmark must not score the
+        partial result as if it were complete."""
+        phases = self.get_assessment(assessment_id).get("phases") or {}
+        analysis = phases.get(STAGE_TO_PHASE["gap_analysis"]) or {}
+        return list(analysis.get("failed_targets") or [])
 
     def set_model_overrides(self, assessment_id: int, overrides: dict[str, str]) -> None:
         r = self.http.patch(

@@ -52,7 +52,7 @@ from sqlalchemy.orm import Session
 from app import activity
 from app.ai.context import analysis_datetime, standards_block
 from app.ai.prompts import load as load_prompt
-from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
+from app.ai.router import LLMClient, LLMError, call_structured
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Chunk, Document, Weakness
@@ -355,7 +355,7 @@ async def _extract_questionnaire_windowed(
     prompt_kind: str,
     assessment_id: int,
     model_override: str | None,
-    client: OpenRouterClient | None,
+    client: LLMClient | None,
     on_progress: ProgressCb | None,
 ) -> int:
     """Windowed direct extraction for long questionnaires (R8): one ordinary
@@ -395,7 +395,7 @@ async def _extract_questionnaire_windowed(
                 max_tokens=settings.llm_budget_large,
                 client=client,
             )
-        except OpenRouterError as e:
+        except LLMError as e:
             sections = _group_by_section(win)
             if not e.truncated or len(sections) < 2:
                 raise
@@ -415,7 +415,7 @@ async def _extract_questionnaire_windowed(
     for i, win in enumerate(windows):
         try:
             inserted += await extract_window(win, f"{i + 1} of {n}")
-        except OpenRouterError as e:
+        except LLMError as e:
             failures.append(e)
             continue
         activity.advance(i + 1)
@@ -426,7 +426,7 @@ async def _extract_questionnaire_windowed(
             )
     if failures:
         first = failures[0]
-        raise OpenRouterError(
+        raise LLMError(
             f"{n - len(failures)}/{n} questionnaire windows extracted; "
             f"{len(failures)} failed. First failure: {first}",
             transient=getattr(first, "transient", False),
@@ -440,7 +440,7 @@ async def extract(
     document_id: int,
     *,
     on_progress: ProgressCb | None = None,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
 ) -> int:
     """Extract weaknesses for a single document.
 
@@ -516,7 +516,7 @@ async def extract(
             if on_progress:
                 await on_progress(1.0, f"Extracted {inserted} weaknesses (single call)")
             return inserted
-        except OpenRouterError as e:
+        except LLMError as e:
             if not e.truncated:
                 raise
             # Fall through to two-phase fallback.
@@ -675,9 +675,12 @@ async def extract(
     inserted = sum(r for r in results if isinstance(r, int))
     failures = [r for r in results if isinstance(r, BaseException)]
 
-    doc.weakness_extracted_at = datetime.utcnow()
-    db.commit()
-
+    # The document counts as extracted only when every skeleton was detailed:
+    # `weakness_extracted_at` is what the evidence phase reads as "done"
+    # (workflow.document_extraction_state), so stamping it with detail calls
+    # failed would let the assessment proceed on a silently incomplete
+    # document. The rows detailed so far stay (the re-run dedupes on the
+    # quote key); the failure below marks the document for a retry.
     if failures:
         first_err = failures[0]
         codes = [sk.heading for sk, r in zip(skeletons, results, strict=True) if isinstance(r, BaseException)]
@@ -686,12 +689,14 @@ async def extract(
             f"({', '.join(codes[:3])}{'...' if len(codes) > 3 else ''}). "
             f"First failure: {first_err}"
         )
-        raise OpenRouterError(
+        raise LLMError(
             msg,
             transient=getattr(first_err, "transient", False),
             upstream_code=getattr(first_err, "upstream_code", None),
         )
 
+    doc.weakness_extracted_at = datetime.utcnow()
+    db.commit()
     if on_progress:
         await on_progress(1.0, f"Extracted {inserted} weaknesses (two-phase)")
     return inserted

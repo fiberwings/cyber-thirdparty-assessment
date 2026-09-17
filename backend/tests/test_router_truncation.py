@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from app.ai.router import OpenRouterError, call_structured, call_text
+from app.ai.router import LLMError, call_structured, call_text
 from app.config import settings
 from app.db import SessionLocal
 
@@ -65,7 +65,7 @@ async def test_structured_truncation_exhausts_retries_fails_loudly(fresh_db, fak
     for _ in range(settings.llm_truncation_retries + 1):
         fake_client.push_truncated("{}")
     with SessionLocal() as db:
-        with pytest.raises(OpenRouterError) as exc:
+        with pytest.raises(LLMError) as exc:
             await call_structured(
                 db,
                 purpose="test",
@@ -115,7 +115,7 @@ async def test_ladder_clamps_to_the_models_catalogued_output_cap(fresh_db, fake_
     fake_client.push_truncated("{}")
     fake_client.push_truncated("{}")
     with SessionLocal() as db:
-        with pytest.raises(OpenRouterError) as exc:
+        with pytest.raises(LLMError) as exc:
             await call_structured(
                 db,
                 purpose="test",
@@ -152,7 +152,7 @@ async def test_truncation_policy_is_tunable(fresh_db, fake_client, monkeypatch):
     fake_client.push_truncated("{}")
     fake_client.push_truncated("{}")
     with SessionLocal() as db:
-        with pytest.raises(OpenRouterError) as exc:
+        with pytest.raises(LLMError) as exc:
             await call_structured(
                 db,
                 purpose="test",
@@ -187,7 +187,7 @@ async def test_text_truncation_retries_then_fails_loudly(fresh_db, fake_client):
     for _ in range(settings.llm_truncation_retries + 1):
         fake_client.push_truncated("half")
     with SessionLocal() as db:
-        with pytest.raises(OpenRouterError) as exc:
+        with pytest.raises(LLMError) as exc:
             await call_text(
                 db,
                 purpose="narrative",

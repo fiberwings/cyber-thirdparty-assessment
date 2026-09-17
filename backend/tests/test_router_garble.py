@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from app.ai.router import OpenRouterError, _looks_garbled, call_structured
+from app.ai.router import LLMError, _looks_garbled, call_structured
 from app.db import SessionLocal
 from app.models import ModelCall
 
@@ -81,7 +81,7 @@ async def test_garbled_twice_fails_loudly(fresh_db, fake_client):
     fake_client.push_json({"control_codevote": ": "})
     fake_client.push("Net.Wq {{{ json")
     with SessionLocal() as db:
-        with pytest.raises(OpenRouterError) as exc:
+        with pytest.raises(LLMError) as exc:
             await _call(db, fake_client)
         assert "garbled output twice" in str(exc.value)
         assert len(fake_client.calls) == 2
@@ -132,7 +132,7 @@ async def test_failed_call_records_per_attempt_forensics(fresh_db, fake_client, 
     fake_client.push(torn)
     with caplog.at_level(logging.WARNING, logger="app.ai.router"):
         with SessionLocal() as db:
-            with pytest.raises(OpenRouterError):
+            with pytest.raises(LLMError):
                 await call_structured(
                     db,
                     purpose="extract",
@@ -183,7 +183,7 @@ async def test_content_filtered_response_is_never_parsed(fresh_db, fake_client, 
     fake_client.push_filtered(valid_but_cut, native="sensitive", provider="StreamLake")
     fake_client.push_filtered(valid_but_cut, native="sensitive", provider="StreamLake")
     with SessionLocal() as db:
-        with pytest.raises(OpenRouterError) as exc:
+        with pytest.raises(LLMError) as exc:
             await call_structured(
                 db, purpose="extract", profile="fast", messages=MESSAGES, schema=_Out, client=fake_client
             )

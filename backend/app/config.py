@@ -25,7 +25,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         # Disable Pydantic's "model_*" protected namespace — we use it for
-        # OpenRouter model IDs (model_fast, model_reasoner, ...).
+        # model refs (model_fast, model_reasoner, ...).
         protected_namespaces=(),
     )
 
@@ -50,6 +50,37 @@ class Settings(BaseSettings):
     # reason `sensitive`, torn JSON reported as `stop`) makes assessments fail
     # or — worse — lose findings. Empty = OpenRouter's default routing.
     openrouter_provider_ignore: str = Field(default="", alias="OPENROUTER_PROVIDER_IGNORE")
+
+    # Azure AI Foundry (alternative to OpenRouter; see app/ai/providers/).
+    # A model ref chooses the provider per call: bare ids (or `openrouter:`)
+    # go to OpenRouter, `azure:<deployment>` to an Azure OpenAI deployment,
+    # `foundry:<deployment>` to the Foundry Models inference endpoint. Both
+    # can be configured at once and mixed across profiles and stages.
+    #   AZURE_OPENAI_ENDPOINT   https://<resource>.openai.azure.com (a Foundry
+    #                           resource host, *.services.ai.azure.com, works too)
+    #   AZURE_OPENAI_API_VERSION empty = the /openai/v1 path (no version); set
+    #                           only to force the legacy /openai/deployments path
+    #   AZURE_INFERENCE_ENDPOINT https://<resource>.services.ai.azure.com
+    azure_openai_endpoint: str = Field(default="", alias="AZURE_OPENAI_ENDPOINT")
+    azure_openai_api_key: str = Field(default="", alias="AZURE_OPENAI_API_KEY")
+    azure_openai_api_version: str = Field(default="", alias="AZURE_OPENAI_API_VERSION")
+    azure_inference_endpoint: str = Field(default="", alias="AZURE_INFERENCE_ENDPOINT")
+    azure_inference_api_key: str = Field(default="", alias="AZURE_INFERENCE_API_KEY")
+    azure_inference_api_version: str = Field(
+        default="2024-05-01-preview", alias="AZURE_INFERENCE_API_VERSION"
+    )
+    # Per-deployment metadata, comma-separated `<deployment>=<canonical>[;temp=fixed]`:
+    #   canonical  — the catalogue id (MODEL_CAPS key, e.g. openai/gpt-5) the
+    #                deployment serves, so the capability guard and the
+    #                truncation ladder know its context window and output cap.
+    #                A profile default without an entry is a startup ERROR.
+    #   temp=fixed — the deployment rejects any `temperature` but its default
+    #                (Azure OpenAI reasoning models: gpt-5 family, o-series).
+    #                The flag omits the parameter for that deployment only; it
+    #                is an explicit, logged sampling change (CLAUDE.md), never
+    #                inferred — without it the provider's 400 surfaces loudly.
+    # e.g. AZURE_DEPLOYMENT_META=gpt5-prod=openai/gpt-5;temp=fixed,haiku-eu=anthropic/claude-haiku-4.5
+    azure_deployment_meta: str = Field(default="", alias="AZURE_DEPLOYMENT_META")
 
     # Default model profiles (overridable per call)
     model_fast: str = Field(default="anthropic/claude-haiku-4.5", alias="MODEL_FAST")
@@ -117,6 +148,28 @@ class Settings(BaseSettings):
     llm_stream_idle_s: float = Field(default=180.0, alias="LLM_STREAM_IDLE_S")
     llm_content_silence_s: float = Field(default=3600.0, alias="LLM_CONTENT_SILENCE_S")
     llm_call_max_s: float = Field(default=3600.0, alias="LLM_CALL_MAX_S")
+    # Tier (i) for providers that send *no* keepalive bytes while the model
+    # thinks (Azure OpenAI / Foundry: nothing on the wire between the prompt
+    # filter chunk and the first token). There a raw read timeout cannot tell
+    # a dead socket from a reasoning model at work, so the idle limit is the
+    # silence tier by default (None = LLM_CONTENT_SILENCE_S) and the router
+    # heartbeats the task watchdog instead. Must satisfy
+    # LLM_STREAM_IDLE_S <= this <= LLM_CALL_MAX_S. Lowering it re-introduces
+    # speed-based failures on slow reasoners (CLAUDE.md).
+    llm_stream_idle_no_keepalive_s: Optional[float] = Field(
+        default=None, alias="LLM_STREAM_IDLE_NO_KEEPALIVE_S"
+    )
+    # Transient failures before any output token (429 / 5xx / 408 / 524,
+    # network errors, a read timeout with no output yet) are retried up to
+    # this many times with exponential backoff (1.5 s doubling), honouring a
+    # provider's Retry-After (429/503) when it asks for longer. Every wait is
+    # capped by LLM_RETRY_AFTER_CAP_S, so the worst case is bounded
+    # (~1.5+3+6+12+24+48 s ≈ 95 s at the defaults). A call that already
+    # produced output is never retried (partial=True), nor is the hard
+    # ceiling. Lowering the retry count below the default turns a rate-limit
+    # blip into a lost assessment step (CLAUDE.md liveness rule).
+    llm_transient_retries: int = Field(default=6, alias="LLM_TRANSIENT_RETRIES")
+    llm_retry_after_cap_s: float = Field(default=60.0, alias="LLM_RETRY_AFTER_CAP_S")
     # Background-task watchdog: a task with no activity ping (streamed token,
     # keepalive, progress update) for idle_timeout, or older than max_runtime,
     # is cancelled with a diagnostic error instead of blocking the assessment
@@ -140,6 +193,13 @@ class Settings(BaseSettings):
     @property
     def provider_ignore_list(self) -> list[str]:
         return [p.strip() for p in self.openrouter_provider_ignore.split(",") if p.strip()]
+
+    @property
+    def stream_idle_no_keepalive_s(self) -> float:
+        """Effective tier-(i) limit for dialects without keepalives."""
+        if self.llm_stream_idle_no_keepalive_s is None:
+            return self.llm_content_silence_s
+        return self.llm_stream_idle_no_keepalive_s
 
     @model_validator(mode="after")
     def _validate_budget_policy(self) -> "Settings":
@@ -168,6 +228,19 @@ class Settings(BaseSettings):
                 "Liveness policy must satisfy 0 < LLM_CONNECT_TIMEOUT_S <= LLM_STREAM_IDLE_S "
                 "<= LLM_CONTENT_SILENCE_S <= LLM_CALL_MAX_S"
             )
+        if not (
+            self.llm_stream_idle_s
+            <= self.stream_idle_no_keepalive_s
+            <= self.llm_call_max_s
+        ):
+            raise ValueError(
+                "LLM_STREAM_IDLE_NO_KEEPALIVE_S must satisfy LLM_STREAM_IDLE_S <= it "
+                "<= LLM_CALL_MAX_S"
+            )
+        if self.llm_retry_after_cap_s < 0:
+            raise ValueError("LLM_RETRY_AFTER_CAP_S must be >= 0")
+        if self.llm_transient_retries < 0:
+            raise ValueError("LLM_TRANSIENT_RETRIES must be >= 0")
         if self.task_idle_timeout_s < self.llm_stream_idle_s:
             raise ValueError("TASK_IDLE_TIMEOUT_S must be >= LLM_STREAM_IDLE_S")
         if self.task_max_runtime_s < self.llm_call_max_s:

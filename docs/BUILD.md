@@ -19,8 +19,9 @@ For what the system does and how it is put together, read [`ARCHITECTURE.md`](AR
 | Node.js | 18.18+ (Next.js 15 requirement) | 22.22.1 | Docker image uses `node:22-slim`. Use Node 22 LTS. |
 | npm | 9+ | 10.9.4 | `npm ci` needs the committed `package-lock.json`. |
 | Docker Engine + Compose v2 | optional | 29.5.2 / v5.1.4 | Only for the container route (§4). |
-| OpenRouter API key | required for any AI call | – | https://openrouter.ai. Keep a comfortable credit balance: OpenRouter reserves credit for each in-flight call's full `max_tokens`, and several stages run four calls in parallel. |
-| Network access | to `openrouter.ai` from the backend | – | The frontend never talks to OpenRouter; the benchmark's judge does. |
+| OpenRouter API key | required for any AI call through OpenRouter | – | https://openrouter.ai. Keep a comfortable credit balance: OpenRouter reserves credit for each in-flight call's full `max_tokens`, and several stages run four calls in parallel. |
+| Azure AI Foundry credentials | alternative to OpenRouter, per model ref | – | An Azure OpenAI / Foundry resource endpoint and API key (`AZURE_OPENAI_*`, `AZURE_INFERENCE_*`); see the settings table below. |
+| Network access | to `openrouter.ai` and/or your Azure resource host from the backend | – | The frontend never talks to a model provider; the benchmark's judge does (OpenRouter). |
 
 Platform: developed and verified on Linux (aarch64 and x86_64 both work since every dependency is
 pure Python or ships wheels). macOS works the same way. Windows is untested; use WSL 2.
@@ -33,7 +34,7 @@ pure Python or ships wheels). macOS works the same way. Windows is untested; use
 .
 ├── backend/            FastAPI app (Python) — API, AI pipeline, scoring, tests
 │   ├── app/            package `app`
-│   ├── scripts/        smoke_openrouter.py, backfill_cost.py
+│   ├── scripts/        smoke_llm.py, backfill_cost.py
 │   ├── tests/          pytest suite (fake LLM; no network)
 │   ├── pyproject.toml  dependencies (no lock file; version ranges)
 │   └── Dockerfile
@@ -70,7 +71,7 @@ need reproducible installs.
 | sqlalchemy | ≥ 2.0 | 2.0.49 | ORM over SQLite |
 | pydantic | ≥ 2.9 | 2.13.3 | Schemas for API and model output |
 | pydantic-settings | ≥ 2.6 | 2.14.0 | `.env` / environment configuration |
-| httpx | ≥ 0.27 | 0.28.1 | Streaming client for OpenRouter |
+| httpx | ≥ 0.27 | 0.28.1 | Streaming client for the model providers |
 | python-multipart | ≥ 0.0.20 | 0.0.27 | File uploads |
 | PyMuPDF | ≥ 1.24 | 1.27.2.3 | PDF parsing (imported as `pymupdf`) |
 | openpyxl | ≥ 3.1 | 3.1.5 | XLSX parsing |
@@ -200,7 +201,7 @@ Verify:
 ```bash
 curl -s http://localhost:8000/api/health
 # {"ok":true,"app_env":"dev","llm_dev_cache":false}
-.venv/bin/python scripts/smoke_openrouter.py    # one tiny call per profile against your real key
+.venv/bin/python scripts/smoke_llm.py           # one tiny call per profile through whichever provider its ref names
 ```
 
 ### 5.2 Frontend
@@ -296,9 +297,12 @@ budget and liveness policies at startup and refuses inconsistent values.
 
 | Group | Variables | Default | Notes |
 |---|---|---|---|
-| OpenRouter | `OPENROUTER_API_KEY` | – | **Required** for any AI call. |
+| OpenRouter | `OPENROUTER_API_KEY` | – | **Required** for any AI call routed through OpenRouter (bare model ids). |
 | | `OPENROUTER_BASE_URL`, `OPENROUTER_REFERER`, `OPENROUTER_APP_NAME` | `https://openrouter.ai/api/v1`, `http://localhost:3000`, `cyber-tprm-assessment` | A proxy that strips usage accounting breaks cost capture. |
-| Models | `MODEL_FAST`, `MODEL_REASONER` | `anthropic/claude-haiku-4.5`, `anthropic/claude-opus-4.7` | Any OpenRouter id; see the capability guard in ARCHITECTURE §4.1. |
+| Azure AI Foundry | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_API_VERSION` | –, –, empty (v1 path) | For `azure:<deployment>` refs (Azure OpenAI deployments). Set the api-version only to force the legacy `/openai/deployments/…` path. |
+| | `AZURE_INFERENCE_ENDPOINT`, `AZURE_INFERENCE_API_KEY`, `AZURE_INFERENCE_API_VERSION` | –, –, `2024-05-01-preview` | For `foundry:<deployment>` refs (Foundry Models endpoint, non-OpenAI models). |
+| | `AZURE_DEPLOYMENT_META` | empty | `<deployment>=<canonical id>[;temp=fixed],…` — which catalogue model each deployment serves (required for profile defaults) and whether the temperature parameter must be omitted (explicit, warned at startup). |
+| Models | `MODEL_FAST`, `MODEL_REASONER` | `anthropic/claude-haiku-4.5`, `anthropic/claude-opus-4.7` | Any OpenRouter id, or `azure:` / `foundry:` deployment ref; see the capability guard in ARCHITECTURE §4.1. |
 | | `MODEL_FAST_ALTERNATIVES`, `MODEL_REASONER_ALTERNATIVES` | see `.env.example` | Comma-separated; offered per stage on the Settings page. |
 | Storage | `DB_PATH`, `DATA_DIR`, `STORAGE_DIR`, `STORAGE_SECRET` | `./data/tprm.sqlite`, `./data`, `./storage`, `change-me…` | Relative to the working directory. Set a real secret before non-local use. |
 | Ports and CORS | `FRONTEND_PORT`, `BACKEND_PORT` (Docker only), `CORS_ORIGINS` | 3000, 8000, `http://localhost:3000` | `CORS_ORIGINS` must match the browser-facing frontend origin when running outside Docker. |
@@ -306,7 +310,7 @@ budget and liveness policies at startup and refuses inconsistent values.
 | Output budgets | `LLM_BUDGET_SMALL/MEDIUM/LARGE`, `LLM_TRUNCATION_CAP`, `LLM_TRUNCATION_RETRIES`, `LLM_MIN_MODEL_OUTPUT_CAP` | 16384 / 32768 / 65536, 128000, 2, 128000 | Must be non-decreasing in that order. Budgets bound hidden reasoning too. Lowering any below default is an accuracy regression (`CLAUDE.md`). |
 | Provider routing | `OPENROUTER_PROVIDER_IGNORE` | empty | Comma-separated OpenRouter provider names sent as `provider.ignore`; set `StreamLake` (as `.env.example` does) — its content filter truncates security/jurisdiction text. |
 | LLM failure forensics | `LLM_FAILURE_DUMP_DIR`, `LOG_LEVEL` | unset, `INFO` | Failed calls are always summarised on `model_call` (`attempts_json`, `finish_reason`, `provider`, `generation_id`, `output_head/tail`) and logged at WARNING; the dump dir additionally stores every attempt's full output as JSON. |
-| Liveness | `LLM_CONNECT_TIMEOUT_S`, `LLM_STREAM_IDLE_S`, `LLM_CONTENT_SILENCE_S`, `LLM_CALL_MAX_S`, `TASK_IDLE_TIMEOUT_S`, `TASK_MAX_RUNTIME_S` | 30, 180, 3600, 3600, 600, 14400 | Inactivity-based; see ARCHITECTURE §6. |
+| Liveness | `LLM_CONNECT_TIMEOUT_S`, `LLM_STREAM_IDLE_S`, `LLM_STREAM_IDLE_NO_KEEPALIVE_S`, `LLM_CONTENT_SILENCE_S`, `LLM_CALL_MAX_S`, `LLM_RETRY_AFTER_CAP_S`, `TASK_IDLE_TIMEOUT_S`, `TASK_MAX_RUNTIME_S` | 30, 180, = silence, 3600, 3600, 60, 600, 14400 | Inactivity-based; the no-keepalive tier applies to Azure streams; see ARCHITECTURE §6. |
 | Deployment | `APP_ENV`, `LLM_DEV_CACHE` | `dev`, `0` | The dev cache is refused when `APP_ENV=production`; the benchmark refuses to measure against a backend that has it on. |
 
 ---
@@ -316,11 +320,14 @@ budget and liveness policies at startup and refuses inconsistent values.
 | Symptom | Cause and fix |
 |---|---|
 | Frontend image build fails: `"/app/public": not found` | `frontend/public/` must exist (it holds only a `.gitkeep`). Restore it if it was deleted. |
-| Every AI action returns 502 `OPENROUTER_API_KEY is not set` | The key is missing from the `.env` the backend actually read (repo root first, then `backend/.env`). |
+| Every AI action returns 502 `OPENROUTER_API_KEY is not set` (or `AZURE_OPENAI_API_KEY` / `AZURE_INFERENCE_ENDPOINT` …) | The credential the model ref's provider needs is missing from the `.env` the backend actually read (repo root first, then `backend/.env`). |
+| Backend log: `Configured reasoner model: azure:… has no AZURE_DEPLOYMENT_META entry` | Declare which catalogue model the deployment serves (`AZURE_DEPLOYMENT_META=<deployment>=<canonical id>`), otherwise the truncation ladder and capability guard cannot size it. |
+| 502 `azure-openai 400: … 'temperature' does not support 0.2 …` | The deployment (o-series / GPT-5 reasoning) only accepts its default temperature. Add `;temp=fixed` to its `AZURE_DEPLOYMENT_META` entry — an explicit sampling change, recorded per attempt. |
 | 502 `OpenRouter 402` or credits errors mid-stage | OpenRouter reserves credit for the full requested `max_tokens` per in-flight call; a ladder retry reserves up to `LLM_TRUNCATION_CAP` (128 000 by default, times the stage's concurrency). Top up rather than lowering budgets. |
 | Backend log: `Configured reasoner model fails the capability check` (or `fast model`) | The configured model's catalogued output cap or context window is below its profile's requirement (reasoner ≥ `LLM_MIN_MODEL_OUTPUT_CAP` = 128 000 output tokens, fast ≥ `LLM_BUDGET_MEDIUM` = 32 768). The app still starts; the truncation ladder clamps at the model's own cap and fails loudly there. Pick a model that meets ARCHITECTURE §4.1. |
 | A stage fails with `… failed validation after retry`, `… output truncated at max_tokens=…` or another LLM call error | Read the WARNING lines in the backend log and the `model_call` row for the call: `attempts_json` (per attempt: layer, requested budget, outcome, finish reasons, provider), `output_head` / `output_tail`. Set `LLM_FAILURE_DUMP_DIR` and re-run to capture the complete output of every attempt as JSON. |
 | A stage fails with `… cut by the provider's content filter (… native_finish_reason=sensitive)` | OpenRouter routed the call to a host whose content filter stopped generation on security / data-residency text. Add that provider to `OPENROUTER_PROVIDER_IGNORE` (`.env.example` already excludes `StreamLake`) or switch models. |
+| … `(azure-openai:… native_finish_reason=content_filter:violence/medium)` or `azure-openai rejected the prompt: content filter` | The Azure deployment's content-filter policy stopped the completion (or rejected the prompt). Relax the policy for that deployment in Azure AI Foundry or use another deployment; the router never parses a cut body. |
 | No `app.*` lines in the backend log | Root logging is configured from `LOG_LEVEL` (default `INFO`); uvicorn's `--log-level` covers only its own loggers. |
 | Button disabled with "… is stale" / 409 responses | Sequential workflow enforcement: re-run the named upstream step. See ARCHITECTURE §2.1. |
 | "Task lost on server restart — re-run the step" | The backend restarted (or `--reload` fired) while a job ran. Re-run; nothing is silently completed. |

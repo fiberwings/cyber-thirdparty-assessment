@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.ai.router import OpenRouterError
+from app.ai.router import LLMError
 from app.api import (
     assessments,
     document_weaknesses,
@@ -78,8 +78,8 @@ app.add_middleware(
 )
 
 
-@app.exception_handler(OpenRouterError)
-async def _openrouter_error_handler(_: Request, exc: OpenRouterError) -> JSONResponse:
+@app.exception_handler(LLMError)
+async def _llm_error_handler(_: Request, exc: LLMError) -> JSONResponse:
     status = 502
     return JSONResponse(
         status_code=status,

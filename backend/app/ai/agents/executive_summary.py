@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
-from app.ai.router import OpenRouterClient, _resolve_model, call_structured
+from app.ai.router import LLMClient, _resolve_model, call_structured
 from app.config import settings
 from app.models import Assessment
 from app.schemas.ai import ExecutiveSummaryOut
@@ -189,7 +189,7 @@ async def write(
     db: Session,
     assessment_id: int,
     *,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
 ) -> ExecutiveSummaryOut:
     """Generate and persist the executive summary for a scored assessment."""
     from app.api.scoring import _recalculate_in_session  # lazy: avoid API↔agent cycle

@@ -26,17 +26,17 @@ from app.workflow import (
     KIND_SCENARIOS,
 )
 
-from .conftest import FakeOpenRouterClient, advance_workflow, seed_running_task
+from .conftest import FakeLLMClient, advance_workflow, seed_running_task
 
 T1 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
 @pytest.fixture()
 def fake(monkeypatch, fresh_db):
-    f = FakeOpenRouterClient()
+    f = FakeLLMClient()
     import app.ai.router as router_mod
 
-    monkeypatch.setattr(router_mod, "OpenRouterClient", lambda *a, **kw: f)
+    monkeypatch.setattr(router_mod, "LLMClient", lambda *a, **kw: f)
     return f
 
 

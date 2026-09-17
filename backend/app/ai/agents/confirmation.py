@@ -23,7 +23,7 @@ from app import activity
 from app.ai.agents.gap_analysis import format_bundle, load_bundle
 from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
-from app.ai.router import OpenRouterClient, call_structured
+from app.ai.router import LLMClient, call_structured
 from app.config import settings
 from app.models import Assessment, Weakness
 from app.schemas.ai import CandidateReviewOut, MergeOut
@@ -52,7 +52,7 @@ async def confirm_candidates(
     assessment: Assessment,
     *,
     bundle_text: str,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
     on_progress: ProgressCb | None = None,
 ) -> dict[str, int]:
     """Review every candidate (status="candidate", not user-edited) against
@@ -69,7 +69,7 @@ async def confirm_candidates(
     for w in candidates:
         by_doc.setdefault(w.source_document_id, []).append(w)
 
-    from app.ai.router import OpenRouterError
+    from app.ai.router import LLMError
 
     async def decide(doc_id: int | None, doc_name: str, rows: list[Weakness]) -> list:
         """One review call for these candidates. Output truncation splits the
@@ -96,7 +96,7 @@ async def confirm_candidates(
                 max_tokens=settings.llm_budget_large,
                 client=client,
             )
-        except OpenRouterError as e:
+        except LLMError as e:
             if not e.truncated or len(rows) < 2:
                 raise
             mid = len(rows) // 2
@@ -168,7 +168,7 @@ async def merge_confirmed(
     db: Session,
     assessment: Assessment,
     *,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
 ) -> int:
     """Thin dedupe: one call over the confirmed document-origin rows; groups
     become one primary row carrying every member's quote as an evidence ref.
@@ -182,7 +182,7 @@ async def merge_confirmed(
         return 0
     by_id = {w.id: w for w in rows}
 
-    from app.ai.router import OpenRouterError
+    from app.ai.router import LLMError
 
     async def merge_call(subset: list[Weakness]) -> list:
         """One merge call; a truncated output splits the row set in half and
@@ -209,7 +209,7 @@ async def merge_confirmed(
                 max_tokens=settings.llm_budget_large,
                 client=client,
             )
-        except OpenRouterError as e:
+        except LLMError as e:
             if not e.truncated or len(subset) < 4:
                 raise
             mid = len(subset) // 2
@@ -263,7 +263,7 @@ async def review(
     db: Session,
     assessment_id: int,
     *,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
     on_progress: ProgressCb | None = None,
 ) -> dict[str, int]:
     """Confirmation then merge. Returns counts."""

@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 from app.ai import retrieval
 from app.ai.context import assessment_context_block
 from app.ai.prompts import load as load_prompt
-from app.ai.router import OpenRouterClient, OpenRouterError, call_structured
+from app.ai.router import LLMClient, LLMError, call_structured
 from app.config import settings
 from app.db import SessionLocal
 from app.models import (
@@ -436,7 +436,7 @@ async def assess_control(
     scenario: Scenario,
     control: ExpectedControl,
     *,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
 ) -> ControlAssessmentOut:
     chunks = _retrieve_for_control(db, assessment.id, control, scenario)
     known = _known_weaknesses_for_control(db, assessment.id, control.code)
@@ -724,7 +724,7 @@ async def assess_codes_with_bundle(
     bundle_text: str,
     chunk_index: dict[int, Chunk],
     groups_by_code: dict[str, list[tuple[Scenario, ExpectedControl]]],
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
     reported: list[str] | None = None,
 ) -> dict[str, ControlAssessmentOut]:
     """One whole-bundle call for a batch of codes (+ one fill call for any code
@@ -753,7 +753,7 @@ async def assess_codes_with_bundle(
                 max_tokens=settings.llm_budget_large,
                 client=client,
             )
-        except OpenRouterError as e:
+        except LLMError as e:
             if not e.truncated or len(batch) < 2:
                 raise
             # Output too large for this batch: halve it and assess each part.
@@ -789,7 +789,7 @@ async def _bundle_batch_worker(
     batch: list[str],
     bundle_text: str,
     semaphore: asyncio.Semaphore,
-    client: OpenRouterClient | None,
+    client: LLMClient | None,
     on_done,
     reported: list[str],
 ) -> list[str]:
@@ -834,7 +834,7 @@ async def run_full_bundle(
     db: Session,
     assessment: Assessment,
     *,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
     on_progress=None,
     only_failed: bool = False,
 ) -> GapAnalysisResult:
@@ -893,7 +893,7 @@ async def assess_control_any_mode(
     scenario: Scenario,
     control: ExpectedControl,
     *,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
 ) -> None:
     """Per-control (re)assessment used by the API: whole-bundle mode when the
     bundle fits (the verdict is written to every scenario expecting the code,
@@ -918,7 +918,7 @@ async def _assess_control_worker(
     scenario_id: int,
     control_id: int,
     semaphore: asyncio.Semaphore,
-    client: OpenRouterClient | None,
+    client: LLMClient | None,
     on_done,
     label: str,
 ) -> None:
@@ -1001,7 +1001,7 @@ async def run_full(
     db: Session,
     assessment: Assessment,
     *,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
     on_progress=None,
     only_failed: bool = False,
 ) -> GapAnalysisResult:
@@ -1067,8 +1067,8 @@ async def run_full(
             f"0/{total} controls assessed; every call failed. "
             f"First failure on '{first_label}': {first_err}"
         )
-        if isinstance(first_err, OpenRouterError):
-            raise OpenRouterError(
+        if isinstance(first_err, LLMError):
+            raise LLMError(
                 msg, transient=first_err.transient, upstream_code=first_err.upstream_code
             )
         raise RuntimeError(msg)

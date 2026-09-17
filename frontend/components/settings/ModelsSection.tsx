@@ -7,6 +7,14 @@ import { useWorkflow } from "@/lib/useWorkflow";
 import { STAGES, customModelCount, effectiveModel, isCustomModel, modelOptions, profileFor } from "@/lib/settings";
 import { Chip, INPUT_CLASS, SettingsRow, SettingsSection } from "./SettingsSection";
 
+// Which provider a model ref routes to, from its scheme prefix (mirrors
+// backend app/ai/providers/registry.py: bare ids are OpenRouter).
+function providerOf(ref: string): "Azure" | "Foundry" | "OpenRouter" {
+  if (ref.startsWith("azure:")) return "Azure";
+  if (ref.startsWith("foundry:")) return "Foundry";
+  return "OpenRouter";
+}
+
 // Per-stage model routing. Each change is saved immediately (the endpoint
 // validates the model's capability for the stage's profile and answers
 // 422 with a reason). Model routing is deliberately not gated on running
@@ -90,13 +98,16 @@ export function ModelsSection({ assessmentId }: { assessmentId: number }) {
               label={stage.label}
               hint={stage.profile}
               status={
-                savedKey === stage.key ? (
-                  <span className="text-xs text-emerald-700">Saved</span>
-                ) : isCustom ? (
-                  <Chip tone="amber">custom</Chip>
-                ) : (
-                  <Chip tone="muted">default</Chip>
-                )
+                <span className="inline-flex items-center gap-1">
+                  {value && providerOf(value) !== "OpenRouter" && <Chip tone="muted">{providerOf(value)}</Chip>}
+                  {savedKey === stage.key ? (
+                    <span className="text-xs text-emerald-700">Saved</span>
+                  ) : isCustom ? (
+                    <Chip tone="amber">custom</Chip>
+                  ) : (
+                    <Chip tone="muted">default</Chip>
+                  )}
+                </span>
               }
             >
               <select

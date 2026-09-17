@@ -80,6 +80,13 @@ Design rules the code enforces:
   is recorded on that `case_result` (`status`, `error_stage`, `error_detail`)
   and the batch continues. The process exit code is non-zero if anything
   failed (CI-friendly), but the run row is always written.
+- **An incomplete assessment is not a score.** The app's gap-analysis phase
+  completes *with a warning* when some controls' AI runs failed (the backend
+  lists them as `failed_targets` so an analyst can resume). The runner reads
+  that list after the stage and records the case as `error @ gap_analysis`
+  with `gap_failed_controls` set, without grading: the F1 of a report with
+  unassessed controls measures the outage (a 429 storm, a provider wobble),
+  not the model. Fix the cause (deployment TPM, provider) and re-run.
 - **Stage order: scenarios before documents.** The app's cross-correlation
   step maps extracted weaknesses onto *existing scenarios'* expected controls
   (see `backend/app/ai/agents/cross_correlation.py`), so the runner generates
@@ -398,7 +405,9 @@ under "Judge calls (raw, for audit)".
   (`running|done|partial|failed`), backend URL, app SHA/version, model config,
   judge model + prompt versions, full config, notes.
 - **`case_result`** — one row per (case, repetition): status
-  (`ok|error|judge_error`), error stage/detail, assessment id (+ whether it
+  (`ok|error|judge_error`), error stage/detail, `gap_failed_controls` (0 for
+  a scored case; the count of unassessed controls when the case was
+  invalidated at gap analysis), assessment id (+ whether it
   was deleted), timings, aggregate band/rank, TP/FP/FN,
   precision/recall/F1, severity agreement, exec subscores + overall, tokens,
   report snapshot.

@@ -1,6 +1,6 @@
 """End-to-end smoke test: exercise every API endpoint against a fake LLM.
 
-The fake LLM is wired in by monkey-patching `OpenRouterClient` inside the
+The fake LLM is wired in by monkey-patching `LLMClient` inside the
 `app.ai.router` module so every agent picks it up without any per-test plumbing.
 """
 
@@ -18,12 +18,12 @@ import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
-from .conftest import FakeOpenRouterClient
+from .conftest import FakeLLMClient
 
 
 @pytest.fixture()
 def patched_client(monkeypatch, fresh_db):
-    fake = FakeOpenRouterClient()
+    fake = FakeLLMClient()
 
     # Sufficient on first scoping turn (skip the loop)
     fake.push_json(
@@ -94,7 +94,7 @@ def patched_client(monkeypatch, fresh_db):
     fake.push_json("Residual risk Moderate. Strong encryption; adequate MFA.")
 
     import app.ai.router as router_mod
-    monkeypatch.setattr(router_mod, "OpenRouterClient", lambda *a, **kw: fake)
+    monkeypatch.setattr(router_mod, "LLMClient", lambda *a, **kw: fake)
     return fake
 
 

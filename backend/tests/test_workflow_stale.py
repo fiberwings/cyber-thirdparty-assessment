@@ -17,7 +17,7 @@ import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
-from .conftest import FakeOpenRouterClient, advance_workflow, seed_running_task
+from .conftest import FakeLLMClient, advance_workflow, seed_running_task
 
 from app.db import SessionLocal
 from app.models import Assessment, Document
@@ -30,10 +30,10 @@ UNSTAMPED = ("scoping", "evidence")
 
 @pytest.fixture()
 def fake(monkeypatch, fresh_db):
-    f = FakeOpenRouterClient()
+    f = FakeLLMClient()
     import app.ai.router as router_mod
 
-    monkeypatch.setattr(router_mod, "OpenRouterClient", lambda *a, **kw: f)
+    monkeypatch.setattr(router_mod, "LLMClient", lambda *a, **kw: f)
     return f
 
 

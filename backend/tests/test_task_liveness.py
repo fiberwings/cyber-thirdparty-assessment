@@ -17,7 +17,7 @@ import pytest
 import respx
 
 from app import activity
-from app.ai.router import OpenRouterClient
+from app.ai.router import LLMClient
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Assessment, Document, TaskRecord
@@ -124,7 +124,7 @@ async def test_streamed_call_touches_the_ambient_task(fresh_db, monkeypatch):
 
     async def job(handle):
         monkeypatch.setattr(handle, "touch", lambda: touches.append(1))
-        await OpenRouterClient(api_key="k", base_url=BASE).chat([{"role": "user", "content": "x"}], "m")
+        await LLMClient(api_key="k", base_url=BASE).chat([{"role": "user", "content": "x"}], "m")
         await gate.wait()
 
     task = registry.submit(job, kind="t")
@@ -292,7 +292,7 @@ async def test_cancel_closes_in_flight_stream_and_records_call(fresh_db):
     async def job(handle):
         with SessionLocal() as db:
             await call_structured(db, purpose="t", profile="fast", messages=[{"role": "user", "content": "x"}],
-                                  schema=_Out, client=OpenRouterClient(api_key="k", base_url=BASE))
+                                  schema=_Out, client=LLMClient(api_key="k", base_url=BASE))
 
     task = registry.submit(job, kind="t")
     await asyncio.sleep(0.1)

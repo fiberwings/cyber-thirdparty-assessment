@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from app.ai.prompts import load as load_prompt
-from app.ai.router import OpenRouterClient, call_structured
+from app.ai.router import LLMClient, call_structured
 from app.models import Assessment, DescriptionTurn, ServiceDescription
 from app.schemas.ai import ScopingTurnOut
 
@@ -33,7 +33,7 @@ async def run_turn(
     assessment: Assessment,
     user_message: str | None,
     *,
-    client: OpenRouterClient | None = None,
+    client: LLMClient | None = None,
 ) -> ScopingTurnOut:
     if assessment.description is None:
         raise ValueError("Assessment has no service_description yet.")
