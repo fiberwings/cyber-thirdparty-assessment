@@ -76,7 +76,9 @@ Models inference endpoint. Set the endpoint and API key for the surface you use
 `AZURE_DEPLOYMENT_META` (so the output-budget policy applies to the right model), then point a
 profile or a per-stage override at it, e.g. `MODEL_REASONER=azure:gpt5-prod`. Everything above
 the wire — truncation ladder, content-filter detection, retries, forensics, liveness — is shared;
-see `.env.example` for the full block and `docs/ARCHITECTURE.md` §4.1 for the details.
+see `docs/BUILD.md` §8.1 for the Azure-side setup (deployment, TPM quota, content filter,
+which URL to paste), `.env.example` for the full block and `docs/ARCHITECTURE.md` §4.1 for the
+details.
 
 ## Documentation
 

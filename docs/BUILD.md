@@ -313,6 +313,81 @@ budget and liveness policies at startup and refuses inconsistent values.
 | Liveness | `LLM_CONNECT_TIMEOUT_S`, `LLM_STREAM_IDLE_S`, `LLM_STREAM_IDLE_NO_KEEPALIVE_S`, `LLM_CONTENT_SILENCE_S`, `LLM_CALL_MAX_S`, `LLM_RETRY_AFTER_CAP_S`, `TASK_IDLE_TIMEOUT_S`, `TASK_MAX_RUNTIME_S` | 30, 180, = silence, 3600, 3600, 60, 600, 14400 | Inactivity-based; the no-keepalive tier applies to Azure streams; see ARCHITECTURE §6. |
 | Deployment | `APP_ENV`, `LLM_DEV_CACHE` | `dev`, `0` | The dev cache is refused when `APP_ENV=production`; the benchmark refuses to measure against a backend that has it on. |
 
+### 8.1 Running on Azure AI Foundry
+
+The app talks to Azure through the **chat-completions** API of an Azure OpenAI resource (or the
+Azure OpenAI surface of a Foundry resource). Everything above the wire — truncation ladder,
+content-filter detection, retries, forensics, liveness — is the same code as for OpenRouter
+(ARCHITECTURE §4.1). What has to exist on the Azure side, in order:
+
+1. **A resource with a model deployment.** Creating the resource is not enough: the chat endpoint
+   answers `404 DeploymentNotFound` until a *deployment* is added. In the Foundry portal
+   (ai.azure.com) open the resource → **Models + endpoints** / **Deployments** → **Deploy model →
+   Deploy base model**; in the Azure portal the same page is *Resource Management → Model
+   deployments → Manage Deployments*. Note the **deployment name** — that (not the model name) is
+   what goes after `azure:`.
+2. **Which model.** The reasoner profile requires a catalogue entry with ≥ 200k context and a
+   ≥ `LLM_MIN_MODEL_OUTPUT_CAP` (128k) output cap, so the GPT-5 family (`gpt-5`, `gpt-5-mini`,
+   `gpt-5.4-mini`, …) qualifies and `gpt-4o` (16k output) is refused at startup. Verified live:
+   `gpt-4o` for the wiring, `gpt-5-mini` and `gpt-5.4-mini` for full benchmark runs.
+   Deployment type *Global Standard* is fine (no regional pinning is required by the app; pick
+   *Data Zone* / *Standard* if residency matters to you).
+3. **Tokens-per-minute quota — the setting that actually decides whether a run completes.**
+   Azure admits a request by reserving its `max_completion_tokens` against the deployment's TPM,
+   and the reasoner stages request `LLM_BUDGET_LARGE` (65 536) per call with up to 4 calls in
+   flight (gap analysis, scenario detailing). A 100k-TPM deployment therefore rejects the second
+   concurrent gap-analysis call with 429 — the retry loop cannot fix that, and the run ends with
+   unassessed controls (`failed_targets`; the benchmark marks such a run invalid). Set the TPM
+   slider to **≥ 300k for the reasoner deployment; 500k was verified to run orbitclear with zero
+   429s**. If the quota tab caps you lower, request a quota increase or point only the fast
+   profile at Azure. A 429 storm is diagnosable after the fact: the WARNING and
+   `attempts_json[].transport_retries` carry the `x-ratelimit-limit-tokens` header next to the
+   reserved budget.
+4. **Content-filter policy.** Azure's filter is stricter than most OpenRouter providers and is
+   configured per deployment. Assessment evidence is security text (pen-test findings, incident
+   descriptions) and can trip *violence* / *self-harm* categories at medium severity; the router
+   never parses a cut completion, so a filtered call is a lost call
+   (`native_finish_reason=content_filter:<category>/<severity>` on the `model_call` row). If that
+   happens, create a custom content filter with a higher threshold for that deployment
+   (*Safety + security → Content filters* in Foundry) — it needs the *Modified content filters*
+   approval on some subscriptions — and attach it to the deployment.
+5. **Endpoint and key.** The portal shows the full sample URL (e.g.
+   `https://<resource>.openai.azure.com/openai/deployments/<name>/chat/completions?api-version=…`
+   or `…/openai/responses`); the app wants only the **host**:
+   `AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com` (a Foundry resource's
+   `https://<resource>.services.ai.azure.com` works too). The key is *Keys and Endpoint* → KEY 1.
+   Leave `AZURE_OPENAI_API_VERSION` empty: the app uses the versionless `/openai/v1/` path; set
+   it only if your resource still requires the legacy `/deployments/…?api-version=` path (older
+   sovereign clouds).
+6. **App configuration** (`.env`, or the environment of the process):
+
+   ```
+   AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com
+   AZURE_OPENAI_API_KEY=<key>
+   AZURE_DEPLOYMENT_META=gpt-5-mini=openai/gpt-5-mini;temp=fixed
+   MODEL_REASONER=azure:gpt-5-mini        # fast profile can stay on OpenRouter
+   ```
+
+   `AZURE_DEPLOYMENT_META` maps the deployment to a `MODEL_CAPS` entry (the deployment name says
+   nothing about the model, and the truncation ladder needs the output cap) — a profile default
+   without an entry is a startup ERROR. `temp=fixed` is required for reasoning deployments
+   (GPT-5 family, o-series), which reject the profile's `temperature=0.2` with a 400; it omits
+   the parameter, is warned at startup and recorded per attempt as `temperature_sent: null`. A
+   model missing from `MODEL_CAPS` (`backend/app/ai/router.py`) only warns; add it with the
+   context window and output cap from the Azure model page before running assessments on it.
+7. **Verify** with `backend/scripts/smoke_llm.py` (one tiny call per profile, prints dialect,
+   provider label `azure-openai:<resource>`, finish reason and usage), then run one assessment
+   and check the `model_call` rows: `cost_usd = 0` / `cost_source = ""` is expected (Azure does
+   not meter cost; tokens are exact), and every attempt should be `ok`.
+
+Things to know: Azure streams send no keepalive comments, so a reasoning deployment that thinks
+for minutes is silent on the socket — the `LLM_STREAM_IDLE_NO_KEEPALIVE_S` tier and a watchdog
+heartbeat cover that (do not lower it). Deployments propagate for up to ~5 minutes after
+creation. The `foundry:<deployment>` scheme (Foundry Models inference endpoint for DeepSeek /
+Llama / Mistral / Phi, `AZURE_INFERENCE_*`) is implemented and unit-tested against the
+documented wire format but has **not** been exercised against a live Foundry Models endpoint
+yet; an OpenAI-family deployment on a Foundry resource should use `azure:` regardless.
+
 ---
 
 ## 9. Troubleshooting
